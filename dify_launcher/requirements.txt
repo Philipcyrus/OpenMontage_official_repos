@@ -1,0 +1,4 @@
+# Dify launcher — HTTP bridge to the OpenMontage agent
+fastapi>=0.110
+uvicorn[standard]>=0.27
+# render dependency (folded montage-svc): pillow + ffmpeg on PATH (see engine requirements)

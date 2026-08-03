@@ -1,0 +1,62 @@
+# SCAFFOLD — governs the LOOK OF GENERATED IMAGERY only (stills/clips).
+# The logo, CJK captions, cards, and grade OVERLAYS live in montage-svc, NOT here.
+# Modeled on styles/premium-minimalist.yaml; validate against schemas/styles/playbook.schema.json.
+
+identity:
+  name: "Panda Mobile"
+  category: brand-mascot
+  mood: friendly, bright, trustworthy, playful-but-clean
+  pace: brisk
+  best_for: "Panda Mobile eSIM/travel explainers, UGC 避坑 tips, brand ads"
+
+taste_profile:
+  design_read: "Warm, approachable brand mascot content: clear, cheerful, uncluttered."
+  visual_variance: 4
+  motion_intensity: 4
+  information_density: 4
+  palette_discipline: "Panda black + signature yellow accent; clean backgrounds; no muddy gradients."
+  reference_strategy: "Generate one on-brand reference still per scene family; reuse the panda master ref for consistency."
+  anti_patterns:
+    - "off-brand mascot proportions or colors"
+    - "cluttered, busy frames that bury the panda"
+    - "photoreal panda (this is a cartoon mascot)"
+  quality_gates:
+    - "Panda mascot is on-model and consistent across every still."
+    - "Signature yellow used for emphasis, not everywhere."
+
+visual_language:
+  color_palette:
+    primary: ["#000000", "#1a1a1a"]
+    accent: ["#fdc50d"]
+    background: "#FFFFFF"
+    text: "#000000"
+    muted: "#6B7280"
+  composition: clean, centered-to-editorial, generous negative space, mascot as focal point
+  texture: flat, bright, matte fields
+
+typography:
+  # NOTE: on-screen captions are rendered by montage-svc (CJK-safe). This block only guides
+  # any text baked into GENERATED imagery — keep it minimal.
+  headings:
+    font: "TODO — confirm brand font (see memory panda-mobile-brand-assets)"
+    weight: 800
+  body:
+    font: "TODO"
+    weight: 400
+
+asset_generation:
+  image_prompt_prefix: "bright friendly Panda Mobile brand frame, clean cartoon panda mascot on model, signature yellow accent, generous negative space, "
+  image_negative_prompt: "photoreal panda, off-model, cluttered, muddy gradient, neon overload, low contrast"
+  consistency_anchors:
+    - "Panda mascot on-model per config/panda-elements.json master ref"
+    - "Black + signature yellow (#fdc50d) brand palette"
+    - "Clean bright background, one clear focal subject"
+
+quality_rules:
+  - "Panda mascot must match the master character reference in every scene"
+  - "Signature yellow is an accent, not a fill"
+  - "Keep frames clean — one clear subject per still"
+
+color_rules:
+  contrast_validation: true
+  colorblind_safe: true

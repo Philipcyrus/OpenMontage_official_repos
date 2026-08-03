@@ -1,0 +1,140 @@
+name: panda-video
+version: "0.1"
+description: >
+  Panda Mobile video pipeline. Agent-driven production with three human-approval gates
+  (script, storyboard stills, final video). Generation runs through the Higgsfield MCP
+  bridge + ElevenLabs; the compose stage produces a CLEAN (unbranded) master via the folded
+  montage-svc render code (tool: panda_render). Panda branding (logo/watermark/cards) is
+  applied ONLY on explicit user request AFTER approval, via the standalone panda_brand tool
+  — never baked into the pipeline.
+category: hybrid
+stability: beta                   # schema allows only production|beta
+default_checkpoint_policy: guided
+
+orchestration:
+  mode: executive-producer
+  # TODO: create pipelines/panda-video/executive-producer, or point at hybrid's for the
+  # first prove-the-hinge run.
+  skill: pipelines/hybrid/executive-producer
+  budget_default_usd: 3.00
+  max_revisions_per_stage: 3
+  max_send_backs: 3
+  max_wall_time_minutes: 15
+
+extensions:
+  custom_scripts: true
+  custom_playbooks: true
+  custom_skills: true
+  custom_tools: true               # we add montage_svc_compose + the higgsfield_mcp bridge
+
+required_skills:
+  # TODO: for stages we don't customize yet, these reuse hybrid's directors. Copy/adapt
+  # into pipelines/panda-video/ as we specialize each stage.
+  - pipelines/hybrid/executive-producer
+  - pipelines/hybrid/idea-director
+  - pipelines/hybrid/script-director
+  - pipelines/panda-video/storyboard-director   # OUR custom stills-then-gate skill
+  - pipelines/hybrid/asset-director
+  - pipelines/hybrid/edit-director
+  - pipelines/hybrid/compose-director
+  - meta/higgsfield-mcp-bridge                   # OUR bridge protocol (ported from OpenMontage-main)
+  - meta/reviewer
+  - meta/checkpoint-protocol
+
+compatible_playbooks:
+  recommended:
+    - panda
+  custom_allowed: true
+
+stages:
+  # ---- research / proposal : internal, NO gate ----
+  - name: idea
+    skill: pipelines/hybrid/idea-director
+    produces:
+      - brief
+      - decision_log
+    tools_available: []
+    checkpoint_required: true
+    human_approval_default: false
+
+  # ---- GATE 1 : approve script ----
+  - name: script
+    skill: pipelines/hybrid/script-director
+    required_artifacts_in:
+      - brief
+    produces:
+      - script
+    tools_available: []
+    checkpoint_required: true
+    human_approval_default: true       # 🚦 GATE 1
+    review_focus:
+      - Narrative, timing, and voice cues match the brief
+      - Runtime is realistic for the platform
+
+  # ---- GATE 2 : approve storyboard stills (one still per scene) ----
+  - name: scene_plan
+    skill: pipelines/panda-video/storyboard-director
+    required_artifacts_in:
+      - script
+    produces:
+      - scene_plan          # includes one keyframe still per scene + a contact sheet
+    tools_available:
+      - image_selector
+      # TODO: confirm the still-generation tool name(s) available in this base
+    checkpoint_required: true
+    human_approval_default: true       # 🚦 GATE 2
+    review_focus:
+      - One approved still exists per scene
+      - Stills are on-brand (see styles/panda.yaml) and character-consistent
+
+  # ---- produce clips + voice from APPROVED stills ----
+  - name: assets
+    skill: pipelines/hybrid/asset-director
+    required_artifacts_in:
+      - scene_plan
+    produces:
+      - asset_manifest
+    tools_available:
+      - higgsfield_mcp_video     # OUR MCP bridge (image_to_video from approved stills)
+      - seedance_video
+      - elevenlabs_tts
+      - image_selector
+    checkpoint_required: true
+    human_approval_default: true       # 🚦 GATE 3 (approve the generated clips)
+    review_focus:
+      - Every generated motion clip is acceptable (motion coherence, on-brand, on-model)
+      - Reviewer can approve the set or request revision of specific shots (regenerate only those)
+
+  # ---- edit decisions : NO gate ----
+  - name: edit
+    skill: pipelines/hybrid/edit-director
+    required_artifacts_in:
+      - scene_plan
+      - asset_manifest
+    produces:
+      - edit_decisions
+    tools_available: []
+    checkpoint_required: true
+    human_approval_default: false
+
+  # ---- compose : CLEAN render (no branding) via folded montage-svc code ----
+  - name: compose
+    skill: pipelines/hybrid/compose-director
+    required_artifacts_in:
+      - edit_decisions
+      - asset_manifest
+    produces:
+      - render_report
+      - final_review
+    required_tools:
+      - panda_render        # folded montage-svc render (in-process). CLEAN/ugc profile.
+    tools_available:
+      - panda_render
+    checkpoint_required: true
+    human_approval_default: true       # 🚦 GATE 4 (approve the finished video)
+    review_focus:
+      - Clean master is correct (assembly, captions, audio, grade) — NO branding yet
+      - final.mp4 exists and passes ffprobe
+    # NOTE: branding is NOT applied here. The Panda logo/watermark/cards are added ONLY on
+    # explicit user request AFTER this video is approved, via the standalone panda_brand tool
+    # (an /overlay-style pass on the approved master). See memory openmontage-render-fold-and-branding.

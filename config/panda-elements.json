@@ -1,0 +1,32 @@
+{
+  "_comment": "SCAFFOLD — Panda brand wiring the agent reads alongside skills/meta/higgsfield-mcp-bridge.md. Fill in the real Higgsfield element/character ids. Keys/secrets do NOT go here — env only.",
+  "brand": {
+    "name": "Panda Mobile",
+    "colors": { "black": "#000000", "yellow": "#fdc50d" },
+    "notes": "See memory: panda-mobile-brand-assets for exact logo/mascot paths, fonts."
+  },
+  "character_references": {
+    "_note": "Local hero turnaround sheets (multi-view) used as the master references for character consistency across stills/clips. 6336x2688 RGB.",
+    "panda_mascot": {
+      "turnaround": "brand/panda-mobile/mascot/Panda-Mobile-Smiling-Hero-Turnaround-v1.png",
+      "also": "brand/panda-mobile/mascot/Panda Mascot.png",
+      "views_dir": "brand/panda-mobile/mascot/views/"
+    },
+    "customer": {
+      "turnaround": "brand/panda-mobile/customer/Customer-V3-Hero-Turnaround-v1.png"
+    }
+  },
+  "higgsfield": {
+    "_note": "Element / character ids used to keep the panda + customer consistent across stills and clips. Confirm live via MCP show_reference_elements / show_characters. Seed these from the local turnaround sheets above.",
+    "panda_master_character_id": "TODO",
+    "panda_reference_element_ids": ["TODO"],
+    "customer_master_character_id": "TODO",
+    "customer_reference_element_ids": ["TODO"],
+    "student_ugc_element_id": "TODO — reusable id noted in memory panda-airport-arrival-ugc",
+    "default_model_identity": "seedance_2_0"
+  },
+  "montage_svc": {
+    "profiles": ["bgc", "ugc"],
+    "default_profile": "bgc"
+  }
+}

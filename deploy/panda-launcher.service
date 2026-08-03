@@ -1,0 +1,19 @@
+[Unit]
+Description=Panda AI - Dify Launcher (OpenMontage engine front door)
+After=network.target
+
+[Service]
+# Adjust User + paths to your box. Assumes clone at /opt/panda/OpenMontage-prod.
+User=ec2-user
+WorkingDirectory=/opt/panda/OpenMontage-prod
+EnvironmentFile=/opt/panda/OpenMontage-prod/.env
+# Runs on 8501 — the port dev.om.mvnoc.ai already forwards to (replacing montage-svc).
+# Proxy points root -> 8501, so the launcher serves at root: no --root-path needed.
+# STOP montage-svc first so 8501 is free (see deploy/README.md).
+ExecStart=/opt/panda/OpenMontage-prod/.venv/bin/uvicorn dify_launcher.app:app \
+    --host 127.0.0.1 --port 8501
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

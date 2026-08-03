@@ -1,0 +1,8 @@
+# Minimal deps to run the Dify launcher + the folded render (mock runner).
+# The FULL agent (real ClaudeCodeRunner: all tools) additionally needs the engine's
+# top-level requirements.txt + Claude Code + the MCP servers.
+fastapi>=0.110
+uvicorn[standard]>=0.27
+pydantic>=2.6
+pillow>=10.0
+# ffmpeg + ffprobe must be on PATH (installed by install.sh)

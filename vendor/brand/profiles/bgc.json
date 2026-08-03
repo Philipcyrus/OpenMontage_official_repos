@@ -1,0 +1,159 @@
+{
+  "name": "bgc",
+  "description": "Brand-governed content: logo watermark, brand colors, official cards.",
+  "font_cjk": "msyhbd.ttc",
+  "font_latin": "msyhbd.ttc",
+  "grade_default": "warm",
+  "caption": {
+    "zh_size": 56,
+    "en_size": 40,
+    "zh_color": [
+      253,
+      197,
+      13,
+      255
+    ],
+    "en_color": [
+      255,
+      255,
+      255,
+      255
+    ],
+    "gap": 14,
+    "bottom_margin": 180,
+    "max_width_frac": 0.93,
+    "scrim": {
+      "enabled": true,
+      "color": [
+        0,
+        0,
+        0,
+        150
+      ],
+      "radius": 34,
+      "pad_x": 46,
+      "pad_y": 34
+    },
+    "stroke": {
+      "enabled": false,
+      "color": [
+        0,
+        0,
+        0,
+        255
+      ],
+      "width": 0
+    }
+  },
+  "bubble": {
+    "title_size": 30,
+    "value_size": 46,
+    "accent": [
+      216,
+      50,
+      50,
+      255
+    ],
+    "card": [
+      255,
+      255,
+      255,
+      255
+    ],
+    "title_color": [
+      90,
+      90,
+      90,
+      255
+    ],
+    "value_color": [
+      17,
+      17,
+      17,
+      255
+    ]
+  },
+  "callout": {
+    "size": 40,
+    "color": [
+      17,
+      17,
+      17,
+      255
+    ],
+    "bg": [
+      253,
+      197,
+      13,
+      255
+    ],
+    "radius": 26,
+    "pad_x": 40,
+    "pad_y": 24
+  },
+  "logo": {
+    "enabled": true,
+    "image": "panda-mobile/logo/hires/PandaLogoBlack_6x.png",
+    "width": 300,
+    "position": "top-right",
+    "margin_x": 40,
+    "margin_y": 70,
+    "opacity": 1.0,
+    "pill": {
+      "enabled": true,
+      "color": [
+        0,
+        0,
+        0,
+        120
+      ],
+      "pad": 22
+    }
+  },
+  "cards": {
+    "enabled": true,
+    "bg": [
+      255,
+      255,
+      255,
+      255
+    ],
+    "logo_image": "panda-mobile/logo/hires/PandaLogoWhite_6x.png",
+    "logo_width": 540,
+    "accent": [
+      253,
+      197,
+      13,
+      255
+    ],
+    "title_size": 60,
+    "subtitle_size": 42,
+    "cta_size": 48,
+    "title_color": [
+      17,
+      17,
+      17,
+      255
+    ],
+    "subtitle_color": [
+      90,
+      90,
+      90,
+      255
+    ],
+    "cta_bg": [
+      17,
+      17,
+      17,
+      255
+    ],
+    "cta_color": [
+      253,
+      197,
+      13,
+      255
+    ],
+    "intro_duration_s": 2.0,
+    "outro_duration_s": 2.5
+  }
+}

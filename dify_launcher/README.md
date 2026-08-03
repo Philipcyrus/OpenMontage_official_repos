@@ -1,0 +1,69 @@
+# Dify Launcher
+
+The **HTTP service Dify talks to.** The OpenMontage engine is not a service — it's an agent
+that runs per job. This launcher starts/resumes agent runs and surfaces the three approval
+gates so Dify can show them to the user and collect responses. Storage is **local** (a folder
+per job); no S3/Postgres (Phase 5 deferred).
+
+```
+Dify ──HTTP──▶ Dify Launcher ──▶ runner ──▶ agent/pipeline ──▶ local artifacts
+                    ▲                 │
+                    └── awaiting_human at each gate ──┘
+```
+
+## Endpoints
+| Method | Path | Purpose |
+|---|---|---|
+| GET  | `/health` | liveness + which runner is active |
+| POST | `/jobs` | start a run from `{brief, profile?, options?}` → stops at GATE 1 |
+| GET  | `/jobs/{id}` | current `{status, stage, gate, question, artifacts}` |
+| POST | `/jobs/{id}/respond` | `{decision: approve\|revise, answer?, stills?}` → resume to next gate |
+| GET  | `/jobs/{id}/artifacts/{name}` | download a script / still / final.mp4 |
+
+**Gate sequence** (matches `pipeline_defs/panda-video.yaml`):
+`start → approve_script → approve_storyboard → approve_clips → approve_final → done`.
+Branding is **not** a gate — it's an on-demand step after `approve_final`.
+
+At the storyboard gate, Dify may pass user-supplied stills:
+`POST /jobs/{id}/respond {"decision":"approve","stills":["/path/a.png","/path/b.png"]}`.
+
+At the **clips** gate, every generated shot is reviewed together; revise specific shots:
+`POST /jobs/{id}/respond {"decision":"revise","shots":[1,4]}` regenerates only those.
+
+## Runners (env `DIFY_RUNNER`)
+- **`mock`** (default) — no LLM, no Higgsfield. Fakes script + storyboard and REALLY renders a
+  clean master via the folded `panda_render`. Lets you test the whole Dify handshake locally.
+- **`claude`** — the EC2 path (implemented in `runner.py`). Each start/resume runs Claude Code
+  headless (`claude -p`) against the engine repo; OpenMontage's checkpoint-based resume means
+  every leg reads the latest checkpoint and continues to the next gate. The runner maps
+  checkpoints → gates and mirrors artifacts into the job store. Needs `claude` + OpenRouter env
+  + the Higgsfield MCP on the box. Config: `CLAUDE_BIN`, `CLAUDE_EXTRA_ARGS`, `CLAUDE_TIMEOUT_S`,
+  `PANDA_PIPELINE_TYPE`, `OPENMONTAGE_PROJECTS_DIR` (see `.env.example`).
+  **Verify on the box:** exact `claude` flags, the agent's stop-at-gate behavior, and the
+  artifact key/paths the panda-video skills emit (see `_mirror_artifacts`).
+
+## Tests
+- `python dify_launcher/test_dify_flow.py` — full 4-gate handshake on the mock runner (real render)
+- `python dify_launcher/test_claude_adapter.py` — the claude runner's checkpoint adapter
+  (gate mapping, artifact mirroring, sync, approval) against the real `lib/checkpoint`
+
+## Run it
+```bash
+pip install -r dify_launcher/requirements.txt
+# local test (no server, no LLM): full gate flow + a real render
+python dify_launcher/test_dify_flow.py
+# serve for Dify to call:
+DIFY_RUNNER=mock uvicorn dify_launcher.app:app --host 0.0.0.0 --port 8600
+```
+
+## Config (env)
+- `DIFY_RUNNER` — `mock` (default) | `claude`
+- `DIFY_DATA_DIR` — job storage root (default `./data`; `data/jobs/` is gitignored)
+- `DIFY_TOKEN` — optional shared secret; if set, callers must send `X-Dify-Token`
+
+## Connecting Dify
+Point Dify's HTTP/tool nodes at this service's base URL:
+1. **Start** → `POST /jobs` with the brief; show `question` + the `script` artifact.
+2. On user approve/revise → `POST /jobs/{id}/respond`; repeat for storyboard, then final.
+3. Render the `final` artifact inline; on approve the job is `done`.
+4. (Later) a `POST /jobs/{id}/brand` step will apply Panda branding on request (panda_brand).
