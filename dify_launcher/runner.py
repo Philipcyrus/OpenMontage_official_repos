@@ -434,16 +434,33 @@ class ClaudeCodeRunner(Runner):
         options = options or {}
         lang = str(options.get("language", "en")).lower()
         narrator = str(options.get("narrator", "panda")).lower()
+        voice_id = options.get("voice_id")            # explicit override from Dify
+        music = options.get("music", True)            # BGM: mood string, True (default bed), or False
+
+        if voice_id:
+            voice_line = (f"VOICE — use ElevenLabs voice_id='{voice_id}' (explicit override from "
+                          "the job). ")
+        else:
+            voice_line = ("VOICE — use ElevenLabs with the voice_id from config/panda-elements.json "
+                          f"`voices` matching narrator='{narrator}' and language='{lang}'. ")
+        voice_line += ("Only if ElevenLabs is truly unavailable, fall back to Higgsfield audio and "
+                       "record that decision.")
+
+        if music is False or str(music).lower() in ("false", "none", "no", "off"):
+            music_line = "MUSIC — do NOT add a background music bed for this job."
+        else:
+            mood = "" if music is True else f" Mood/brief: {music}."
+            music_line = ("MUSIC — add a background music bed via the `music_gen` tool "
+                          f"(ElevenLabs Music, same ELEVENLABS_API_KEY).{mood} Keep it under the VO.")
+
         return (
             f"Run the `{_PIPELINE_TYPE}` pipeline to produce a video.\n"
             f"project_id: {job_id}\nBrief: {brief}\n"
             f"language: {lang}    narrator: {narrator}\n\n"
             "BRAND — MANDATORY, do NOT improvise: read config/panda-elements.json and USE its "
             "Higgsfield reference Element IDs for character consistency — the panda Element for "
-            "every panda shot, the customer Element for the customer. Never invent a new panda. "
-            "VOICE — use ElevenLabs with the voice_id from config/panda-elements.json `voices` "
-            f"matching narrator='{narrator}' and language='{lang}'. Only if ElevenLabs is truly "
-            "unavailable, fall back to Higgsfield audio and record that decision.\n\n"
+            "every panda shot, the customer Element for the customer. Never invent a new panda.\n"
+            f"{voice_line}\n{music_line}\n\n"
             "Follow AGENT_GUIDE.md and skills/meta/checkpoint-protocol.md. Execute stages in "
             "order. At every stage whose manifest sets human_approval_default: true, write the "
             "checkpoint with status='awaiting_human' and STOP (end your turn) — do NOT "

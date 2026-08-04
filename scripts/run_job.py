@@ -76,6 +76,14 @@ def main() -> None:
                 opts["language"] = rest[i + 1].lower(); i += 2
             elif a == "--narrator" and i + 1 < len(rest):
                 opts["narrator"] = rest[i + 1].lower(); i += 2
+            elif a == "--voice-id" and i + 1 < len(rest):
+                opts["voice_id"] = rest[i + 1]; i += 2
+            elif a == "--music" and i + 1 < len(rest):
+                v = rest[i + 1]
+                opts["music"] = False if v.lower() in ("false", "off", "none", "no") else v
+                i += 2
+            elif a == "--no-music":
+                opts["music"] = False; i += 1
             else:
                 brief_parts.append(a); i += 1
         brief = " ".join(brief_parts) or "Panda video"
