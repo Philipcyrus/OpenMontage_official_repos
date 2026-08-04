@@ -299,59 +299,87 @@ class ClaudeCodeRunner(Runner):
         return state
 
     def _mirror_artifacts(self, job_id: str, artifacts: dict[str, Any]) -> dict[str, Any]:
-        """Copy file-path artifacts from the project into the launcher store and group them
-        by kind so Dify can render them. VERIFY on the box: align the grouping with the
-        exact artifact keys/paths the panda-video skills emit."""
-        store.ensure_job(job_id)
-        out: dict[str, Any] = {}
-        stills: list[str] = []
-        clips: list[str] = []
-        final: Optional[str] = None
+        """Copy the job's artifact files into the launcher store, grouped by kind for Dify.
 
-        def _copy(src: str) -> Optional[str]:
-            # Checkpoint artifacts mix real file paths with free-text notes (e.g. the agent
-            # explaining how a stage was done). Only treat plausibly-path-like strings as files:
-            # skip anything with a newline or longer than a filesystem name limit, and swallow
-            # OSError so an over-long/odd string can't crash mirroring (ENAMETOOLONG).
-            if not src or "\n" in src or len(src) > 400:
-                return None
-            p = Path(src)
-            if not p.is_absolute():
-                p = self._projects_dir / job_id / src
+        Real panda-video checkpoints describe assets in rich structured text — filenames are
+        embedded in prose (e.g. "...keyframe for the Hook beat: scene-1.png"), NOT exposed as
+        clean path fields — so walking checkpoint strings misses them. Instead mirror by
+        scanning the engine's CANONICAL project layout on disk, which init_project always
+        creates: assets/images -> stills, assets/video -> clips, renders -> final. We ALSO
+        merge any explicit file paths the checkpoint does contain (by basename), so a pipeline
+        that emits real paths still works. Raw checkpoint data stays under _checkpoint_artifacts.
+        """
+        store.ensure_job(job_id)
+        proj = self._projects_dir / job_id
+        out: dict[str, Any] = {}
+        seen: set[str] = set()
+
+        def _copy(p: Path) -> Optional[str]:
             try:
                 if not p.is_file():
                     return None
             except OSError:
                 return None
-            dst = store.artifact_path(job_id, p.name)
-            dst.write_bytes(p.read_bytes())
-            return dst.name
+            if p.name not in seen:
+                store.artifact_path(job_id, p.name).write_bytes(p.read_bytes())
+                seen.add(p.name)
+            return p.name
 
-        def _walk(v: Any) -> list[str]:
-            names: list[str] = []
+        def _scan(d: Path, exts: tuple[str, ...]) -> list[Path]:
+            if not d.is_dir():
+                return []
+            return sorted(p for p in d.iterdir()
+                          if p.is_file() and p.suffix.lower() in exts
+                          and not p.name.startswith("_"))
+
+        # explicit file paths embedded in the checkpoint (guarded against free text)
+        def _paths_in(v: Any) -> list[Path]:
+            found: list[Path] = []
             if isinstance(v, str):
-                n = _copy(v)
-                if n:
-                    names.append(n)
+                if v and "\n" not in v and len(v) <= 400:
+                    p = Path(v) if Path(v).is_absolute() else proj / v
+                    try:
+                        if p.is_file():
+                            found.append(p)
+                    except OSError:
+                        pass
             elif isinstance(v, dict):
                 for vv in v.values():
-                    names += _walk(vv)
+                    found += _paths_in(vv)
             elif isinstance(v, list):
                 for vv in v:
-                    names += _walk(vv)
-            return names
+                    found += _paths_in(vv)
+            return found
 
-        for name in _walk(artifacts):
-            low = name.lower()
-            if low.endswith((".png", ".jpg", ".jpeg")):
-                stills.append(name)
-            elif low.endswith(".mp4"):
-                if "final" in low or "render" in low:
-                    final = name
-                else:
-                    clips.append(name)
-            elif low.endswith(".md"):
-                out["script"] = name
+        # a storyboard contact sheet is a review aid, not a scene still — keep it out of stills
+        imgs = [p for p in _scan(proj / "assets" / "images", (".png", ".jpg", ".jpeg"))
+                if "contact" not in p.name.lower() and "sheet" not in p.name.lower()]
+        vids = _scan(proj / "assets" / "video", (".mp4", ".mov", ".webm"))
+        renders = _scan(proj / "renders", (".mp4", ".mov"))
+
+        for p in _paths_in(artifacts):
+            ext = p.suffix.lower()
+            if ext in (".png", ".jpg", ".jpeg") and p not in imgs:
+                imgs.append(p)
+            elif ext in (".mp4", ".mov", ".webm"):
+                if p.parent.name == "renders" or "final" in p.name.lower():
+                    if p not in renders:
+                        renders.append(p)
+                elif p not in vids:
+                    vids.append(p)
+
+        stills = [n for n in (_copy(p) for p in imgs) if n]
+        clips = [n for n in (_copy(p) for p in vids) if n]
+        final = None
+        if renders:
+            pref = [p for p in renders if "final" in p.name.lower()] or renders
+            final = _copy(pref[-1])
+
+        md = _scan(proj / "artifacts", (".md",))
+        if md:
+            n = _copy(md[-1])
+            if n:
+                out["script"] = n
         if stills:
             out["stills"] = stills
         if clips:
