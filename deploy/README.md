@@ -33,6 +33,39 @@ curl -s -H "X-Dify-Token: <token>" https://dev.om.mvnoc.ai/health
 #   -> {"status":"ok","runner":"mock"}
 ```
 
+## Operating the launcher (start / stop / restart)
+
+The launcher loads its **code and `.env` at startup**, so you MUST restart it after ANY of:
+code change, `git pull`, or editing `.env` (e.g. `DIFY_RUNNER=mock` → `claude`, or the token).
+
+Actual clone path on the current box: `~/OpenMontage-Repos/OpenMontage_official_repos`.
+
+**nohup (dev / manual):**
+```bash
+cd ~/OpenMontage-Repos/OpenMontage_official_repos
+
+# stop
+pkill -f "uvicorn dify_launcher"
+
+# start (loads .env, since plain uvicorn does NOT auto-read it)
+# --host 0.0.0.0 so the reverse proxy (separate namespace) can reach it.
+# SECURITY: the EC2 security group MUST restrict inbound 8501 to the proxy only.
+set -a; source .env; set +a
+nohup .venv/bin/uvicorn dify_launcher.app:app --host 0.0.0.0 --port 8501 > ~/panda-launcher.log 2>&1 &
+
+# verify + watch log
+curl -s -H "X-Dify-Token: $DIFY_TOKEN" http://127.0.0.1:8501/health
+tail -f ~/panda-launcher.log
+```
+Restart = stop then start. Switch runner: edit `DIFY_RUNNER` in `.env`, then restart.
+
+**systemd (production):**
+```bash
+sudo systemctl restart panda-launcher     # after code/.env change
+sudo systemctl status  panda-launcher --no-pager
+journalctl -u panda-launcher -f           # live logs
+```
+
 ## Then connect Dify
 Point Dify at the base URL and follow `dify_launcher/DIFY_INTEGRATION.md`:
 - `BASE_URL = https://dev.om.mvnoc.ai`   (root — proxy already forwards to 8501)
@@ -48,6 +81,6 @@ Point Dify at the base URL and follow `dify_launcher/DIFY_INTEGRATION.md`:
 | file | purpose |
 |---|---|
 | `install.sh` | system deps + venv + launcher deps + import/render smoke test |
-| `panda-launcher.service` | systemd unit (uvicorn on 127.0.0.1:8600) |
+| `panda-launcher.service` | systemd unit (uvicorn on 127.0.0.1:8501) |
 | `nginx-panda.conf` | reverse-proxy block (subpath or subdomain) |
 | `requirements-launcher.txt` | minimal deps for launcher + render (mock) |

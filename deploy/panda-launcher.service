@@ -10,8 +10,11 @@ EnvironmentFile=/opt/panda/OpenMontage-prod/.env
 # Runs on 8501 — the port dev.om.mvnoc.ai already forwards to (replacing montage-svc).
 # Proxy points root -> 8501, so the launcher serves at root: no --root-path needed.
 # STOP montage-svc first so 8501 is free (see deploy/README.md).
+# --host 0.0.0.0 so a reverse proxy in another namespace/container can reach it.
+# SECURITY: the EC2 security group MUST restrict inbound 8501 to the proxy only
+# (never 0.0.0.0/0) — binding all interfaces exposes the port otherwise.
 ExecStart=/opt/panda/OpenMontage-prod/.venv/bin/uvicorn dify_launcher.app:app \
-    --host 127.0.0.1 --port 8501
+    --host 0.0.0.0 --port 8501
 Restart=always
 RestartSec=3
 
