@@ -309,10 +309,19 @@ class ClaudeCodeRunner(Runner):
         final: Optional[str] = None
 
         def _copy(src: str) -> Optional[str]:
+            # Checkpoint artifacts mix real file paths with free-text notes (e.g. the agent
+            # explaining how a stage was done). Only treat plausibly-path-like strings as files:
+            # skip anything with a newline or longer than a filesystem name limit, and swallow
+            # OSError so an over-long/odd string can't crash mirroring (ENAMETOOLONG).
+            if not src or "\n" in src or len(src) > 400:
+                return None
             p = Path(src)
             if not p.is_absolute():
                 p = self._projects_dir / job_id / src
-            if not p.is_file():
+            try:
+                if not p.is_file():
+                    return None
+            except OSError:
                 return None
             dst = store.artifact_path(job_id, p.name)
             dst.write_bytes(p.read_bytes())
