@@ -246,15 +246,20 @@ class ClaudeCodeRunner(Runner):
         from lib import checkpoint as cp
         cp.init_project(job_id, title=(state.get("brief") or "Panda video")[:80],
                         pipeline_type=_PIPELINE_TYPE)
-        self._run_agent(self._start_prompt(job_id, state.get("brief", "")))
+        self._run_agent(self._start_prompt(job_id, state.get("brief", ""), state.get("options") or {}))
         return self._sync(state)
 
     def resume(self, state: dict[str, Any], response: dict[str, Any]) -> dict[str, Any]:
         job_id = state["job_id"]
+        from lib import checkpoint as cp
         decision = (response or {}).get("decision", "approve")
         stage = self._gate_stage(state.get("gate"))
         if decision == "approve":
             self._approve_stage(job_id, stage)
+            # Approving the LAST gate finishes the job — there is no next stage to run, so do
+            # NOT spin up a pointless agent turn; just report done.
+            if cp.get_next_stage(self._projects_dir, job_id, _PIPELINE_TYPE) is None:
+                return self._sync(state)
             prompt = self._continue_prompt(job_id)
         else:
             prompt = self._revise_prompt(job_id, stage, response or {})
@@ -262,15 +267,32 @@ class ClaudeCodeRunner(Runner):
         return self._sync(state)
 
     # -- agent invocation ---------------------------------------------------
+    _TRANSIENT = ("connection closed", "api error", "overloaded", "rate limit",
+                  "timeout", "timed out", " 500", " 502", " 503", " 529")
+
     def _run_agent(self, prompt: str) -> None:
+        """Run `claude -p` once per leg. Retries on TRANSIENT API/network errors (a dropped
+        connection shouldn't kill a long leg); the agent resumes from the latest checkpoint,
+        so re-running the same prompt is safe."""
         import subprocess
-        cmd = [self._bin, "-p", prompt, *self._extra]
-        proc = subprocess.run(
-            cmd, cwd=str(_ENGINE_ROOT), capture_output=True, text=True, timeout=self._timeout,
-        )
-        if proc.returncode != 0:
-            tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-8:]
-            raise RuntimeError(f"claude exited {proc.returncode}: " + " | ".join(tail))
+        import time
+        attempts = int(os.environ.get("CLAUDE_MAX_ATTEMPTS", "3"))
+        last = ""
+        for i in range(attempts):
+            proc = subprocess.run(
+                [self._bin, "-p", prompt, *self._extra],
+                cwd=str(_ENGINE_ROOT), capture_output=True, text=True, timeout=self._timeout,
+            )
+            if proc.returncode == 0:
+                return
+            last = (proc.stderr or proc.stdout or "").strip()
+            low = last.lower()
+            transient = any(s in low for s in self._TRANSIENT)
+            if not transient or i == attempts - 1:
+                break
+            time.sleep(3 * (i + 1))  # brief backoff, then let the agent resume from checkpoint
+        tail = last.splitlines()[-8:]
+        raise RuntimeError("claude failed: " + " | ".join(tail))
 
     # -- checkpoint <-> launcher state --------------------------------------
     def _sync(self, state: dict[str, Any]) -> dict[str, Any]:
@@ -408,14 +430,24 @@ class ClaudeCodeRunner(Runner):
             human_approval_required=True, human_approved=True,
         )
 
-    def _start_prompt(self, job_id: str, brief: str) -> str:
+    def _start_prompt(self, job_id: str, brief: str, options: Optional[dict[str, Any]] = None) -> str:
+        options = options or {}
+        lang = str(options.get("language", "en")).lower()
+        narrator = str(options.get("narrator", "panda")).lower()
         return (
             f"Run the `{_PIPELINE_TYPE}` pipeline to produce a video.\n"
-            f"project_id: {job_id}\nBrief: {brief}\n\n"
+            f"project_id: {job_id}\nBrief: {brief}\n"
+            f"language: {lang}    narrator: {narrator}\n\n"
+            "BRAND — MANDATORY, do NOT improvise: read config/panda-elements.json and USE its "
+            "Higgsfield reference Element IDs for character consistency — the panda Element for "
+            "every panda shot, the customer Element for the customer. Never invent a new panda. "
+            "VOICE — use ElevenLabs with the voice_id from config/panda-elements.json `voices` "
+            f"matching narrator='{narrator}' and language='{lang}'. Only if ElevenLabs is truly "
+            "unavailable, fall back to Higgsfield audio and record that decision.\n\n"
             "Follow AGENT_GUIDE.md and skills/meta/checkpoint-protocol.md. Execute stages in "
             "order. At every stage whose manifest sets human_approval_default: true, write the "
             "checkpoint with status='awaiting_human' and STOP (end your turn) — do NOT "
-            "self-approve. Generate video via the Higgsfield MCP bridge "
+            "self-approve. Generate imagery/video via the Higgsfield MCP bridge "
             "(skills/meta/higgsfield-mcp-bridge.md) and compose with the `panda_render` tool. "
             "Stop at the first gate."
         )

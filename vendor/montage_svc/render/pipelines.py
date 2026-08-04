@@ -79,19 +79,25 @@ def run_compose(req: ComposeRequest, job_id: str, progress: Progress) -> Path:
                     f"scene {i} media_id {scene.media_id!r} is audio; scenes need image or video"
                 )
 
-            # Images are already static — nothing to interpolate, so they are
-            # rasterised straight at the target fps.
-            base_fps = req.fps if kind == "image" else None
-            clip = ff.normalize_scene(src, kind, scene.duration_s, w, h, base_fps,
-                                      work / f"s{i:02d}_norm.mp4")
-
-            # Only interpolate when we actually read a positive fps. probe_fps returns 0.0
-            # when ffprobe can't be found or the stream has no avg_frame_rate; a 0 there must
-            # NOT be read as "0 fps != target" and trigger a bogus minterpolate (which then
-            # fails downstream with "could not probe duration"). fps<=0 => leave the clip as-is.
-            _clip_fps = ff.probe_fps(clip)
-            if kind == "video" and _clip_fps > 0 and abs(_clip_fps - req.fps) > 0.5:
-                clip = ff.interpolate(clip, req.fps, work / f"s{i:02d}_fps.mp4")
+            # fps handling per scene:
+            #  - Images: rasterise straight at the target fps.
+            #  - Video, genuine UPSAMPLING (target notably higher than source, e.g. 24->60):
+            #    keep source fps in normalize (fps=None) then motion-interpolate real frames.
+            #  - Video, same/near/lower fps: PIN the target fps in normalize so the clip lands
+            #    exactly at req.fps and NEVER hits minterpolate. A tiny drift (e.g. 24->25 from
+            #    the fps=None path) was tripping the old abs()>0.5 guard and running minterpolate
+            #    on every scene — ~10x slower for zero benefit (join already re-times to fps).
+            if kind == "image":
+                clip = ff.normalize_scene(src, kind, scene.duration_s, w, h, req.fps,
+                                          work / f"s{i:02d}_norm.mp4")
+            else:
+                src_fps = ff.probe_fps(src)
+                upsample = src_fps > 0 and (req.fps - src_fps) > 5
+                clip = ff.normalize_scene(src, kind, scene.duration_s, w, h,
+                                          None if upsample else req.fps,
+                                          work / f"s{i:02d}_norm.mp4")
+                if upsample:
+                    clip = ff.interpolate(clip, req.fps, work / f"s{i:02d}_fps.mp4")
 
             png = ov.scene_overlay(
                 profile, w, h,
