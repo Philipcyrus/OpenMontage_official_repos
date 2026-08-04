@@ -85,7 +85,12 @@ def run_compose(req: ComposeRequest, job_id: str, progress: Progress) -> Path:
             clip = ff.normalize_scene(src, kind, scene.duration_s, w, h, base_fps,
                                       work / f"s{i:02d}_norm.mp4")
 
-            if kind == "video" and abs(ff.probe_fps(clip) - req.fps) > 0.5:
+            # Only interpolate when we actually read a positive fps. probe_fps returns 0.0
+            # when ffprobe can't be found or the stream has no avg_frame_rate; a 0 there must
+            # NOT be read as "0 fps != target" and trigger a bogus minterpolate (which then
+            # fails downstream with "could not probe duration"). fps<=0 => leave the clip as-is.
+            _clip_fps = ff.probe_fps(clip)
+            if kind == "video" and _clip_fps > 0 and abs(_clip_fps - req.fps) > 0.5:
                 clip = ff.interpolate(clip, req.fps, work / f"s{i:02d}_fps.mp4")
 
             png = ov.scene_overlay(
