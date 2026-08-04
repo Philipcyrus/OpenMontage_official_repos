@@ -65,12 +65,25 @@ def main() -> None:
     run = R.ClaudeCodeRunner()
 
     if cmd == "start":
-        brief = sys.argv[2] if len(sys.argv) > 2 else "Panda video"
+        # positional brief = first non-flag arg after "start"; --lang/--narrator -> options
+        rest = sys.argv[2:]
+        opts = {"language": "en", "narrator": "panda"}
+        brief_parts = []
+        i = 0
+        while i < len(rest):
+            a = rest[i]
+            if a == "--lang" and i + 1 < len(rest):
+                opts["language"] = rest[i + 1].lower(); i += 2
+            elif a == "--narrator" and i + 1 < len(rest):
+                opts["narrator"] = rest[i + 1].lower(); i += 2
+            else:
+                brief_parts.append(a); i += 1
+        brief = " ".join(brief_parts) or "Panda video"
         job = store.new_job_id()
         store.ensure_job(job)
-        state = {"job_id": job, "brief": brief, "profile": "ugc", "options": {},
+        state = {"job_id": job, "brief": brief, "profile": "ugc", "options": opts,
                  "status": "running", "stage": None, "gate": None, "artifacts": {}}
-        print(f">>> START {job} (real generation — may take minutes)")
+        print(f">>> START {job}  (lang={opts['language']} narrator={opts['narrator']}; real generation — may take minutes)")
         out = run.start(state)
         store.save_state(out)
         _show(out)
