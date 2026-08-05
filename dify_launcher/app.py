@@ -5,19 +5,27 @@ starts/resumes agent runs and surfaces the approval gates so Dify can show them 
 
 Endpoints:
   GET  /health
-  POST /jobs                      {brief, profile?, options?}      -> start a run (stops at GATE 1)
+  POST /jobs                      {brief, profile?, options?}      -> start a run (-> GATE 1)
   GET  /jobs/{id}                                                  -> current state + gate + artifacts
-  POST /jobs/{id}/respond         {decision: approve|revise, answer?, stills?} -> resume to next gate
+  POST /jobs/{id}/respond         {decision: approve|revise, ...}  -> resume to next gate
   GET  /jobs/{id}/artifacts/{name}                                 -> download a still/script/final.mp4
 
-Runner is chosen by env DIFY_RUNNER = mock (default, testable here) | claude (EC2).
-Storage is local (see store.py). Auth: optional shared token via env DIFY_TOKEN (X-Dify-Token).
+Sync vs async:
+  Real agent legs (claude runner) take MINUTES, which would hang an HTTP client. So when the
+  runner is `claude` the launcher runs ASYNC: POST /jobs and /respond return IMMEDIATELY with
+  status="running", the agent runs in a background thread, and the caller POLLS GET /jobs/{id}
+  until status is "awaiting_human" | "done" | "failed". The mock runner stays SYNC (fast) so
+  local tests keep their one-shot behavior. Override with env DIFY_ASYNC=1|0.
+
+  Single uvicorn worker assumed (in-process job registry). Storage is local (see store.py).
+  Auth: optional shared token via env DIFY_TOKEN (X-Dify-Token).
 """
 
 from __future__ import annotations
 
 import os
-from typing import Any, Optional
+import threading
+from typing import Any, Callable, Optional
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse
@@ -26,10 +34,17 @@ from pydantic import BaseModel
 from dify_launcher import runner as _runner
 from dify_launcher import store
 
-app = FastAPI(title="Panda AI — Dify Launcher", version="0.1.0")
+app = FastAPI(title="Panda AI — Dify Launcher", version="0.2.0")
 
-_RUNNER = _runner.get_runner(os.environ.get("DIFY_RUNNER", "mock"))
+_RUNNER_NAME = os.environ.get("DIFY_RUNNER", "mock")
+_RUNNER = _runner.get_runner(_RUNNER_NAME)
 _TOKEN = os.environ.get("DIFY_TOKEN", "")
+# Async by default for the (slow) claude runner; sync for mock so tests stay one-shot.
+_ASYNC = os.environ.get("DIFY_ASYNC", "1" if _RUNNER_NAME == "claude" else "0").lower() \
+    not in ("0", "false", "no", "")
+
+_RUNNING: set[str] = set()
+_LOCK = threading.Lock()
 
 
 def _auth(tok: Optional[str]) -> None:
@@ -41,7 +56,7 @@ def _public(state: dict[str, Any]) -> dict[str, Any]:
     """The view Dify gets: enough to render the gate + links to artifacts."""
     job_id = state["job_id"]
     arts = state.get("artifacts", {})
-    links = {}
+    links: dict[str, Any] = {}
     for key, val in arts.items():
         if isinstance(val, str) and val.endswith((".md", ".png", ".jpg", ".mp4")):
             links[key] = f"/jobs/{job_id}/artifacts/{val}"
@@ -59,6 +74,28 @@ def _public(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _bg(job_id: str, fn: Callable[..., dict[str, Any]], state: dict[str, Any],
+        arg: Optional[dict[str, Any]] = None) -> None:
+    """Run one agent leg in the background; persist the result (or a failed state)."""
+    try:
+        result = fn(state) if arg is None else fn(state, arg)
+        store.save_state(result)
+    except Exception as e:  # noqa: BLE001 — surface any leg failure to the poller
+        st = store.load_state(job_id) or state
+        st.update(status="failed", gate=None, question=f"error: {e}")
+        store.save_state(st)
+    finally:
+        with _LOCK:
+            _RUNNING.discard(job_id)
+
+
+def _spawn(job_id: str, fn: Callable[..., dict[str, Any]], state: dict[str, Any],
+           arg: Optional[dict[str, Any]] = None) -> None:
+    with _LOCK:
+        _RUNNING.add(job_id)
+    threading.Thread(target=_bg, args=(job_id, fn, state, arg), daemon=True).start()
+
+
 class StartJob(BaseModel):
     brief: str
     profile: Optional[str] = "ugc"
@@ -74,7 +111,7 @@ class Respond(BaseModel):
 
 @app.get("/health")
 def health() -> dict[str, Any]:
-    return {"status": "ok", "runner": os.environ.get("DIFY_RUNNER", "mock")}
+    return {"status": "ok", "runner": _RUNNER_NAME, "async": _ASYNC}
 
 
 @app.post("/jobs")
@@ -87,6 +124,11 @@ def create_job(body: StartJob, x_dify_token: Optional[str] = Header(None)) -> di
         "options": body.options, "status": "running", "stage": None,
         "gate": None, "artifacts": {},
     }
+    if _ASYNC:
+        state["question"] = "starting — poll GET /jobs/{id} until status is awaiting_human"
+        store.save_state(state)       # persist first so GET works immediately
+        _spawn(job_id, _RUNNER.start, state)
+        return _public(state)
     state = _RUNNER.start(state)
     store.save_state(state)
     return _public(state)
@@ -107,8 +149,18 @@ def respond(job_id: str, body: Respond, x_dify_token: Optional[str] = Header(Non
     state = store.load_state(job_id)
     if not state:
         raise HTTPException(status_code=404, detail="job not found")
+    with _LOCK:
+        busy = job_id in _RUNNING
+    if busy:
+        raise HTTPException(status_code=409, detail="job is still processing; poll GET /jobs/{id}")
     if state.get("status") != "awaiting_human":
         raise HTTPException(status_code=409, detail=f"job is {state.get('status')}, not awaiting_human")
+    if _ASYNC:
+        running = {**state, "status": "running",
+                   "question": "processing — poll GET /jobs/{id} until status changes"}
+        store.save_state(running)
+        _spawn(job_id, _RUNNER.resume, state, body.model_dump())
+        return _public(running)
     state = _RUNNER.resume(state, body.model_dump())
     store.save_state(state)
     return _public(state)
