@@ -38,9 +38,9 @@ A bad/missing token when one is configured → `401`.
 ### `GET /health`
 Liveness + mode.
 ```json
-{"status":"ok","runner":"claude","async":true}
+{"status":"ok","runner":"claude","async":true,"montage_door":true}
 ```
-`runner:"claude"` = real AI. `runner:"mock"` = placeholder mode (no AI, for wiring tests). `async:true` = poll model (see §4).
+`runner:"claude"` = real AI. `runner:"mock"` = placeholder mode (no AI, for wiring tests). `async:true` = poll model (see §4). `montage_door:true` = the direct render door (§15) is mounted.
 
 ### `POST /jobs` — start a job
 Body:
@@ -254,3 +254,94 @@ Long `running` stretches are **normal** — that's why it's async.
 - **Branding** (logo/watermark/cards) is **not** in the base video — it's a separate post-approval step (`panda_brand`), applied only when explicitly requested.
 - **Voice/music** need `ELEVENLABS_API_KEY` configured on the server; otherwise narration falls back to a generic voice and music is skipped.
 - **Consistency**: the panda/customer use fixed Higgsfield reference Elements, so the character stays on-model across shots.
+
+---
+
+## 15. Direct render door (`/montage/*`) — OPTIONAL, for driving the renderer yourself
+
+Everything above (§1–§14) is the **agent pipeline**: you give a brief, the AI produces and gates a whole video. That is the main door and is unchanged.
+
+There is a **second, independent door** for callers who already have the media (stills/clips/audio, e.g. from your own generation) and just want the **render engine** — no AI, no gates. It exposes montage-svc's raw abilities: **compose** (stitch clips + audio + captions into an MP4), **overlay** (re-stamp captions on an existing video), **mix-audio** (swap the audio track). Both doors call the **exact same render core**, so output quality is identical.
+
+**Use the agent door (`/jobs`)** when you want the AI to create the video from a brief.
+**Use the render door (`/montage`)** when you already have the assets and only need them assembled/edited.
+
+> Choosing one **never affects** the other — they share the render code and the box, nothing else. You can ignore this whole section if you only use the agent pipeline.
+
+### Auth (separate token)
+These routes use their **own** header — `X-Panda-Token` (env `PANDA_TOKEN`), independent of the agent door's `X-Dify-Token`. Unset = open. `/montage/health` and `/montage/files/*` are always open.
+
+### The model: import media → render → poll → fetch
+A render works on a **run** (a workspace). You import each media file into the run under a short **`media_id`**, then reference those ids in a compose. Renders are async: **POST returns `202` + `job_id`; poll `GET /montage/jobs/{id}` until `done`.**
+
+```
+POST /montage/media/import   (once per file)        → {"media_id":"s000", ...}
+POST /montage/compose         (reference the ids)   → 202 {"job_id":"mj_..."}
+loop: GET /montage/jobs/{id}  every ~5–20s
+        status == running|queued → keep polling
+        status == done   → fetch output_media_url
+        status == failed → read `error`
+GET  <output_media_url>                              → the MP4
+```
+
+### Endpoints
+| method + path | purpose |
+|---|---|
+| `GET /montage/health` | ffmpeg/fonts/profiles status |
+| `POST /montage/media/import` | download a URL into a run: `{"run_id","url","label"}` → `{media_id,local_url,bytes,kind}` |
+| `POST /montage/compose` | assemble scenes (+audio, captions, transition) → `202 {job_id}` |
+| `POST /montage/overlay` | re-draw captions on an existing render by time window → `202 {job_id}` |
+| `POST /montage/mix-audio` | replace the audio on an existing render → `202 {job_id}` |
+| `GET /montage/jobs/{id}` | poll: `{status: queued\|running\|done\|failed, progress, output_media_url, error}` |
+| `GET /montage/files/...` | download an output (the `output_media_url` from a finished job) |
+
+### `POST /montage/compose` body
+```json
+{
+  "run_id": "myrun",
+  "version": 1,
+  "profile": "ugc",
+  "fps": 30,
+  "resolution": "1080x1920",
+  "scenes": [
+    {"media_id": "s000", "duration_s": 2.5, "captions": {"en": "Panda Mobile"}},
+    {"media_id": "s001", "duration_s": 3.0}
+  ],
+  "transition": {"type": "xfade", "duration_s": 0.4},
+  "audio": {"music_media_id": "bgm", "voice_media_id": "vo", "music_db": -18, "voice_db": -6}
+}
+```
+Key fields:
+- **`duration_s` per scene is exact** — each clip is trimmed/padded to exactly that length (this is the per-clip timing control). Images become a clip of that length; a longer video is trimmed to it.
+- `profile`: `"ugc"` (clean, no logo) or `"bgc"` (brand logo + cards).
+- `resolution`/`fps`: `1080x1920` @ 30 for vertical. (60 fps triggers motion interpolation — slower.)
+- `transition.type`: `"xfade"` (crossfade) or `"cut"`.
+- `audio` ids must be imported first, same as scenes. `music_db`/`voice_db` set levels.
+- Captions/overlays are **text** (caption lines, plus `bubble`/`callout` widgets). Overlaying an arbitrary **image** on top of a clip (logo/lower-third/PiP beyond the profile logo) is **not** supported today — an imported image becomes its own full-frame scene. Ask us if you need image overlays; it's a small, scoped addition.
+
+### Worked example (curl)
+```bash
+BASE=https://dev.om.mvnoc.ai; PT=YOUR_PANDA_TOKEN
+
+# import two clips into run "demo"
+curl -s -X POST $BASE/montage/media/import -H "X-Panda-Token: $PT" -H "Content-Type: application/json" \
+  -d '{"run_id":"demo","url":"https://cdn.example/clip1.mp4","label":"s000"}'
+curl -s -X POST $BASE/montage/media/import -H "X-Panda-Token: $PT" -H "Content-Type: application/json" \
+  -d '{"run_id":"demo","url":"https://cdn.example/clip2.mp4","label":"s001"}'
+
+# compose
+curl -s -X POST $BASE/montage/compose -H "X-Panda-Token: $PT" -H "Content-Type: application/json" \
+  -d '{"run_id":"demo","version":1,"profile":"ugc","fps":30,
+       "scenes":[{"media_id":"s000","duration_s":5},{"media_id":"s001","duration_s":5}],
+       "transition":{"type":"xfade","duration_s":0.5}}'
+# -> {"job_id":"mj_..."}
+
+# poll, then download output_media_url
+curl -s -H "X-Panda-Token: $PT" $BASE/montage/jobs/mj_xxxx
+curl -s -H "X-Panda-Token: $PT" "$BASE/montage/files/runs/demo/out/final_v1.mp4" -o final.mp4
+```
+
+### Notes
+- **Idempotent** on `(run_id, kind, version)`: re-POSTing the same compose returns the same `job_id` instead of rendering twice. Bump `version` to render a new cut in the same run.
+- Runs persist (outputs stay under `/montage/files/runs/{run_id}/out/`), unlike the agent pipeline's per-job artifacts.
+- This door does **no** generation and **no** gating — it's pure assembly/edit. Human review of its output, if any, is entirely up to your workflow.

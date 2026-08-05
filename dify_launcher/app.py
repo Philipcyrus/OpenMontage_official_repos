@@ -36,6 +36,29 @@ from dify_launcher import store
 
 app = FastAPI(title="Panda AI — Dify Launcher", version="0.2.0")
 
+# --- montage-svc "raw render" door (additive; see dify_launcher/montage_routes.py) ------
+# A SECOND, independent entrance to the SAME vendored render core, mounted under /montage.
+# It does NOT touch the agent pipeline below — both call the same stateless render funcs.
+# Wired defensively: any import/mount problem here must never take down the launcher.
+if os.environ.get("MONTAGE_DOOR", "1").lower() not in ("0", "false", "no", ""):
+    try:
+        from fastapi.staticfiles import StaticFiles
+
+        from dify_launcher import montage_routes as _montage
+        _montage.init()                               # ensure render data dir + profiles exist
+        app.include_router(_montage.router)           # /montage/compose, /overlay, /mix-audio, ...
+        app.add_exception_handler(_montage.StorageError, _montage.storage_error_handler)
+        _montage.MONTAGE_DATA_DIR.mkdir(parents=True, exist_ok=True)
+        app.mount("/montage/files",                   # serve rendered outputs
+                  StaticFiles(directory=str(_montage.MONTAGE_DATA_DIR)), name="montage-files")
+        _MONTAGE_DOOR = True
+    except Exception as _e:  # noqa: BLE001 — the raw door is optional; the launcher isn't
+        import logging
+        logging.getLogger("dify_launcher").warning("montage door disabled: %s", _e)
+        _MONTAGE_DOOR = False
+else:
+    _MONTAGE_DOOR = False
+
 _RUNNER_NAME = os.environ.get("DIFY_RUNNER", "mock")
 _RUNNER = _runner.get_runner(_RUNNER_NAME)
 _TOKEN = os.environ.get("DIFY_TOKEN", "")
@@ -111,7 +134,8 @@ class Respond(BaseModel):
 
 @app.get("/health")
 def health() -> dict[str, Any]:
-    return {"status": "ok", "runner": _RUNNER_NAME, "async": _ASYNC}
+    return {"status": "ok", "runner": _RUNNER_NAME, "async": _ASYNC,
+            "montage_door": _MONTAGE_DOOR}
 
 
 @app.post("/jobs")
