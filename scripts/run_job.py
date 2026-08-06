@@ -84,6 +84,8 @@ def main() -> None:
                 i += 2
             elif a == "--no-music":
                 opts["music"] = False; i += 1
+            elif a == "--render-runtime" and i + 1 < len(rest):
+                opts["render_runtime"] = rest[i + 1].lower(); i += 2   # auto|ffmpeg|remotion|hyperframes
             else:
                 brief_parts.append(a); i += 1
         brief = " ".join(brief_parts) or "Panda video"

@@ -30,10 +30,14 @@ from lib import checkpoint as cp
 run = R.ClaudeCodeRunner()
 
 # 1) gate <-> stage mapping ------------------------------------------------
-assert run._gate_stage("approve_clips") == "assets"
+# both assets sub-gates reverse-map to the single `assets` stage
+assert run._gate_stage("approve_stills") == "assets"
+assert run._gate_stage("approve_assets") == "assets"
+assert run._gate_stage("approve_scene_plan") == "scene_plan"
 assert run._gate_stage("approve_script") == "script"
 assert R._STAGE_GATE["compose"] == "approve_final"
-assert R._STAGE_GATE["scene_plan"] == "approve_storyboard"
+assert R._STAGE_GATE["scene_plan"] == "approve_scene_plan"
+assert "assets" not in R._STAGE_GATE          # assets is phase-resolved, not a 1:1 map entry
 print("[ok] gate<->stage mapping")
 
 # 2) _mirror_artifacts: copy project files into the store, grouped by kind --
@@ -50,8 +54,15 @@ for i in range(3):
     (proj / "assets" / "video" / f"clip_{i}.mp4").write_bytes(b"\x00ftypmp42")
 (proj / "renders" / "final.mp4").write_bytes(b"\x00ftypmp42")
 
+# scene_plan.json on disk (surfaced inline for TEXT review at GATE 2); asset_manifest inline
+# in the checkpoint (surfaced inline for review at GATE 3).
+import json as _json
+(proj / "artifacts" / "scene_plan.json").write_text(
+    _json.dumps({"version": "1.0", "scenes": [{"id": "s1"}]}), encoding="utf-8")
+
 arts = run._mirror_artifacts(JOB, {
     "script": "artifacts/script.md",
+    "asset_manifest": {"version": "1.0", "assets": [{"id": "a1", "scene_id": "s1"}]},
     "stills": ["assets/images/still_0.png", "assets/images/still_1.png"],
     "clips": ["assets/video/clip_0.mp4", "assets/video/clip_1.mp4", "assets/video/clip_2.mp4"],
     "final": "renders/final.mp4",
@@ -59,9 +70,12 @@ arts = run._mirror_artifacts(JOB, {
 assert arts["script"] == "script.md"
 assert len(arts["stills"]) == 2 and len(arts["clips"]) == 3
 assert arts["final"] == "final.mp4" and arts["branded"] is False
+# structured TEXT artifacts surfaced inline (dict), not as files:
+assert isinstance(arts.get("scene_plan"), dict) and arts["scene_plan"]["scenes"][0]["id"] == "s1"
+assert isinstance(arts.get("asset_manifest"), dict) and arts["asset_manifest"]["assets"][0]["id"] == "a1"
 assert store.artifact_path(JOB, "final.mp4").is_file()       # actually copied into the store
 assert store.artifact_path(JOB, "clip_2.mp4").is_file()
-print("[ok] artifact mirroring + grouping (stills/clips/final/script)")
+print("[ok] artifact mirroring: files (stills/clips/final/script) + inline scene_plan/asset_manifest")
 
 # 3) _sync: checkpoint status -> launcher state (stub the reads) -----------
 def _fake_latest(_pd, _jid):
@@ -71,9 +85,20 @@ def _fake_next(_pd, _jid, _pt=None):
 cp.get_latest_checkpoint = _fake_latest
 cp.get_next_stage = _fake_next
 
+# assets stage, STILLS phase (partial_progress.phase) -> approve_stills
+_fake_latest.cp = {"stage": "assets", "status": "awaiting_human", "artifacts": {},
+                   "partial_progress": {"phase": "stills"}}
+st = run._sync({"job_id": "jX"})
+assert st["status"] == "awaiting_human" and st["gate"] == "approve_stills"
+
+# assets stage, no phase marker -> full media gate approve_assets
 _fake_latest.cp = {"stage": "assets", "status": "awaiting_human", "artifacts": {}}
 st = run._sync({"job_id": "jX"})
-assert st["status"] == "awaiting_human" and st["gate"] == "approve_clips"
+assert st["status"] == "awaiting_human" and st["gate"] == "approve_assets"
+
+_fake_latest.cp = {"stage": "scene_plan", "status": "awaiting_human", "artifacts": {}}
+st = run._sync({"job_id": "jX"})
+assert st["status"] == "awaiting_human" and st["gate"] == "approve_scene_plan"
 
 _fake_latest.cp = {"stage": "compose", "status": "completed", "artifacts": {}}
 _fake_next.val = None
@@ -95,4 +120,10 @@ run._approve_stage("jX", "assets")
 assert captured == {"stage": "assets", "status": "completed", "approved": True}, captured
 print("[ok] _approve_stage flips checkpoint to completed + human_approved")
 
-print("\n[PASS] ClaudeCodeRunner adapter: mapping, mirroring, sync, approval")
+# 5) legacy gate on resume -> clear migration message (no agent run) --------
+mig = run.resume({"job_id": "jLegacy", "gate": "approve_storyboard", "artifacts": {}},
+                 {"decision": "approve"})
+assert mig["status"] == "failed" and "start a new job" in mig["question"].lower()
+print("[ok] legacy-gate resume returns migration message")
+
+print("\n[PASS] ClaudeCodeRunner adapter: mapping, mirroring, sync, approval, migration")

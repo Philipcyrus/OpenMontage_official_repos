@@ -1,12 +1,16 @@
 name: panda-video
 version: "0.1"
 description: >
-  Panda Mobile video pipeline. Agent-driven production with three human-approval gates
-  (script, storyboard stills, final video). Generation runs through the Higgsfield MCP
-  bridge + ElevenLabs; the compose stage produces a CLEAN (unbranded) master via the folded
-  montage-svc render code (tool: panda_render). Panda branding (logo/watermark/cards) is
-  applied ONLY on explicit user request AFTER approval, via the standalone panda_brand tool
-  — never baked into the pipeline.
+  Panda Mobile video pipeline. Agent-driven production that mirrors upstream OpenMontage's
+  Animated Explainer architecture, with four human-approval gates: script, scene_plan
+  (TEXT), assets (all generated media), and final video. The scene_plan stage produces ONLY
+  a structured text plan (no media, no generation tools); ALL media (stills, clips, voice,
+  music) is generated in the assets stage and recorded canonically in asset_manifest.
+  Generation runs through the Higgsfield MCP bridge + ElevenLabs. The compose stage is
+  runtime-routed (upstream-style) on edit_decisions.render_runtime: ffmpeg -> panda_render
+  (folded montage-svc, CLEAN default), remotion/hyperframes -> video_compose. The output is
+  always a CLEAN (unbranded) master. Panda branding (logo/watermark/cards) is applied ONLY on
+  explicit user request AFTER approval, via the standalone panda_brand tool — never baked in.
 category: hybrid
 stability: beta                   # schema allows only production|beta
 default_checkpoint_policy: guided
@@ -33,10 +37,10 @@ required_skills:
   - pipelines/hybrid/executive-producer
   - pipelines/hybrid/idea-director
   - pipelines/hybrid/script-director
-  - pipelines/panda-video/storyboard-director   # OUR custom stills-then-gate skill
-  - pipelines/hybrid/asset-director
+  - pipelines/panda-video/scene-plan-director    # OUR text-only scene planner (no media)
+  - pipelines/panda-video/asset-director         # OUR asset generator (all media -> asset_manifest)
   - pipelines/hybrid/edit-director
-  - pipelines/hybrid/compose-director
+  - pipelines/panda-video/compose-director       # OUR runtime-routed compose (ffmpeg/remotion/hyperframes)
   - meta/higgsfield-mcp-bridge                   # OUR bridge protocol (ported from OpenMontage-main)
   - meta/reviewer
   - meta/checkpoint-protocol
@@ -71,55 +75,83 @@ stages:
       - Narrative, timing, and voice cues match the brief
       - Runtime is realistic for the platform
 
-  # ---- GATE 2 : approve storyboard stills (one still per scene) ----
+  # ---- GATE 2 : approve the TEXT scene plan (no media generated here) ----
+  # Upstream contract: scene_plan is a structured production plan only. NO generation tools
+  # are available; NO stills/contact-sheet/media are produced. The reviewer approves the
+  # written plan (timings, scene types, framing, movement, camera, character actions,
+  # transitions, and the required_assets each scene declares for the assets stage to fulfil).
   - name: scene_plan
-    skill: pipelines/panda-video/storyboard-director
+    skill: pipelines/panda-video/scene-plan-director
     required_artifacts_in:
       - script
     produces:
-      - scene_plan          # includes one keyframe still per scene + a contact sheet
-    tools_available:
-      - image_selector
-      # TODO: confirm the still-generation tool name(s) available in this base
+      - scene_plan          # structured TEXT plan only (schemas/artifacts/scene_plan.schema.json)
+    tools_available: []      # no generation tools at planning time (upstream-faithful)
     checkpoint_required: true
-    human_approval_default: true       # 🚦 GATE 2
+    human_approval_default: true       # 🚦 GATE 2 (approve the text scene plan)
     review_focus:
-      - One approved still exists per scene
-      - Stills are on-brand (see styles/panda.yaml) and character-consistent
+      - Full script duration is covered with realistic per-scene timings, no gaps
+      - Each scene has type, description, framing, movement and (where relevant) character actions
+      - Every required_asset is feasible with the tools available in the assets stage
+      - Panda identity / character-consistency / composition are specified as plan requirements
 
-  # ---- produce clips + voice from APPROVED stills ----
+  # ---- GATES 3 & 4 : the ASSETS stage runs in TWO human-reviewed phases ----
+  # Best-of-both: upstream's single asset-generation stage, PLUS a Panda cost gate. The stage
+  # pauses TWICE (both status='awaiting_human', stage='assets'), distinguished by the
+  # checkpoint's partial_progress.phase:
+  #   PHASE 1  partial_progress.phase="stills"  -> 🚦 GATE 3 approve_stills
+  #            generate ONLY the stills (cheap). Approve the LOOK (on-model panda, composition)
+  #            BEFORE any expensive image->video spend. NO video generated yet.
+  #   PHASE 2  (no phase marker)                 -> 🚦 GATE 4 approve_assets
+  #            animate the APPROVED stills into motion clips + narration + music, recorded
+  #            canonically in asset_manifest. Approve the full media set (per-shot revisable).
+  # The assets stage is gated (framework assets-gate-flip: a gated stage cannot complete
+  # without human approval). See dify_launcher/runner.py (_sync/_stills_approved_prompt).
   - name: assets
-    skill: pipelines/hybrid/asset-director
+    skill: pipelines/panda-video/asset-director
     required_artifacts_in:
       - scene_plan
+      - script
     produces:
       - asset_manifest
     tools_available:
-      - higgsfield_mcp_video     # OUR MCP bridge (image_to_video from approved stills)
+      - image_selector           # PHASE 1: stills per scene (still-gen via the Higgsfield MCP bridge)
+      - higgsfield_mcp_video     # PHASE 2: OUR MCP bridge (image_to_video motion clips)
       - seedance_video
-      - elevenlabs_tts
-      - image_selector
+      - elevenlabs_tts           # PHASE 2: narration
+      - music_gen                # PHASE 2: background music (ElevenLabs Music)
     checkpoint_required: true
-    human_approval_default: true       # 🚦 GATE 3 (approve the generated clips)
+    human_approval_default: true       # 🚦 GATES 3 & 4 (approve stills, then the full media)
     review_focus:
-      - Every generated motion clip is acceptable (motion coherence, on-brand, on-model)
-      - Reviewer can approve the set or request revision of specific shots (regenerate only those)
+      - "PHASE 1 (stills): one still per scene, on-brand (styles/panda.yaml) and character-consistent (panda Elements), before any video is generated"
+      - "PHASE 2 (media): every required asset exists on disk and is listed in asset_manifest (path + scene_id)"
+      - Narration covers all script sections; music (if any) sits under the VO
+      - Reviewer can approve the set or request revision of specific scenes/shots (regenerate only those)
 
   # ---- edit decisions : NO gate ----
+  # edit_decisions MUST carry render_runtime (ffmpeg|remotion|hyperframes), chosen per the
+  # render-runtime decision (job option render_runtime, or auto → upstream decision matrix +
+  # on-box availability). Compose reads it and routes. Carry it forward UNCHANGED unless a
+  # render_runtime_selection decision is logged (silent swap = governance violation).
   - name: edit
     skill: pipelines/hybrid/edit-director
     required_artifacts_in:
       - scene_plan
       - asset_manifest
     produces:
-      - edit_decisions
+      - edit_decisions          # includes render_runtime (see schemas/artifacts/edit_decisions.schema.json)
     tools_available: []
     checkpoint_required: true
     human_approval_default: false
 
-  # ---- compose : CLEAN render (no branding) via folded montage-svc code ----
+  # ---- compose : CLEAN render (no branding), runtime-routed ----
+  # Routes on edit_decisions.render_runtime (upstream-style):
+  #   ffmpeg     -> panda_render   (folded montage-svc, in-process, CLEAN/ugc — the Panda default)
+  #   remotion   -> video_compose  (React motion graphics; needs Node>=22 + remotion-composer)
+  #   hyperframes-> video_compose  (HTML/CSS/GSAP; needs Node>=22 + Chrome headless)
+  # See skills/pipelines/panda-video/compose-director.md.
   - name: compose
-    skill: pipelines/hybrid/compose-director
+    skill: pipelines/panda-video/compose-director
     required_artifacts_in:
       - edit_decisions
       - asset_manifest
@@ -127,11 +159,12 @@ stages:
       - render_report
       - final_review
     required_tools:
-      - panda_render        # folded montage-svc render (in-process). CLEAN/ugc profile.
+      - panda_render        # folded montage-svc render (in-process). CLEAN/ugc profile. ffmpeg lane.
     tools_available:
-      - panda_render
+      - panda_render        # ffmpeg lane (default)
+      - video_compose       # remotion / hyperframes lanes (runtime-aware)
     checkpoint_required: true
-    human_approval_default: true       # 🚦 GATE 4 (approve the finished video)
+    human_approval_default: true       # 🚦 GATE 5 (approve the finished video)
     review_focus:
       - Clean master is correct (assembly, captions, audio, grade) — NO branding yet
       - final.mp4 exists and passes ffprobe

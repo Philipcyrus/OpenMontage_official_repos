@@ -5,20 +5,25 @@ A runner advances a job to its NEXT human-approval gate, then stops. Each HTTP c
 it runs until a checkpoint writes `awaiting_human`, then pauses for Dify.
 
 Two runners:
-  - MockRunner        : no LLM, no Higgsfield. Fakes script + storyboard, and REALLY renders
-                        a clean master from the approved stills via panda_render. Lets us test
-                        the whole Dify handshake + local storage + gates here, with no EC2.
+  - MockRunner        : no LLM, no Higgsfield. Fakes script + a TEXT scene plan, generates
+                        mock media in the assets stage, and REALLY renders a clean master via
+                        panda_render. Lets us test the whole Dify handshake + gates, no EC2.
   - ClaudeCodeRunner  : the EC2 path — invokes Claude Code headless against the engine repo.
                         Skeleton only; swap it in where the box has `claude` + OpenRouter + MCP.
 
-Gate sequence (matches pipeline_defs/panda-video.yaml):
-    start ─▶ GATE 1 approve_script ─▶ GATE 2 approve_storyboard ─▶ GATE 3 approve_clips
-          ─▶ GATE 4 approve_final ─▶ done
+Gate sequence (matches pipeline_defs/panda-video.yaml — upstream shape + a Panda cost gate):
+    start ─▶ GATE 1 approve_script ─▶ GATE 2 approve_scene_plan (TEXT)
+          ─▶ GATE 3 approve_stills ─▶ GATE 4 approve_assets ─▶ GATE 5 approve_final ─▶ done
+scene_plan produces a TEXT plan only (no media). The assets stage runs in TWO human-reviewed
+phases (both stage="assets"): first STILLS ONLY (cheap — approve the look before any expensive
+video), then the full media (clips + voice + music) recorded in asset_manifest. The two pauses
+are distinguished by the checkpoint's partial_progress.phase ("stills" vs full).
 Branding is NOT a gate — it's a separate on-demand step after approve_final.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 from pathlib import Path
@@ -28,8 +33,25 @@ from dify_launcher import store
 
 _ENGINE_ROOT = Path(__file__).resolve().parents[1]
 
-# gate -> the stage the agent pauses AFTER producing that stage's artifact
-GATES = ["approve_script", "approve_storyboard", "approve_clips", "approve_final"]
+# ordered human-approval gates. Note: approve_stills + approve_assets are TWO pauses of the
+# single `assets` stage (stills-first cost gate, then full media) — see _sync/_do_stills.
+GATES = ["approve_script", "approve_scene_plan", "approve_stills", "approve_assets", "approve_final"]
+# gates from the previous storyboard-stills flow — resuming one is refused with a migration note
+_LEGACY_GATES = {"approve_storyboard", "approve_clips"}
+
+_MIGRATION_MSG = (
+    "This job was created under the previous storyboard-stills flow (gate "
+    "'{gate}'), which no longer exists after the scene_plan revert to the upstream "
+    "text-plan + assets architecture. The job is still readable, but cannot be resumed. "
+    "Please start a new job."
+)
+
+
+def _legacy_migration(state: dict[str, Any]) -> dict[str, Any]:
+    """A saved job sitting at a removed gate: leave it readable, fail with a clear message."""
+    state.update(status="failed", gate=None,
+                 question=_MIGRATION_MSG.format(gate=state.get("gate")))
+    return state
 
 
 class Runner:
@@ -55,12 +77,16 @@ class MockRunner(Runner):
         decision = (response or {}).get("decision", "approve")
         gate = state.get("gate")
 
+        if gate in _LEGACY_GATES:
+            return _legacy_migration(state)
+
         # revise: regenerate the CURRENT gate's artifact, stay at the same gate
         if decision == "revise":
             regen = {
                 "approve_script": self._do_script,
-                "approve_storyboard": self._do_storyboard,
-                "approve_clips": self._do_clips,
+                "approve_scene_plan": self._do_scene_plan,
+                "approve_stills": self._do_stills,
+                "approve_assets": self._do_assets,
                 "approve_final": self._do_production,
             }.get(gate)
             if not regen:
@@ -69,10 +95,12 @@ class MockRunner(Runner):
 
         # approve: advance to the next stage/gate
         if gate == "approve_script":
-            return self._do_storyboard(state, response)
-        if gate == "approve_storyboard":
-            return self._do_clips(state, response)
-        if gate == "approve_clips":
+            return self._do_scene_plan(state, response)
+        if gate == "approve_scene_plan":
+            return self._do_stills(state, response)      # assets phase 1: stills only
+        if gate == "approve_stills":
+            return self._do_assets(state, response)       # assets phase 2: clips + audio + manifest
+        if gate == "approve_assets":
             return self._do_production(state, response)
         if gate == "approve_final":
             state.update(status="done", gate=None, question=None)
@@ -97,55 +125,112 @@ class MockRunner(Runner):
         )
         return state
 
-    # --- GATE 2: storyboard stills -----------------------------------------
-    def _do_storyboard(self, state: dict[str, Any], response: dict[str, Any]) -> dict[str, Any]:
+    # --- GATE 2: TEXT scene plan (no media generated here) -----------------
+    def _do_scene_plan(self, state: dict[str, Any], response: dict[str, Any]) -> dict[str, Any]:
+        """Produce ONLY a schema-valid, TEXT scene plan (upstream contract). No stills, no
+        media — each scene declares required_assets the assets stage fulfils later."""
         job_id = state["job_id"]
-        provided = (response or {}).get("stills") or []
-        stills: list[str] = []
-        if provided:
-            # Dify may hand us the stills directly (user-supplied storyboard).
-            for i, src in enumerate(provided):
-                p = Path(src)
-                if p.is_file():
-                    dst = store.artifact_path(job_id, f"still_{i:02d}{p.suffix or '.png'}")
-                    dst.write_bytes(p.read_bytes())
-                    stills.append(dst.name)
-        if not stills:
-            # else generate placeholder stills so the flow is self-contained
-            stills = self._placeholder_stills(job_id, n=3)
+        brief = state.get("brief", "")
+        note = (response or {}).get("answer")
+        n = 3
+        scenes = []
+        for i in range(n):
+            scenes.append({
+                "id": f"scene-{i+1}",
+                "type": "generated",
+                "description": (f"Scene {i+1} for: {brief}"
+                                + (f" (revised: {note})" if note else "")),
+                "start_seconds": float(i * 3),
+                "end_seconds": float((i + 1) * 3),
+                "framing": "medium",
+                "movement": "static",
+                "required_assets": [
+                    {"type": "image", "description": f"Panda keyframe for scene {i+1}",
+                     "source": "generate"},
+                    {"type": "video", "description": f"Motion clip for scene {i+1}",
+                     "source": "generate"},
+                ],
+            })
+        scene_plan = {"version": "1.0", "scenes": scenes}
+        store.artifact_path(job_id, "scene_plan.json").write_text(
+            json.dumps(scene_plan, indent=2), encoding="utf-8")
+        # Surface the plan inline (dict) so Dify can review it as TEXT — no stills here.
+        arts = {k: v for k, v in state.get("artifacts", {}).items() if k != "stills"}
         state.update(
-            stage="scene_plan", status="awaiting_human", gate="approve_storyboard",
-            question="Approve the storyboard stills, or request a revision.",
-            artifacts={**state.get("artifacts", {}), "stills": stills},
+            stage="scene_plan", status="awaiting_human", gate="approve_scene_plan",
+            question="Approve the scene plan (text), or request a revision.",
+            artifacts={**arts, "scene_plan": scene_plan},
         )
         return state
 
-    # --- GATE 3: generate one motion clip per approved still ---------------
-    def _do_clips(self, state: dict[str, Any], response: dict[str, Any]) -> dict[str, Any]:
-        """Animate each APPROVED still into a clip. Real gen is the Higgsfield MCP
-        (image_to_video) on the box; the mock renders each still to a short clip so the
-        per-shot clip gate is exercised locally. Reviewer approves the set or asks to
-        revise specific shots (response.shots) — only those regenerate."""
+    # --- GATE 3: assets PHASE 1 — stills only (cheap, pre-video cost gate) --
+    def _do_stills(self, state: dict[str, Any], response: dict[str, Any]) -> dict[str, Any]:
+        """Generate STILLS ONLY from the approved scene plan — one per scene, NO video yet.
+        This is the cost/visual checkpoint: approve the look (on-model panda, composition)
+        before any expensive image->video spend. Real gen is Higgsfield image generation; the
+        mock makes placeholder stills. On the box this checkpoint carries
+        partial_progress.phase='stills' so the launcher surfaces it as approve_stills."""
         job_id = state["job_id"]
-        stills = state.get("artifacts", {}).get("stills", [])
+        scene_plan = state.get("artifacts", {}).get("scene_plan") or {}
+        scenes = scene_plan.get("scenes") or []
+        n = len(scenes) or 3
+        stills = self._placeholder_stills(job_id, n)              # stills are made HERE (no video)
+        # entering the stills phase drops any clips/manifest from a prior pass
+        arts = {k: v for k, v in state.get("artifacts", {}).items()
+                if k not in ("clips", "asset_manifest")}
+        state.update(
+            stage="assets", status="awaiting_human", gate="approve_stills",
+            question="Approve the stills (one per scene) — on-model and well-composed? — or "
+                     "request a revision. No video is generated until the stills are approved.",
+            artifacts={**arts, "stills": stills},
+        )
+        return state
+
+    # --- GATE 4: assets PHASE 2 — animate approved stills + audio + manifest
+    def _do_assets(self, state: dict[str, Any], response: dict[str, Any]) -> dict[str, Any]:
+        """Animate the APPROVED stills into motion clips (and, on the box, voice/music) and
+        record everything in asset_manifest. Real gen is the Higgsfield MCP (image_to_video) +
+        ElevenLabs; the mock renders a short clip per still. Reviewer approves the set or revises
+        specific shots (response.shots) — only those regenerate."""
+        job_id = state["job_id"]
+        scene_plan = state.get("artifacts", {}).get("scene_plan") or {}
+        scenes = scene_plan.get("scenes") or []
+        stills = list(state.get("artifacts", {}).get("stills", []))
+        n = len(stills) or (len(scenes) or 3)
+        if len(stills) != n:                                     # safety: stills come from GATE 3
+            stills = self._placeholder_stills(job_id, n)
         only = set((response or {}).get("shots", []))  # optional: regenerate specific shots
+
         clips = list(state.get("artifacts", {}).get("clips", []))
-        if len(clips) != len(stills):
-            clips = [None] * len(stills)
-        for i, still in enumerate(stills):
+        if len(clips) != n:
+            clips = [None] * n
+        for i in range(n):
             if only and i not in only and clips[i]:
                 continue  # keep already-approved shot
             clip_name = f"clip_{i:02d}.mp4"
             self._render_clean(
-                [str(store.artifact_path(job_id, still))],
+                [str(store.artifact_path(job_id, stills[i]))],
                 str(store.artifact_path(job_id, clip_name)),
             )
             clips[i] = clip_name
+
+        assets = []
+        for i in range(n):
+            sid = scenes[i]["id"] if i < len(scenes) else f"scene-{i+1}"
+            assets.append({"id": f"img-{i:02d}", "type": "image", "path": stills[i],
+                           "source_tool": "mock_still", "scene_id": sid})
+            assets.append({"id": f"vid-{i:02d}", "type": "video", "path": clips[i],
+                           "source_tool": "mock_clip", "scene_id": sid})
+        asset_manifest = {"version": "1.0", "assets": assets, "total_cost_usd": 0.0}
+        store.artifact_path(job_id, "asset_manifest.json").write_text(
+            json.dumps(asset_manifest, indent=2), encoding="utf-8")
+
         state.update(
-            stage="assets", status="awaiting_human", gate="approve_clips",
-            question="Approve the generated clips, or request revision of specific shots "
-                     "(send {\"decision\":\"revise\",\"shots\":[i,...]}).",
-            artifacts={**state.get("artifacts", {}), "clips": clips},
+            stage="assets", status="awaiting_human", gate="approve_assets",
+            question="Approve the generated media (clips + audio), or request revision of "
+                     "specific shots (send {\"decision\":\"revise\",\"shots\":[i,...]}).",
+            artifacts={**state.get("artifacts", {}), "stills": stills, "clips": clips,
+                       "asset_manifest": asset_manifest},
         )
         return state
 
@@ -200,11 +285,13 @@ class MockRunner(Runner):
 # ClaudeCodeRunner — the EC2 path (real agent)
 # ---------------------------------------------------------------------------
 
-# OpenMontage stage  ->  launcher gate name (matches pipeline_defs/panda-video.yaml)
+# OpenMontage stage  ->  launcher gate name (matches pipeline_defs/panda-video.yaml).
+# NOTE: the `assets` stage is deliberately absent here — it surfaces TWO gates chosen by the
+# checkpoint's partial_progress.phase: "stills" -> approve_stills (pre-video), else
+# approve_assets (full media). See _sync() and _gate_stage().
 _STAGE_GATE = {
     "script": "approve_script",
-    "scene_plan": "approve_storyboard",
-    "assets": "approve_clips",
+    "scene_plan": "approve_scene_plan",   # TEXT plan (no media)
     "compose": "approve_final",
 }
 _PIPELINE_TYPE = os.environ.get("PANDA_PIPELINE_TYPE", "panda-video")
@@ -251,9 +338,25 @@ class ClaudeCodeRunner(Runner):
 
     def resume(self, state: dict[str, Any], response: dict[str, Any]) -> dict[str, Any]:
         job_id = state["job_id"]
+        if state.get("gate") in _LEGACY_GATES:
+            return _legacy_migration(state)
         from lib import checkpoint as cp
+        gate = state.get("gate")
         decision = (response or {}).get("decision", "approve")
-        stage = self._gate_stage(state.get("gate"))
+        stage = self._gate_stage(gate)
+
+        # Approving the STILLS phase must NOT complete the assets stage — it only unlocks the
+        # video/audio phase WITHIN the same stage. Continue the agent from the stills checkpoint
+        # so it animates the approved stills and stops again at the full assets gate.
+        if gate == "approve_stills":
+            if decision == "approve":
+                self._run_agent(self._stills_approved_prompt(job_id))
+            else:
+                self._run_agent(self._revise_prompt(
+                    job_id, "assets (STILLS phase — regenerate the flagged stills and stop again "
+                            "at the stills gate; do NOT generate video yet)", response or {}))
+            return self._sync(state)
+
         if decision == "approve":
             self._approve_stage(job_id, stage)
             # Approving the LAST gate finishes the job — there is no next stage to run, so do
@@ -308,8 +411,13 @@ class ClaudeCodeRunner(Runner):
             state.update(status="failed", stage=stage, gate=None,
                          question=latest.get("error", "stage failed"), artifacts=arts)
         elif status == "awaiting_human":
-            state.update(status="awaiting_human", stage=stage,
-                         gate=_STAGE_GATE.get(stage, f"approve_{stage}"),
+            if stage == "assets":
+                # the assets stage pauses twice: stills-first (cheap, pre-video), then full media.
+                phase = (latest.get("partial_progress") or {}).get("phase")
+                gate = "approve_stills" if phase == "stills" else "approve_assets"
+            else:
+                gate = _STAGE_GATE.get(stage, f"approve_{stage}")
+            state.update(status="awaiting_human", stage=stage, gate=gate,
                          question=f"Approve {stage}, or request a revision.", artifacts=arts)
         else:  # completed
             nxt = cp.get_next_stage(self._projects_dir, job_id, _PIPELINE_TYPE)
@@ -402,6 +510,19 @@ class ClaudeCodeRunner(Runner):
             n = _copy(md[-1])
             if n:
                 out["script"] = n
+        # Surface structured TEXT artifacts inline for review at their gates: scene_plan (text
+        # plan at GATE 2) and asset_manifest (media inventory at GATE 3). Prefer the checkpoint's
+        # inline dict; fall back to the on-disk artifacts/<name>.json the skills write.
+        for aname in ("scene_plan", "asset_manifest"):
+            val = artifacts.get(aname)
+            if not isinstance(val, dict):
+                ap = proj / "artifacts" / f"{aname}.json"
+                try:
+                    val = json.loads(ap.read_text(encoding="utf-8")) if ap.is_file() else None
+                except (OSError, ValueError):
+                    val = None
+            if isinstance(val, dict):
+                out[aname] = val
         if stills:
             out["stills"] = stills
         if clips:
@@ -414,6 +535,8 @@ class ClaudeCodeRunner(Runner):
 
     # -- approvals + prompts ------------------------------------------------
     def _gate_stage(self, gate: Optional[str]) -> Optional[str]:
+        if gate in ("approve_stills", "approve_assets"):
+            return "assets"                 # both are pauses of the single assets stage
         for s, g in _STAGE_GATE.items():
             if g == gate:
                 return s
@@ -436,6 +559,22 @@ class ClaudeCodeRunner(Runner):
         narrator = str(options.get("narrator", "panda")).lower()
         voice_id = options.get("voice_id")            # explicit override from Dify
         music = options.get("music", True)            # BGM: mood string, True (default bed), or False
+        runtime = str(options.get("render_runtime", "auto")).lower()  # auto|ffmpeg|remotion|hyperframes
+
+        if runtime in ("ffmpeg", "remotion", "hyperframes"):
+            runtime_line = (
+                f"RENDER RUNTIME — the job requests render_runtime='{runtime}'. Set "
+                f"edit_decisions.render_runtime='{runtime}' and route compose accordingly "
+                "(ffmpeg->panda_render, remotion/hyperframes->video_compose). If that runtime "
+                "is unavailable on this machine, STOP and escalate — do NOT silently fall back.")
+        else:
+            runtime_line = (
+                "RENDER RUNTIME — 'auto': choose render_runtime per the decision matrix in "
+                "skills/pipelines/panda-video/compose-director.md AND the actual on-box "
+                "availability (check via video_compose). Default to 'ffmpeg' (panda_render) for "
+                "character-mascot clips; pick 'remotion'/'hyperframes' only when the brief needs "
+                "React/HTML motion graphics. Record the choice in edit_decisions.render_runtime "
+                "and log a render_runtime_selection decision.")
 
         if voice_id:
             voice_line = (f"VOICE — use ElevenLabs voice_id='{voice_id}' (explicit override from "
@@ -460,13 +599,23 @@ class ClaudeCodeRunner(Runner):
             "BRAND — MANDATORY, do NOT improvise: read config/panda-elements.json and USE its "
             "Higgsfield reference Element IDs for character consistency — the panda Element for "
             "every panda shot, the customer Element for the customer. Never invent a new panda.\n"
-            f"{voice_line}\n{music_line}\n\n"
+            f"{voice_line}\n{music_line}\n{runtime_line}\n\n"
             "Follow AGENT_GUIDE.md and skills/meta/checkpoint-protocol.md. Execute stages in "
             "order. At every stage whose manifest sets human_approval_default: true, write the "
             "checkpoint with status='awaiting_human' and STOP (end your turn) — do NOT "
-            "self-approve. Generate imagery/video via the Higgsfield MCP bridge "
-            "(skills/meta/higgsfield-mcp-bridge.md) and compose with the `panda_render` tool. "
-            "Stop at the first gate."
+            "self-approve.\n"
+            "PIPELINE SHAPE: the `scene_plan` stage produces ONLY a structured TEXT plan — NO "
+            "media, NO generation tools. The `assets` stage then runs in TWO human-reviewed "
+            "phases (a cost gate):\n"
+            "  PHASE 1 (stills): generate ONLY the stills — one per scene — via the Higgsfield "
+            "MCP bridge (skills/meta/higgsfield-mcp-bridge.md), then write the assets checkpoint "
+            "with status='awaiting_human' AND partial_progress={\"phase\":\"stills\"} and STOP. "
+            "Do NOT generate any video yet.\n"
+            "  PHASE 2 (media): only after the stills are approved, animate the approved stills "
+            "into motion clips (image_to_video) + generate narration/music (ElevenLabs), record "
+            "everything in asset_manifest, then write the assets checkpoint status='awaiting_human' "
+            "(no 'stills' phase marker) and STOP.\n"
+            "Finally compose the approved assets with the `panda_render` tool. Stop at the first gate."
         )
 
     def _continue_prompt(self, job_id: str) -> str:
@@ -474,6 +623,16 @@ class ClaudeCodeRunner(Runner):
             f"Continue the `{_PIPELINE_TYPE}` pipeline for project_id: {job_id}. Read the latest "
             "checkpoint, proceed from the next stage, and STOP at the next human_approval gate "
             "(status='awaiting_human', end your turn). If the pipeline is complete, finish."
+        )
+
+    def _stills_approved_prompt(self, job_id: str) -> str:
+        return (
+            f"For project_id: {job_id}, the STILLS phase of the `assets` stage is APPROVED. Do NOT "
+            "mark the assets stage completed yet. Animate the approved stills into motion clips "
+            "(image_to_video via the Higgsfield MCP bridge) and generate narration/music "
+            "(ElevenLabs), record every file in asset_manifest, then rewrite the assets checkpoint "
+            "with status='awaiting_human' (WITHOUT the 'stills' phase marker) and STOP for the "
+            "full media approval."
         )
 
     def _revise_prompt(self, job_id: str, stage: Optional[str], response: dict[str, Any]) -> str:

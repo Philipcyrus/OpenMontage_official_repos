@@ -15,9 +15,9 @@ Dify  ──HTTP──▶  Launcher (this API)  ──▶  headless Claude agent
 ```
 
 - **One base URL**, a handful of endpoints (below).
-- The pipeline **pauses for human approval at 4 gates**: script → storyboard → clips → final.
+- The pipeline **pauses for human approval at 5 gates**: script → scene_plan (text) → stills (before video) → assets (all media) → final.
 - Real generation takes **minutes**, so the API is **asynchronous**: you `POST`, then **poll** `GET` until the gate is ready. (See §4 — this is the single most important thing to build correctly.)
-- Output at each gate is a set of **real downloadable files** (script, stills, clips, final MP4).
+- Output at each gate is **real reviewable material** — a structured text plan at scene_plan, and downloadable files (script, stills, clips, final MP4) at the other gates.
 
 ---
 
@@ -60,9 +60,11 @@ Returns **immediately**:
 ### `GET /jobs/{job_id}` — current state (poll this)
 ```json
 {"job_id":"job_xxxx","status":"awaiting_human","stage":"scene_plan",
- "gate":"approve_storyboard","question":"Approve the storyboard stills…",
- "artifacts":{"stills":["/jobs/job_xxxx/artifacts/scene-1.png", …]}}
+ "gate":"approve_scene_plan","question":"Approve the scene plan (text)…",
+ "artifacts":{"scene_plan":{"version":"1.0","scenes":[{"id":"scene-1","type":"generated",
+   "description":"Panda waves at the airport gate","start_seconds":0,"end_seconds":3, …}]}}}
 ```
+At the `scene_plan` gate the artifact is the **structured text plan** (a JSON object shown for review — **no images**). Media appears later, at the `assets` gate.
 
 ### `POST /jobs/{job_id}/respond` — approve or edit the current gate
 Body (approve):
@@ -102,26 +104,33 @@ loop: GET again … repeat for each gate
 
 ## 5. The gate sequence (state machine)
 
+Upstream's text `scene_plan` + a Panda **cost gate**: the `assets` stage pauses **twice** — stills first (cheap), then the full media.
+
 ```
 POST /jobs
    │  (agent: idea + script)
    ▼
-approve_script        artifacts: script            approve│revise
+approve_script        artifacts: script                    approve│revise
    │
    ▼
-approve_storyboard    artifacts: stills[]           approve│revise│supply-own-stills
+approve_scene_plan    artifacts: scene_plan (TEXT plan)     approve│revise        ← no media here
    │
    ▼
-approve_clips         artifacts: clips[]            approve│revise (per-shot)
+approve_stills        artifacts: stills[]  (NO video yet)   approve│revise (per-scene)
+   │                                                          ↑ approve the look BEFORE paying
+   ▼                                                            for image→video
+approve_assets        artifacts: stills[]+clips[]+          approve│revise (per-shot)
+   │                             asset_manifest (all media)
+   ▼
+approve_final         artifacts: final (MP4)               approve│revise
    │
    ▼
-approve_final         artifacts: final (MP4)        approve│revise
-   │
-   ▼
-done                  artifacts: final              (branding is a SEPARATE later step)
+done                  artifacts: final                     (branding is a SEPARATE later step)
 ```
 
 `status` values: `running` (working, keep polling) · `awaiting_human` (a gate — act) · `done` (finished) · `failed` (see `question`).
+
+> **The assets stage surfaces TWO gates.** `approve_stills` and `approve_assets` are two `awaiting_human` pauses of the **same** `assets` stage (`stage:"assets"` at both). The first shows **stills only** — no video has been generated yet, so a rejection here costs nothing. The second shows the full media set after the approved stills are animated. Both are enforced by the engine's checkpoint layer (a gated stage cannot complete without human approval). Tell them apart by the `gate` field — do not rely on `stage` alone.
 
 ---
 
@@ -142,8 +151,16 @@ Plain-language description of the video. **Be specific** — duration, what happ
 | `narrator` | `"panda"` \| `"customer"` | which character narrates |
 | `voice_id` | ElevenLabs voice id (string) | **explicit override** — use this exact voice, ignore the default |
 | `music` | mood string, or `false` | background music via ElevenLabs (`"upbeat, light"`), or `false` to skip |
+| `render_runtime` | `"auto"` \| `"ffmpeg"` \| `"remotion"` \| `"hyperframes"` | which render engine composes the video. Default `"auto"` |
 
 If `voice_id` is omitted, the engine picks the brand voice from config by `narrator`+`language`.
+
+**`render_runtime`** (upstream-style engine selection):
+- `"auto"` (default) — the engine picks per the decision matrix + what's installed on the box. For character-mascot ads this resolves to `ffmpeg`.
+- `"ffmpeg"` — deterministic clean/brand render via `panda_render` (the Panda default; best for character clips).
+- `"remotion"` — React motion-graphics (kinetic stat/text cards, charts, caption burn). Needs Node ≥ 22 + the remotion-composer project on the box.
+- `"hyperframes"` — HTML/CSS/GSAP (kinetic typography, product-promo title cards). Needs Node ≥ 22 + headless Chrome on the box.
+- If a requested runtime isn't available on the box, the job **fails with a clear error** rather than silently downgrading. Leave it `"auto"` unless you specifically want motion-graphics output.
 
 ---
 
@@ -153,10 +170,12 @@ If `voice_id` is omitted, the engine picks the brand voice from config by `narra
 
 | Body | Effect |
 |---|---|
-| `{"decision":"approve"}` | accept this stage, advance to the next gate |
-| `{"decision":"revise","answer":"<what to change>"}` | regenerate this stage honoring the note, stay at the same gate |
-| `{"decision":"approve","stills":["/abs/path.png", …]}` | **at storyboard only** — supply your own stills instead of the generated ones |
-| `{"decision":"revise","shots":[1,3],"answer":"more motion"}` | **at clips only** — regenerate just those shot indices |
+| `{"decision":"approve"}` | accept this gate, advance to the next |
+| `{"decision":"revise","answer":"<what to change>"}` | regenerate this gate's output honoring the note, stay at the same gate (at `approve_scene_plan` this rewrites the text plan; at `approve_stills` this regenerates stills) |
+| `{"decision":"revise","shots":[1,3],"answer":"…"}` | at `approve_stills` (regenerate those scenes' stills) **or** `approve_assets` (regenerate those shots' clips) |
+| `{"decision":"approve","stills":["/abs/path.png", …]}` | **at `approve_stills` / `approve_assets`** — supply your own media instead of generated ones (associated with the asset manifest, not the scene plan) |
+
+> Approving `approve_stills` does **not** finish the assets stage — it unlocks video generation. Poll again; the next gate is `approve_assets`.
 
 Notes:
 - Edits are a **text instruction** the agent acts on (not a manual pixel editor). More specific = closer result.
@@ -171,13 +190,15 @@ Returned under `artifacts` in every state; grouped by kind:
 | key | type | when |
 |---|---|---|
 | `script` | file (or inline under `_checkpoint_artifacts.script`) | after script stage |
-| `stills` | list of image paths | after storyboard |
-| `clips` | list of video paths | after clips |
+| `scene_plan` | **inline JSON object** (the text plan — show it, don't fetch) | at the scene_plan gate |
+| `stills` | list of image paths | at the **stills** gate (and still present at the assets gate) |
+| `clips` | list of video paths | at the **assets** gate |
+| `asset_manifest` | **inline JSON object** (all generated media: `path`+`scene_id` per asset) | at the **assets** gate |
 | `final` | single MP4 path | after compose |
 | `branded` | bool (always `false` in base video) | after compose |
-| `_checkpoint_artifacts` | raw structured data (script JSON, asset manifest, render report) | context/debug |
+| `_checkpoint_artifacts` | raw structured data (script JSON, render report) | context/debug |
 
-Fetch any with `GET /jobs/{id}/artifacts/{basename}` (prepend base URL to the relative path). Display `stills`/`clips`/`final` to the user at their gates.
+File artifacts (`script`, `stills`, `clips`, `final`) come as **relative URLs** — fetch with `GET /jobs/{id}/artifacts/{basename}` (prepend the base URL). Structured artifacts (`scene_plan`, `asset_manifest`) come as **inline JSON objects** — display them directly for review, no fetch needed. Show `scene_plan` (text) at the scene_plan gate; show `stills`/`clips` at the assets gate; show `final` at the final gate.
 
 ---
 
@@ -198,7 +219,7 @@ curl -s -H "X-Dify-Token: $T" $BASE/jobs/job_xxxx
 # 3) approve (or revise)
 curl -s -X POST $BASE/jobs/job_xxxx/respond -H "X-Dify-Token: $T" -H "Content-Type: application/json" \
  -d '{"decision":"approve"}'
-# -> status:running ; go back to (2). Repeat: storyboard -> clips -> final.
+# -> status:running ; go back to (2). Repeat: scene_plan -> stills -> assets -> final.
 
 # 4) when status=done, download the video
 curl -s -H "X-Dify-Token: $T" $BASE/jobs/job_xxxx/artifacts/final.mp4 -o final.mp4
@@ -212,7 +233,7 @@ Build a **chatflow** (mirrors the existing Mochi v6e pattern with conversation v
 
 1. **Start** — HTTP `POST /jobs` with the user's brief + options → store `job_id`, `status` in conversation variables.
 2. **Poll loop** — HTTP `GET /jobs/{job_id}`; if `status == running`, wait ~20s and loop; if `awaiting_human`, exit loop.
-3. **Present gate** — show `question` and render `artifacts` (display the stills/clip/final to the user).
+3. **Present gate** — show `question` and render `artifacts` (display the scene plan text / stills / clips / final to the user).
 4. **Collect reply** — user says approve or describes an edit.
 5. **Respond** — HTTP `POST /respond` with `{"decision":"approve"}` or `{"decision":"revise","answer":"<user text>"}`.
 6. **Repeat** 2–5 until `status == done`, then present `final.mp4`.
@@ -226,8 +247,9 @@ Build a **chatflow** (mirrors the existing Mochi v6e pattern with conversation v
 | stage | typical `running` time |
 |---|---|
 | script | ~1–3 min |
-| storyboard (stills) | ~3–8 min |
-| clips (image→video) | ~5–15 min |
+| scene_plan (text plan) | ~1–3 min |
+| stills (images only, before video) | ~2–6 min |
+| assets (clips + voice/music from approved stills) | ~5–15 min |
 | compose (final) | seconds |
 
 Long `running` stretches are **normal** — that's why it's async.
