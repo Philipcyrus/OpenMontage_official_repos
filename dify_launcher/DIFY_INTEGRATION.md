@@ -26,10 +26,12 @@ Dify  ──HTTP──▶  Launcher (this API)  ──▶  headless Claude agent
 | | |
 |---|---|
 | **Base URL** | `https://dev.om.mvnoc.ai` |
-| **Auth** | Header `X-Dify-Token: <token>` on **every** request (value supplied separately). If the server has no token configured, the header is ignored — but assume it's required. |
+| **Auth** | **Optional, env-toggleable.** Controlled by `DIFY_TOKEN` on the server. If `DIFY_TOKEN` is **empty/unset** (the current default), auth is **off** — send no header. If `DIFY_TOKEN` is **set**, every request must send header `X-Dify-Token: <that value>` or gets `401`. |
 | **Content type** | `application/json` for all POST bodies. |
 
-A bad/missing token when one is configured → `401`.
+A bad/missing token *when one is configured* → `401`. When no token is configured, the header is
+ignored (harmless to send). The `X-Dify-Token` header in the examples below is only needed if the
+server has `DIFY_TOKEN` set — omit it in the default open mode.
 
 ---
 
@@ -206,6 +208,8 @@ File artifacts (`script`, `stills`, `clips`, `final`) come as **relative URLs** 
 
 ```bash
 BASE=https://dev.om.mvnoc.ai; T=YOUR_TOKEN_HERE
+# NOTE: the -H "X-Dify-Token: $T" header below is only needed if the server has DIFY_TOKEN set.
+# In the default open mode (DIFY_TOKEN empty) you can drop every X-Dify-Token header.
 
 # 1) start
 curl -s -X POST $BASE/jobs -H "X-Dify-Token: $T" -H "Content-Type: application/json" \

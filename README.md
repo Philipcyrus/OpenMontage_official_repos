@@ -48,17 +48,19 @@ Branding = a SEPARATE, on-demand step applied to the approved master (not a gate
 
 ## The approval gates
 
-The `panda-video` pipeline pauses for a human at four points (`pipeline_defs/panda-video.yaml`):
+The `panda-video` pipeline pauses for a human at five points (`pipeline_defs/panda-video.yaml`):
 
 | # | Gate | Reviewer approves |
 |---|------|-------------------|
 | 1 | `approve_script` | the script |
-| 2 | `approve_storyboard` | one still per scene (may be user-supplied) |
-| 3 | `approve_clips` | the generated motion clips (revise specific shots) |
-| 4 | `approve_final` | the finished (unbranded) video |
+| 2 | `approve_scene_plan` | the structured **text** scene plan (no media generated yet) |
+| 3 | `approve_stills` | one still per scene — **no video yet**, so a reject here costs nothing |
+| 4 | `approve_assets` | the full media set (approved stills animated into clips + VO + music; revise specific shots) |
+| 5 | `approve_final` | the finished (unbranded) video |
 
+Gates 3 & 4 are two pauses of the **same** `assets` stage (tell them apart by the `gate` field).
 Approve advances; "revise" regenerates that stage (or just the named shots). Branding is offered
-**after** gate 4, only if asked.
+**after** gate 5, only if asked.
 
 ## Quick start (EC2)
 
@@ -92,7 +94,7 @@ Set `DIFY_RUNNER`:
 ## Testing
 
 ```bash
-python dify_launcher/test_dify_flow.py        # full 4-gate handshake on the mock runner (real render)
+python dify_launcher/test_dify_flow.py        # full 5-gate handshake on the mock runner (real render)
 python dify_launcher/test_claude_adapter.py   # the claude runner's checkpoint adapter
 make test                                     # upstream engine contract tests
 ```
@@ -102,7 +104,7 @@ Or drive the live API with curl — see [`deploy/README.md`](deploy/README.md).
 
 | path | what |
 |------|------|
-| `pipeline_defs/panda-video.yaml` | the pipeline + the 4 gates |
+| `pipeline_defs/panda-video.yaml` | the pipeline + the 5 gates |
 | `skills/pipelines/panda-video/` | stage skills (storyboard director, …) |
 | `tools/video/panda_render.py` | clean compose (folded render) |
 | `tools/video/higgsfield_mcp_video.py` | Higgsfield MCP bridge |

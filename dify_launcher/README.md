@@ -21,17 +21,20 @@ Dify ──HTTP──▶ Dify Launcher ──▶ runner ──▶ agent/pipeline
 | GET  | `/jobs/{id}/artifacts/{name}` | download a script / still / final.mp4 |
 
 **Gate sequence** (matches `pipeline_defs/panda-video.yaml`):
-`start → approve_script → approve_storyboard → approve_clips → approve_final → done`.
-Branding is **not** a gate — it's an on-demand step after `approve_final`.
+`start → approve_script → approve_scene_plan → approve_stills → approve_assets → approve_final → done`.
+`approve_stills` and `approve_assets` are two pauses of the **same** `assets` stage (tell them
+apart by the `gate` field). Branding is **not** a gate — it's an on-demand step after `approve_final`.
 
-At the storyboard gate, Dify may pass user-supplied stills:
+At `approve_scene_plan` the reviewer approves a structured **text** plan — no media yet.
+
+At `approve_stills` / `approve_assets`, Dify may pass user-supplied media instead of generated:
 `POST /jobs/{id}/respond {"decision":"approve","stills":["/path/a.png","/path/b.png"]}`.
 
-At the **clips** gate, every generated shot is reviewed together; revise specific shots:
+At the **assets** gate, every generated shot is reviewed together; revise specific shots:
 `POST /jobs/{id}/respond {"decision":"revise","shots":[1,4]}` regenerates only those.
 
 ## Runners (env `DIFY_RUNNER`)
-- **`mock`** (default) — no LLM, no Higgsfield. Fakes script + storyboard and REALLY renders a
+- **`mock`** (default) — no LLM, no Higgsfield. Fakes script + scene_plan + stills and REALLY renders a
   clean master via the folded `panda_render`. Lets you test the whole Dify handshake locally.
 - **`claude`** — the EC2 path (implemented in `runner.py`). Each start/resume runs Claude Code
   headless (`claude -p`) against the engine repo; OpenMontage's checkpoint-based resume means
@@ -43,7 +46,7 @@ At the **clips** gate, every generated shot is reviewed together; revise specifi
   artifact key/paths the panda-video skills emit (see `_mirror_artifacts`).
 
 ## Tests
-- `python dify_launcher/test_dify_flow.py` — full 4-gate handshake on the mock runner (real render)
+- `python dify_launcher/test_dify_flow.py` — full 5-gate handshake on the mock runner (real render)
 - `python dify_launcher/test_claude_adapter.py` — the claude runner's checkpoint adapter
   (gate mapping, artifact mirroring, sync, approval) against the real `lib/checkpoint`
 
