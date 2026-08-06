@@ -2,8 +2,8 @@ name: panda-video
 version: "0.1"
 description: >
   Panda Mobile video pipeline. Agent-driven production that mirrors upstream OpenMontage's
-  Animated Explainer architecture, with four human-approval gates: script, scene_plan
-  (TEXT), assets (all generated media), and final video. The scene_plan stage produces ONLY
+  Animated Explainer architecture, with five human-approval gates: script, scene_plan
+  (TEXT), stills, assets (all generated media), and final video. The scene_plan stage produces ONLY
   a structured text plan (no media, no generation tools); ALL media (stills, clips, voice,
   music) is generated in the assets stage and recorded canonically in asset_manifest.
   Generation runs through the Higgsfield MCP bridge + ElevenLabs. The compose stage is

@@ -145,6 +145,17 @@ Point Dify at the base URL and follow `dify_launcher/DIFY_INTEGRATION.md`:
 2. **Storage:** local under `DIFY_DATA_DIR` (default `./data`). Artifacts + job state live
    there; `data/jobs/` is gitignored. Swap for S3 later with no API change.
 
+## Cost & time report (per project)
+Every job writes a consumption report — **Higgsfield credits**, **ElevenLabs** characters/seconds,
+and **generation time** per stage + total (native units, no USD roll-up). Read it on the box with:
+```bash
+curl -s http://127.0.0.1:8501/jobs/<job_id>/cost | python -m json.tool   # JSON summary
+cat data/jobs/<job_id>/artifacts/cost_report.md                          # human-readable table
+```
+The report files live at `data/jobs/<job_id>/artifacts/cost_report.{md,json}` (mirrored from the
+engine project's `projects/<job_id>/artifacts/`). See `dify_launcher/DIFY_INTEGRATION.md` for the
+endpoint contract.
+
 ## Files here
 | file | purpose |
 |---|---|

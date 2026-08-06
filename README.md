@@ -18,8 +18,8 @@
 A production system that turns a **brief** into a finished **Panda Mobile** video. A person (via
 **Dify**) submits the brief and reviews the work at each stage; an **agent** (Claude Code, driving
 the [OpenMontage](https://github.com/calesthio/OpenMontage) pipeline engine) does the production —
-script → storyboard stills → generated clips → assembled video. Generation runs through the
-**Higgsfield MCP**; the final render (assembly, CJK captions, audio) is produced in-process by
+script → scene plan (text) → stills → motion clips + audio → assembled video. Generation runs
+through the **Higgsfield MCP**; the final render (assembly, CJK captions, audio) is produced in-process by
 montage-svc's craft code, **folded into this repo**. Panda **branding** (logo, watermark, cards)
 is applied **only on request, after the video is approved** — never baked in.
 
@@ -32,17 +32,19 @@ Dify (dev.om.mvnoc.ai)                     ← brief in, reviews + approvals
       │  HTTP  (:8501)
 Dify Launcher  (dify_launcher/)            ← the ONLY service; starts/resumes runs, serves gates
       │  starts per job
-Claude Code + OpenMontage pipeline         ← the agent: script → stills → clips → assemble
+Claude Code + OpenMontage pipeline         ← the agent: script → scene_plan (text) → stills → assets → compose
       ├─ Higgsfield MCP        → video/image generation (no REST keys)
-      ├─ ElevenLabs            → voice
-      └─ panda_render          → clean compose (folded montage-svc render, in-process)
+      ├─ ElevenLabs            → voice + music
+      ├─ panda_render          → clean compose, ffmpeg lane (folded montage-svc render, in-process)
+      └─ video_compose         → remotion / hyperframes lanes (Node ≥22; runtime-routed)
       │
-Local storage (data/jobs/{id})             ← artifacts + checkpoints (S3 later, no API change)
+Local storage (data/jobs/{id})             ← artifacts + checkpoints + cost_report (S3 later, no API change)
 
 Branding = a SEPARATE, on-demand step applied to the approved master (not a gate).
+A second entrance, /montage/* (own X-Panda-Token), exposes the raw render core directly.
 ```
 
-- **LLM:** Claude via **OpenRouter** (`ANTHROPIC_BASE_URL`) — no direct Anthropic key needed.
+- **LLM:** Claude Code headless — **subscription login** (`~/.claude`) on the box, or OpenRouter via `ANTHROPIC_BASE_URL`. No direct Anthropic API key required.
 - **One service, one port (8501):** the engine itself is not a server; the launcher fronts it.
 - **montage-svc is folded in** (`vendor/montage_svc`) — no separate render service to run.
 
@@ -112,7 +114,8 @@ Or drive the live API with curl — see [`deploy/README.md`](deploy/README.md).
 | path | what |
 |------|------|
 | `pipeline_defs/panda-video.yaml` | the pipeline + the 5 gates |
-| `skills/pipelines/panda-video/` | stage skills (storyboard director, …) |
+| `skills/pipelines/panda-video/` | stage skills (scene-plan director, asset director, compose director) |
+| `lib/cost_report.py` | per-project cost & time report (Higgsfield credits, ElevenLabs usage, gen time) |
 | `tools/video/panda_render.py` | clean compose (folded render) |
 | `tools/video/higgsfield_mcp_video.py` | Higgsfield MCP bridge |
 | `config/panda-elements.json` | panda + customer character references |

@@ -1,9 +1,9 @@
 # Dify Launcher
 
 The **HTTP service Dify talks to.** The OpenMontage engine is not a service — it's an agent
-that runs per job. This launcher starts/resumes agent runs and surfaces the three approval
+that runs per job. This launcher starts/resumes agent runs and surfaces the five approval
 gates so Dify can show them to the user and collect responses. Storage is **local** (a folder
-per job); no S3/Postgres (Phase 5 deferred).
+per job); S3/Postgres backends can be swapped in later without touching the API.
 
 ```
 Dify ──HTTP──▶ Dify Launcher ──▶ runner ──▶ agent/pipeline ──▶ local artifacts
@@ -63,11 +63,23 @@ DIFY_RUNNER=mock uvicorn dify_launcher.app:app --host 0.0.0.0 --port 8600
 ## Config (env)
 - `DIFY_RUNNER` — `mock` (default) | `claude`
 - `DIFY_DATA_DIR` — job storage root (default `./data`; `data/jobs/` is gitignored)
-- `DIFY_TOKEN` — optional shared secret; if set, callers must send `X-Dify-Token`
+- `DIFY_TOKEN` — optional shared secret; **empty = no auth**, set = callers must send `X-Dify-Token`
+- `PANDA_TOKEN` — optional secret for the `/montage/*` raw-render door (`X-Panda-Token`), independent of `DIFY_TOKEN`
+
+## Job options (`POST /jobs` `options`)
+- `language`, `narrator`, `voice_id`, `music`
+- `render_runtime` — `auto` (default) | `ffmpeg` | `remotion` | `hyperframes`. The `ffmpeg`
+  lane (`panda_render`) needs no Node; `remotion`/`hyperframes` need **Node ≥ 22** on the box.
 
 ## Connecting Dify
 Point Dify's HTTP/tool nodes at this service's base URL:
 1. **Start** → `POST /jobs` with the brief; show `question` + the `script` artifact.
-2. On user approve/revise → `POST /jobs/{id}/respond`; repeat for storyboard, then final.
+2. On user approve/revise → `POST /jobs/{id}/respond`; repeat through `scene_plan → stills → assets → final`.
 3. Render the `final` artifact inline; on approve the job is `done`.
-4. (Later) a `POST /jobs/{id}/brand` step will apply Panda branding on request (panda_brand).
+4. Fetch `GET /jobs/{id}/cost` (or the `cost_report.md` artifact) for the per-project credits/time report.
+5. Panda branding is a separate, on-demand `panda_brand` step applied only after final approval.
+
+## Raw render door (`/montage/*`)
+A second, independent entrance to the same vendored render core (compose / overlay / mix-audio),
+for direct rendering outside the agent pipeline. Own auth (`X-Panda-Token`), mounted defensively
+(a failure there never takes down the launcher). See `DIFY_INTEGRATION.md` §15.
