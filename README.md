@@ -67,12 +67,17 @@ git clone https://github.com/Philipcyrus/OpenMontage_official_repos.git ~/panda-
 cd ~/panda-engine
 bash deploy/install.sh          # system deps + venv + python deps + smoke test
 . .venv/bin/activate
-cp .env.example .env            # set DIFY_TOKEN, DIFY_RUNNER=mock, DIFY_DATA_DIR, (OpenRouter/keys)
+cp .env.example .env            # DIFY_RUNNER=mock, DIFY_DATA_DIR, keys; DIFY_TOKEN optional (empty = no auth)
 
 # free port 8501 (retire old montage-svc) then run the launcher
 sudo systemctl disable --now montage-svc
 uvicorn dify_launcher.app:app --host 127.0.0.1 --port 8501
 ```
+
+**Auth is optional:** leave `DIFY_TOKEN` empty for no token; set it to require `X-Dify-Token`.
+**Node:** the default `ffmpeg`/`panda_render` render lane needs no Node; the `remotion` and
+`hyperframes` lanes need **Node ≥ 22** (installed via `nvm` alongside system Node 18).
+Both are covered in [`deploy/README.md`](deploy/README.md).
 
 Full deploy (systemd + reverse proxy for `dev.om.mvnoc.ai` → 8501): see [`deploy/README.md`](deploy/README.md).
 Wiring Dify to the launcher: see [`dify_launcher/DIFY_INTEGRATION.md`](dify_launcher/DIFY_INTEGRATION.md).

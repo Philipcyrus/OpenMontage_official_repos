@@ -3,18 +3,27 @@ Description=Panda AI - Dify Launcher (OpenMontage engine front door)
 After=network.target
 
 [Service]
-# Adjust User + paths to your box. Assumes clone at /opt/panda/OpenMontage-prod.
+# Adjust User + paths to your box. Current box clone:
+#   /home/ec2-user/OpenMontage-Repos/OpenMontage_official_repos
 User=ec2-user
-WorkingDirectory=/opt/panda/OpenMontage-prod
-EnvironmentFile=/opt/panda/OpenMontage-prod/.env
+WorkingDirectory=/home/ec2-user/OpenMontage-Repos/OpenMontage_official_repos
+EnvironmentFile=/home/ec2-user/OpenMontage-Repos/OpenMontage_official_repos/.env
+
+# PATH so the launcher can find, in priority order:
+#   - Node 22 (nvm) for the Remotion / HyperFrames render lanes (npx remotion|hyperframes)
+#   - `claude` (npm-global) for DIFY_RUNNER=claude
+#   - the static ffmpeg build (/usr/local/bin) for the default panda_render lane
+# Bump the nvm version string if you install a newer Node. The ffmpeg lane works without Node.
+Environment=PATH=/home/ec2-user/.nvm/versions/node/v22.23.2/bin:/home/ec2-user/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+
 # Runs on 8501 — the port dev.om.mvnoc.ai already forwards to (replacing montage-svc).
 # Proxy points root -> 8501, so the launcher serves at root: no --root-path needed.
 # STOP montage-svc first so 8501 is free (see deploy/README.md).
 # --host 0.0.0.0 so a reverse proxy in another namespace/container can reach it.
 # SECURITY: the EC2 security group MUST restrict inbound 8501 to the proxy only
 # (never 0.0.0.0/0) — binding all interfaces exposes the port otherwise.
-ExecStart=/opt/panda/OpenMontage-prod/.venv/bin/uvicorn dify_launcher.app:app \
-    --host 0.0.0.0 --port 8501
+ExecStart=/home/ec2-user/OpenMontage-Repos/OpenMontage_official_repos/.venv/bin/python \
+    -m uvicorn dify_launcher.app:app --host 0.0.0.0 --port 8501
 Restart=always
 RestartSec=3
 
