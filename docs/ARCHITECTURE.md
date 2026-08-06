@@ -1,5 +1,11 @@
 # OpenMontage Architecture
 
+> **Scope:** This documents the **upstream OpenMontage engine**, not the Panda Mobile production
+> system that runs on top of it. Some details here (e.g. Higgsfield via REST keys) do **not** apply
+> to the Panda system, which uses the Higgsfield **MCP**, a Dify launcher with 5 approval gates, and
+> a per-project cost report. For the production system see [`../README.md`](../README.md) and
+> [`../dify_launcher/DIFY_INTEGRATION.md`](../dify_launcher/DIFY_INTEGRATION.md).
+
 > Last updated: 2026-03-28 | Derived from code exploration, not prior documentation.
 
 OpenMontage is an **agent-orchestrated video production platform**. An LLM coding assistant (Claude Code, Cursor, Copilot, etc.) acts as the orchestrator — reading pipeline manifests, following skill instructions, calling Python tools, and checkpointing state. There is no runtime Python orchestrator; the agent _is_ the control plane.

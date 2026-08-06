@@ -1,5 +1,10 @@
 # OpenMontage - Agent Guide
 
+> **Scope:** This is the agent contract for the **upstream OpenMontage engine**, not the Panda Mobile
+> production system. For how the Panda production pipeline runs (Dify launcher, the 5 approval gates,
+> Higgsfield **MCP**, cost report) see [`README.md`](README.md) and
+> [`dify_launcher/DIFY_INTEGRATION.md`](dify_launcher/DIFY_INTEGRATION.md).
+
 Start here. This is the complete operating guide and agent contract for OpenMontage.
 
 For architecture, key files, and conventions see [`PROJECT_CONTEXT.md`](PROJECT_CONTEXT.md).

@@ -1,5 +1,5 @@
 name: panda-video
-version: "0.1"
+version: "1.0"
 description: >
   Panda Mobile video pipeline. Agent-driven production that mirrors upstream OpenMontage's
   Animated Explainer architecture, with five human-approval gates: script, scene_plan
@@ -12,18 +12,18 @@ description: >
   always a CLEAN (unbranded) master. Panda branding (logo/watermark/cards) is applied ONLY on
   explicit user request AFTER approval, via the standalone panda_brand tool — never baked in.
 category: hybrid
-stability: beta                   # schema allows only production|beta
+stability: production             # schema allows only production|beta
 default_checkpoint_policy: guided
 
 orchestration:
   mode: executive-producer
-  # TODO: create pipelines/panda-video/executive-producer, or point at hybrid's for the
-  # first prove-the-hinge run.
+  # NOTE: reuses the hybrid executive-producer (functional in production). A panda-video-specific
+  # EP is a future specialization, not a blocker.
   skill: pipelines/hybrid/executive-producer
-  budget_default_usd: 3.00
+  budget_default_usd: 10.00         # USD governance ceiling (estimates); Higgsfield bills in credits
   max_revisions_per_stage: 3
   max_send_backs: 3
-  max_wall_time_minutes: 15
+  max_wall_time_minutes: 60         # a full 5-gate run (real Higgsfield generation) takes ~40 min
 
 extensions:
   custom_scripts: true
@@ -32,8 +32,8 @@ extensions:
   custom_tools: true               # we add montage_svc_compose + the higgsfield_mcp bridge
 
 required_skills:
-  # TODO: for stages we don't customize yet, these reuse hybrid's directors. Copy/adapt
-  # into pipelines/panda-video/ as we specialize each stage.
+  # NOTE: idea/script/edit reuse hybrid's directors (functional in production). Panda-specific
+  # versions are a future specialization, not a blocker.
   - pipelines/hybrid/executive-producer
   - pipelines/hybrid/idea-director
   - pipelines/hybrid/script-director

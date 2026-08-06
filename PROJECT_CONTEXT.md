@@ -1,5 +1,10 @@
 # OpenMontage - Shared Project Context
 
+> **Scope:** This describes the **upstream OpenMontage engine** (conventions for building/extending
+> the engine and its skills). It is NOT the Panda Mobile production system. For the production system
+> — Dify launcher, 5 approval gates, Higgsfield **MCP**, cost report — see [`README.md`](README.md)
+> and [`dify_launcher/DIFY_INTEGRATION.md`](dify_launcher/DIFY_INTEGRATION.md).
+
 This is the single source of truth for project architecture and conventions. All platform-specific agent files (CLAUDE.md, CODEX.md, CURSOR.md, COPILOT.md) should point here instead of duplicating this content.
 
 ## Identity
