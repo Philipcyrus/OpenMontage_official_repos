@@ -67,6 +67,15 @@ its scene), plus optional `prompt`/`model`/`cost_usd`/`duration_seconds`. Persis
 `asset_manifest` (`version: "1.0"`) as part of the PHASE 2 checkpoint. On approval the stage
 completes and the pipeline proceeds to edit/compose.
 
+**Record Higgsfield credits (for the per-project cost report).** For every Higgsfield-generated
+asset (stills via `generate_image`, clips via image_to_video), you already run the `get_cost:true`
+preflight before spending (see `skills/meta/higgsfield-mcp-bridge.md`). Write that credit number
+into the asset's manifest entry as **`credits`** (the number), **`credits_source: "actual"`**, and
+**`provider: "higgsfield"`**. This is the ONLY place real credits are captured — do not skip it.
+If you ever generate without a get_cost value, still set `credits` to your best estimate and mark
+`credits_source: "estimated"`. (ElevenLabs voice/music usage is captured automatically by the
+tools — you do not need to record it.)
+
 ## Handoff to `edit` / `compose`
 `compose` assembles the approved assets into a CLEAN (unbranded) master via `panda_render`.
 Branding is a separate, on-demand `panda_brand` step applied only after final approval.

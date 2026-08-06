@@ -62,6 +62,13 @@ Gates 3 & 4 are two pauses of the **same** `assets` stage (tell them apart by th
 Approve advances; "revise" regenerates that stage (or just the named shots). Branding is offered
 **after** gate 5, only if asked.
 
+## Cost & time report
+
+Every job produces a per-project consumption report in native units (no cross-platform USD
+roll-up): **Higgsfield credits**, **ElevenLabs** characters/seconds, and **generation time**
+per stage + total. Fetch it at `GET /jobs/{id}/cost` (JSON) or download the `cost_report.md`
+artifact. See [`dify_launcher/DIFY_INTEGRATION.md`](dify_launcher/DIFY_INTEGRATION.md).
+
 ## Quick start (EC2)
 
 ```bash

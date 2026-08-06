@@ -127,6 +127,17 @@ class MusicGen(BaseTool):
 
         result.duration_seconds = round(time.time() - start, 2)
         result.cost_usd = self.estimate_cost(inputs)
+        # Native-unit consumption for the per-project cost report: ElevenLabs Music bills
+        # per generation by length, so the generated seconds is the consumed amount.
+        if result.success and isinstance(result.data, dict):
+            dur = inputs.get("duration_seconds")
+            if isinstance(dur, (int, float)):
+                result.data["usage"] = {
+                    "platform": "elevenlabs_music",
+                    "unit": "seconds",
+                    "amount": round(float(dur), 2),
+                    "source": "actual",
+                }
         return result
 
     def _generate(self, inputs: dict[str, Any], api_key: str) -> ToolResult:

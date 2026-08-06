@@ -23,6 +23,7 @@ Sync vs async:
 
 from __future__ import annotations
 
+import json
 import os
 import threading
 from typing import Any, Callable, Optional
@@ -200,3 +201,22 @@ def get_artifact(job_id: str, name: str, x_dify_token: Optional[str] = Header(No
     if not p.is_file():
         raise HTTPException(status_code=404, detail="artifact not found")
     return FileResponse(str(p))
+
+
+@app.get("/jobs/{job_id}/cost")
+def get_cost(job_id: str, x_dify_token: Optional[str] = Header(None)) -> dict[str, Any]:
+    """Per-project cost & time summary (Higgsfield credits, ElevenLabs usage, generation
+    time) in native units. The full human-readable table is the `cost_report.md` artifact."""
+    _auth(x_dify_token)
+    state = store.load_state(job_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="job not found")
+    p = store.artifact_path(job_id, "cost_report.json")
+    if not p.is_file():
+        return {"job_id": job_id, "status": state.get("status"),
+                "cost_report": None,
+                "note": "no cost report yet — no generation has run for this job"}
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        raise HTTPException(status_code=500, detail="cost report unreadable")

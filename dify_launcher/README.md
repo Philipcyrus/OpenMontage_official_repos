@@ -18,7 +18,8 @@ Dify ──HTTP──▶ Dify Launcher ──▶ runner ──▶ agent/pipeline
 | POST | `/jobs` | start a run from `{brief, profile?, options?}` → stops at GATE 1 |
 | GET  | `/jobs/{id}` | current `{status, stage, gate, question, artifacts}` |
 | POST | `/jobs/{id}/respond` | `{decision: approve\|revise, answer?, stills?}` → resume to next gate |
-| GET  | `/jobs/{id}/artifacts/{name}` | download a script / still / final.mp4 |
+| GET  | `/jobs/{id}/artifacts/{name}` | download a script / still / final.mp4 / `cost_report.md` |
+| GET  | `/jobs/{id}/cost` | per-project cost & time report — Higgsfield credits, ElevenLabs usage, generation time (native units) |
 
 **Gate sequence** (matches `pipeline_defs/panda-video.yaml`):
 `start → approve_script → approve_scene_plan → approve_stills → approve_assets → approve_final → done`.

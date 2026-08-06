@@ -210,12 +210,18 @@ def _instrument_execute(fn: Callable) -> Callable:
             project_dir = infer_project_dir(inputs)
         if project_dir is not None:
             cost = getattr(result, "cost_usd", None)
+            # Native-unit consumption a tool opts into by putting a `usage` dict on
+            # result.data (e.g. {"platform","unit","amount","source"}). Powers the
+            # per-project cost report (lib/cost_report.py). Dropped when absent.
+            rdata = getattr(result, "data", None)
+            usage = rdata.get("usage") if isinstance(rdata, dict) else None
             emit_event(project_dir, {
                 **base, "event": "finish",
                 "output_path": str(output_path) if output_path else None,
                 "success": getattr(result, "success", None),
                 # NOTE: 0.0 is meaningful (ran for free) — only None is dropped.
                 "cost_usd": cost if isinstance(cost, (int, float)) else None,
+                "usage": usage if isinstance(usage, dict) else None,
                 "duration_s": round(time.monotonic() - started, 2),
             })
         return result

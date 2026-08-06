@@ -25,6 +25,8 @@
           "seed": { "type": "integer", "description": "Seed if applicable" },
           "model": { "type": "string", "description": "Model used for generation" },
           "cost_usd": { "type": "number", "minimum": 0 },
+          "credits": { "type": "number", "minimum": 0, "description": "Native provider credits consumed for this asset (e.g. Higgsfield credits from the get_cost preflight). Native units, not USD." },
+          "credits_source": { "type": "string", "enum": ["actual", "estimated"], "description": "Whether `credits` is a measured value (Higgsfield get_cost/balance) or an estimate." },
           "duration_seconds": { "type": "number", "minimum": 0 },
           "resolution": { "type": "string" },
           "format": { "type": "string" },

@@ -155,6 +155,15 @@ class ElevenLabsTTS(BaseTool):
 
         result.duration_seconds = round(time.time() - start, 2)
         result.cost_usd = self.estimate_cost(inputs)
+        # Native-unit consumption for the per-project cost report: ElevenLabs bills per
+        # character of input text, so len(text) IS the consumed amount (not an estimate).
+        if result.success and isinstance(result.data, dict):
+            result.data["usage"] = {
+                "platform": "elevenlabs",
+                "unit": "characters",
+                "amount": len(inputs.get("text", "")),
+                "source": "actual",
+            }
         return result
 
     def _generate(self, inputs: dict[str, Any], api_key: str) -> ToolResult:

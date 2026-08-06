@@ -83,6 +83,31 @@ Returns immediately with `status:"running"` → poll again for the next gate.
 e.g. `GET /jobs/job_xxxx/artifacts/final.mp4`. Returns the binary file.
 > Artifact paths in responses are **relative** (`/jobs/.../x.png`). Prepend the base URL to fetch/display them.
 
+### `GET /jobs/{job_id}/cost` — per-project cost & time report
+Returns the consumption for the whole project in each platform's **own native units** (no
+cross-platform USD total, by design):
+```json
+{"job_id":"job_xxxx",
+ "time":{"stages":[{"stage":"stills","seconds":310.5,"human":"5m 10s"},
+                   {"stage":"assets_media","seconds":1180.2,"human":"19m 40s"}],
+         "total_active_seconds":1716.1,"total_active_human":"28m 36s"},
+ "platforms":{
+   "higgsfield":{"unit":"credits","total":22,"actual":16,"estimated":6,"count":3,"items":[…]},
+   "elevenlabs":{"unit":"characters","total":860,"calls":2,"source":"actual"},
+   "elevenlabs_music":{"unit":"seconds","total":30,"calls":1,"source":"actual"}}}
+```
+- **Higgsfield → credits** (real, from the agent's `get_cost` preflight; each item tagged `actual`/`estimated`).
+- **ElevenLabs → characters** (voice) / **seconds** (music) — real, measured by the tools.
+- **time** → active generation time per stage + total. This is machine time only; it **excludes** the human review waits between gates.
+- Before any generation has run the endpoint returns `{"cost_report":null,"note":"…"}`.
+
+The same data is also written as downloadable artifacts on every job:
+`cost_report.md` (human-readable table) and `cost_report.json`, and surfaced in the poll
+response under `artifacts.cost_report` (link) + `artifacts.cost_report_summary` (inline).
+
+> **Not tracked:** LLM (Claude) cost/tokens, and fal/Seedance/Kling — by request, only
+> Higgsfield credits, ElevenLabs usage, and generation time are reported.
+
 ---
 
 ## 4. The async model — POLL, don't wait on the POST

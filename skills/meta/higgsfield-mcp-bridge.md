@@ -50,7 +50,9 @@ For each scene/clip the `scene_plan` requires:
 1. **Preflight cost** — call `generate_video` with
    `{model, prompt, duration, aspect_ratio, count:1, get_cost:true}`. Sum the
    credits across all clips and check against `balance`. Report the total to the
-   user against the budget before committing to a batch.
+   user against the budget before committing to a batch. **Retain the per-clip
+   credit number** — it must be written into that asset's `asset_manifest` entry
+   (`credits`, `credits_source: "actual"`) for the per-project cost report.
 2. **Submit** — call `generate_video` (omit `get_cost`) with the final params.
    Capture the returned `job_id`. For image-to-video, first either
    `generate_image` or `media_import_url` to get a `media_id`, then pass it via
@@ -75,7 +77,8 @@ steps — a safety net, not the intended path.
 ## Provenance
 
 Record per clip in the `asset_manifest`: `provider: higgsfield_mcp`, the `model`,
-the `job_id`, the prompt, and the probed dimensions. Higgsfield clips may include
+the `job_id`, the prompt, the probed dimensions, and the **`credits`** consumed
+(from the step-1 `get_cost` preflight) with `credits_source: "actual"`. Higgsfield clips may include
 native synced audio — note in `edit_decisions` whether a clip's audio is kept or
 replaced by the narration/music mix so the compose stage doesn't double up.
 

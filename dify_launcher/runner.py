@@ -333,7 +333,8 @@ class ClaudeCodeRunner(Runner):
         from lib import checkpoint as cp
         cp.init_project(job_id, title=(state.get("brief") or "Panda video")[:80],
                         pipeline_type=_PIPELINE_TYPE)
-        self._run_agent(self._start_prompt(job_id, state.get("brief", ""), state.get("options") or {}))
+        self._run_agent(self._start_prompt(job_id, state.get("brief", ""), state.get("options") or {}),
+                        job_id, "script")
         return self._sync(state)
 
     def resume(self, state: dict[str, Any], response: dict[str, Any]) -> dict[str, Any]:
@@ -350,52 +351,76 @@ class ClaudeCodeRunner(Runner):
         # so it animates the approved stills and stops again at the full assets gate.
         if gate == "approve_stills":
             if decision == "approve":
-                self._run_agent(self._stills_approved_prompt(job_id))
+                self._run_agent(self._stills_approved_prompt(job_id), job_id, "assets_media")
             else:
                 self._run_agent(self._revise_prompt(
                     job_id, "assets (STILLS phase — regenerate the flagged stills and stop again "
-                            "at the stills gate; do NOT generate video yet)", response or {}))
+                            "at the stills gate; do NOT generate video yet)", response or {}),
+                    job_id, "stills_revise")
             return self._sync(state)
 
         if decision == "approve":
             self._approve_stage(job_id, stage)
             # Approving the LAST gate finishes the job — there is no next stage to run, so do
             # NOT spin up a pointless agent turn; just report done.
-            if cp.get_next_stage(self._projects_dir, job_id, _PIPELINE_TYPE) is None:
+            nxt = cp.get_next_stage(self._projects_dir, job_id, _PIPELINE_TYPE)
+            if nxt is None:
                 return self._sync(state)
             prompt = self._continue_prompt(job_id)
+            label = nxt
         else:
             prompt = self._revise_prompt(job_id, stage, response or {})
-        self._run_agent(prompt)
+            label = f"{stage}_revise"
+        self._run_agent(prompt, job_id, label)
         return self._sync(state)
 
     # -- agent invocation ---------------------------------------------------
     _TRANSIENT = ("connection closed", "api error", "overloaded", "rate limit",
                   "timeout", "timed out", " 500", " 502", " 503", " 529")
 
-    def _run_agent(self, prompt: str) -> None:
+    def _run_agent(self, prompt: str, job_id: str = "", label: str = "") -> None:
         """Run `claude -p` once per leg. Retries on TRANSIENT API/network errors (a dropped
         connection shouldn't kill a long leg); the agent resumes from the latest checkpoint,
-        so re-running the same prompt is safe."""
+        so re-running the same prompt is safe. Records the leg's wall-time (all attempts) to
+        the project's timing.jsonl for the per-project generation-time report."""
         import subprocess
         import time
         attempts = int(os.environ.get("CLAUDE_MAX_ATTEMPTS", "3"))
         last = ""
-        for i in range(attempts):
-            proc = subprocess.run(
-                [self._bin, "-p", prompt, *self._extra],
-                cwd=str(_ENGINE_ROOT), capture_output=True, text=True, timeout=self._timeout,
-            )
-            if proc.returncode == 0:
-                return
-            last = (proc.stderr or proc.stdout or "").strip()
-            low = last.lower()
-            transient = any(s in low for s in self._TRANSIENT)
-            if not transient or i == attempts - 1:
-                break
-            time.sleep(3 * (i + 1))  # brief backoff, then let the agent resume from checkpoint
-        tail = last.splitlines()[-8:]
-        raise RuntimeError("claude failed: " + " | ".join(tail))
+        started = time.monotonic()
+        try:
+            for i in range(attempts):
+                proc = subprocess.run(
+                    [self._bin, "-p", prompt, *self._extra],
+                    cwd=str(_ENGINE_ROOT), capture_output=True, text=True, timeout=self._timeout,
+                )
+                if proc.returncode == 0:
+                    return
+                last = (proc.stderr or proc.stdout or "").strip()
+                low = last.lower()
+                transient = any(s in low for s in self._TRANSIENT)
+                if not transient or i == attempts - 1:
+                    break
+                time.sleep(3 * (i + 1))  # brief backoff, then let the agent resume from checkpoint
+            tail = last.splitlines()[-8:]
+            raise RuntimeError("claude failed: " + " | ".join(tail))
+        finally:
+            self._record_timing(job_id, label, round(time.monotonic() - started, 2))
+
+    def _record_timing(self, job_id: str, label: str, seconds: float) -> None:
+        """Append one leg's wall-time to projects/{job}/artifacts/timing.jsonl. Never raises."""
+        if not job_id:
+            return
+        try:
+            from datetime import datetime, timezone
+            adir = self._projects_dir / job_id / "artifacts"
+            adir.mkdir(parents=True, exist_ok=True)
+            entry = {"ts": datetime.now(timezone.utc).isoformat(),
+                     "stage": label or "unknown", "seconds": seconds}
+            with open(adir / "timing.jsonl", "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry) + "\n")
+        except OSError:
+            pass
 
     # -- checkpoint <-> launcher state --------------------------------------
     def _sync(self, state: dict[str, Any]) -> dict[str, Any]:
@@ -407,6 +432,7 @@ class ClaudeCodeRunner(Runner):
             return state
         stage, status = latest.get("stage"), latest.get("status")
         arts = self._mirror_artifacts(job_id, latest.get("artifacts", {}))
+        self._add_cost_report(job_id, arts)
         if status == "failed":
             state.update(status="failed", stage=stage, gate=None,
                          question=latest.get("error", "stage failed"), artifacts=arts)
@@ -532,6 +558,26 @@ class ClaudeCodeRunner(Runner):
             out["branded"] = False
         out["_checkpoint_artifacts"] = artifacts  # raw non-file data for Dify context
         return out
+
+    def _add_cost_report(self, job_id: str, arts: dict[str, Any]) -> None:
+        """Build the per-project cost/time report (Higgsfield credits, ElevenLabs usage,
+        generation time), mirror it into the job store, and surface it in the Dify view:
+        `cost_report` as a downloadable .md link, `cost_report_summary` inline. Non-fatal."""
+        try:
+            from lib import cost_report as cr
+            summary = cr.write_report(job_id)
+        except Exception:  # noqa: BLE001 — the report must never break a run
+            return
+        try:
+            proj_art = self._projects_dir / job_id / "artifacts"
+            for name in ("cost_report.md", "cost_report.json"):
+                src = proj_art / name
+                if src.is_file():
+                    store.artifact_path(job_id, name).write_bytes(src.read_bytes())
+        except OSError:
+            pass
+        arts["cost_report"] = "cost_report.md"     # ends .md -> surfaced as a download link
+        arts["cost_report_summary"] = summary       # inline dict for Dify context
 
     # -- approvals + prompts ------------------------------------------------
     def _gate_stage(self, gate: Optional[str]) -> Optional[str]:
