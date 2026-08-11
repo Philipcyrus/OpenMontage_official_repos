@@ -91,9 +91,11 @@ stages:
     human_approval_default: true       # 🚦 GATE 2 (approve the text scene plan)
     review_focus:
       - Full script duration is covered with realistic per-scene timings, no gaps
-      - Each scene has type, description, framing, movement and (where relevant) character actions
+      - Each scene carries the 5 aspects — subject, subject motion, scene, spatial framing, camera (shot_language)
+      - Narrative structure is specified — narrative_role + shot_intent per scene, exactly one hero_moment
+      - Narration word budget fits the runtime (85-90%, ~2-3 words/sec)
       - Every required_asset is feasible with the tools available in the assets stage
-      - Panda identity / character-consistency / composition are specified as plan requirements
+      - Panda identity / character-consistency (Element ids + character_actions) / composition are specified as plan requirements
 
   # ---- GATES 3, 3.5 & 4 : the ASSETS stage runs in up to THREE human-reviewed phases ----
   # Best-of-both: upstream's single asset-generation stage, PLUS Panda cost gates. The stage
