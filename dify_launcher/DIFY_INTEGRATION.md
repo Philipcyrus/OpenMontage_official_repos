@@ -131,33 +131,36 @@ loop: GET again … repeat for each gate
 
 ## 5. The gate sequence (state machine)
 
-Upstream's text `scene_plan` + a Panda **cost gate**: the `assets` stage pauses **twice** — stills first (cheap), then the full media.
+Upstream's text `scene_plan` + Panda **cost gates**: the `assets` stage pauses up to **three times** — stills first (cheap), then one motion sample (approve the motion before batching), then the full media.
 
 ```
 POST /jobs
    │  (agent: idea + script)
    ▼
-approve_script        artifacts: script                    approve│revise
+approve_script         artifacts: script                    approve│revise
    │
    ▼
-approve_scene_plan    artifacts: scene_plan (TEXT plan)     approve│revise        ← no media here
+approve_scene_plan     artifacts: scene_plan (TEXT plan)     approve│revise        ← no media here
    │
    ▼
-approve_stills        artifacts: stills[]  (NO video yet)   approve│revise (per-scene)
+approve_stills         artifacts: stills[]  (NO video yet)   approve│revise (per-scene)
    │                                                          ↑ approve the look BEFORE paying
    ▼                                                            for image→video
-approve_assets        artifacts: stills[]+clips[]+          approve│revise (per-shot)
-   │                             asset_manifest (all media)
+approve_motion_sample  artifacts: motion_sample (ONE clip)   approve│revise        ← only if the
+   │                                                            motion_sample option is on (default);
+   ▼                                                            approve the MOTION before the batch
+approve_assets         artifacts: stills[]+clips[]+          approve│revise (per-shot)
+   │                              asset_manifest (all media)
    ▼
-approve_final         artifacts: final (MP4)               approve│revise
+approve_final          artifacts: final (MP4)               approve│revise
    │
    ▼
-done                  artifacts: final                     (branding is a SEPARATE later step)
+done                   artifacts: final                     (branding is a SEPARATE later step)
 ```
 
 `status` values: `running` (working, keep polling) · `awaiting_human` (a gate — act) · `done` (finished) · `failed` (see `question`).
 
-> **The assets stage surfaces TWO gates.** `approve_stills` and `approve_assets` are two `awaiting_human` pauses of the **same** `assets` stage (`stage:"assets"` at both). The first shows **stills only** — no video has been generated yet, so a rejection here costs nothing. The second shows the full media set after the approved stills are animated. Both are enforced by the engine's checkpoint layer (a gated stage cannot complete without human approval). Tell them apart by the `gate` field — do not rely on `stage` alone.
+> **The assets stage surfaces up to THREE gates.** `approve_stills`, `approve_motion_sample`, and `approve_assets` are `awaiting_human` pauses of the **same** `assets` stage (`stage:"assets"` at all of them). `approve_stills` shows **stills only** (no video — a rejection costs nothing). `approve_motion_sample` shows **one sample clip** so you approve the motion/animation before the full batch is generated — it appears only when the `motion_sample` job option is on (**default**), and is skipped when off. `approve_assets` shows the full media set. All are enforced by the engine's checkpoint layer (a gated stage cannot complete without human approval). **Tell them apart by the `gate` field — do not rely on `stage` alone.**
 
 ---
 
@@ -179,6 +182,7 @@ Plain-language description of the video. **Be specific** — duration, what happ
 | `voice_id` | ElevenLabs voice id (string) | **explicit override** — use this exact voice, ignore the default |
 | `music` | mood string, or `false` | background music via ElevenLabs (`"upbeat, light"`), or `false` to skip |
 | `render_runtime` | `"auto"` \| `"ffmpeg"` \| `"remotion"` \| `"hyperframes"` | which render engine composes the video. Default `"auto"` |
+| `motion_sample` | `true` (default) \| `false` | insert the `approve_motion_sample` gate — animate one hero clip for motion approval before batching all clips. Set `false` for quick drafts (stills → assets directly) |
 
 If `voice_id` is omitted, the engine picks the brand voice from config by `narrator`+`language`.
 
@@ -198,11 +202,11 @@ If `voice_id` is omitted, the engine picks the brand voice from config by `narra
 | Body | Effect |
 |---|---|
 | `{"decision":"approve"}` | accept this gate, advance to the next |
-| `{"decision":"revise","answer":"<what to change>"}` | regenerate this gate's output honoring the note, stay at the same gate (at `approve_scene_plan` this rewrites the text plan; at `approve_stills` this regenerates stills) |
+| `{"decision":"revise","answer":"<what to change>"}` | regenerate this gate's output honoring the note, stay at the same gate (at `approve_scene_plan` this rewrites the text plan; at `approve_stills` this regenerates stills; at `approve_motion_sample` this regenerates only the sample clip) |
 | `{"decision":"revise","shots":[1,3],"answer":"…"}` | at `approve_stills` (regenerate those scenes' stills) **or** `approve_assets` (regenerate those shots' clips) |
 | `{"decision":"approve","stills":["/abs/path.png", …]}` | **at `approve_stills` / `approve_assets`** — supply your own media instead of generated ones (associated with the asset manifest, not the scene plan) |
 
-> Approving `approve_stills` does **not** finish the assets stage — it unlocks video generation. Poll again; the next gate is `approve_assets`.
+> Approving `approve_stills` does **not** finish the assets stage — with `motion_sample` on (default) the next gate is `approve_motion_sample` (one sample clip); approving that then unlocks the full batch (`approve_assets`). With `motion_sample` off, approving stills goes straight to `approve_assets`. Poll again after each — tell the gates apart by the `gate` field.
 
 Notes:
 - Edits are a **text instruction** the agent acts on (not a manual pixel editor). More specific = closer result.
@@ -248,7 +252,7 @@ curl -s -H "X-Dify-Token: $T" $BASE/jobs/job_xxxx
 # 3) approve (or revise)
 curl -s -X POST $BASE/jobs/job_xxxx/respond -H "X-Dify-Token: $T" -H "Content-Type: application/json" \
  -d '{"decision":"approve"}'
-# -> status:running ; go back to (2). Repeat: scene_plan -> stills -> assets -> final.
+# -> status:running ; go back to (2). Repeat: scene_plan -> stills -> motion_sample -> assets -> final.
 
 # 4) when status=done, download the video
 curl -s -H "X-Dify-Token: $T" $BASE/jobs/job_xxxx/artifacts/final.mp4 -o final.mp4

@@ -3,7 +3,9 @@
 Runs the full gate handshake with the MockRunner and asserts each transition — the
 best-of-both shape (upstream text plan + a Panda stills cost gate):
     start -> GATE 1 (script) -> GATE 2 (scene_plan, TEXT) -> GATE 3 (stills, NO video)
-          -> GATE 4 (assets, all media) -> GATE 5 (final) -> done
+          -> GATE 3.5 (motion sample, ONE clip) -> GATE 4 (assets, all media)
+          -> GATE 5 (final) -> done
+Also proves the motion_sample=false toggle skips the motion gate (stills -> assets directly).
 
 Proves the Dify-facing contract, local storage, checkpoint/resume, that scene_plan produces
 NO media (text only), that the STILLS gate produces stills with NO video on disk (the cost
@@ -98,8 +100,24 @@ b = _step("respond revise (stills)", c.post(f"/jobs/{job}/respond",
           want_gate="approve_stills", want_status="awaiting_human")
 assert not list(store.artifacts_dir(job).glob("*.mp4")), "revising stills must not generate video"
 
-# 4) approve stills -> GATE 4 (approve_assets): clips + audio + manifest -----------------
+# 4) approve stills -> GATE 3.5 (approve_motion_sample): ONE sample clip, NO full batch ----
 b = _step("respond approve (stills)", c.post(f"/jobs/{job}/respond", json={"decision": "approve"}),
+          want_gate="approve_motion_sample", want_status="awaiting_human")
+assert b["artifacts"].get("motion_sample"), "motion-sample gate must carry a sample clip"
+assert "clips" not in b["artifacts"], "motion-sample gate must NOT carry the full clip batch"
+assert "asset_manifest" not in b["artifacts"], "motion-sample gate must NOT carry a manifest"
+vids = list(store.artifacts_dir(job).glob("*.mp4"))
+assert len(vids) == 1, f"motion-sample gate should have exactly ONE clip on disk, got {[p.name for p in vids]}"
+print(f"   motion-sample gate: 1 sample clip ({b['artifacts']['motion_sample']}), full batch NOT generated")
+
+# revise the motion sample -> stays at the motion-sample gate
+b = _step("respond revise (motion_sample)", c.post(f"/jobs/{job}/respond",
+          json={"decision": "revise", "answer": "slower push-in, less shake"}),
+          want_gate="approve_motion_sample", want_status="awaiting_human")
+assert "clips" not in b["artifacts"], "revising the motion sample must not batch the full clips"
+
+# 4b) approve motion sample -> GATE 4 (approve_assets): clips + audio + manifest ----------
+b = _step("respond approve (motion_sample)", c.post(f"/jobs/{job}/respond", json={"decision": "approve"}),
           want_gate="approve_assets", want_status="awaiting_human")
 clips = b["artifacts"].get("clips")
 manifest = b["artifacts"].get("asset_manifest")
@@ -116,7 +134,7 @@ _step("respond revise shot 1 (assets)", c.post(f"/jobs/{job}/respond",
       json={"decision": "revise", "shots": [1], "answer": "more motion on shot 2"}),
       want_gate="approve_assets", want_status="awaiting_human")
 
-# 4b) approve assets -> production assembles -> GATE 5 (approve_final)
+# 4c) approve assets -> production assembles -> GATE 5 (approve_final)
 b = _step("respond approve (assets)", c.post(f"/jobs/{job}/respond", json={"decision": "approve"}),
           want_gate="approve_final", want_status="awaiting_human")
 assert b["artifacts"].get("final") == f"/jobs/{job}/artifacts/final.mp4"
@@ -131,6 +149,19 @@ print("   final.mp4 bytes:", store.artifact_path(job, "final.mp4").stat().st_siz
 _step("respond approve (final)", c.post(f"/jobs/{job}/respond", json={"decision": "approve"}),
       want_status="done")
 
+# 4d) motion_sample=false toggle: approving stills goes STRAIGHT to approve_assets ---------
+b2 = _step("POST /jobs (motion_sample off)", c.post("/jobs", json={
+    "brief": "quick draft: panda waves", "options": {"motion_sample": False}}),
+    want_gate="approve_script", want_status="awaiting_human")
+job2 = b2["job_id"]
+c.post(f"/jobs/{job2}/respond", json={"decision": "approve"})            # -> scene_plan
+c.post(f"/jobs/{job2}/respond", json={"decision": "approve"})            # -> stills
+b2 = _step("respond approve (stills, sample off)", c.post(f"/jobs/{job2}/respond", json={"decision": "approve"}),
+           want_gate="approve_assets", want_status="awaiting_human")
+assert b2["artifacts"].get("clips"), "with motion_sample off, approving stills must produce the full clips"
+assert "motion_sample" not in b2["artifacts"], "motion_sample off must not create a sample clip"
+print("   motion_sample=false: stills -> assets directly (no motion gate)")
+
 # 5) (g) a legacy job (old storyboard-stills gate) is readable but resume returns a migration note
 legacy = store.new_job_id()
 store.ensure_job(legacy)
@@ -143,5 +174,6 @@ mig = _step("respond (legacy gate)", c.post(f"/jobs/{legacy}/respond", json={"de
 assert "start a new job" in (mig.get("question") or "").lower(), "legacy resume must return a migration message"
 print("   legacy migration message OK")
 
-print("\n[PASS] FULL DIFY GATE FLOW: start -> script -> scene_plan(text) -> stills(no video) -> assets(media) -> final -> done")
+print("\n[PASS] FULL DIFY GATE FLOW: start -> script -> scene_plan(text) -> stills(no video) -> "
+      "motion_sample(1 clip) -> assets(media) -> final -> done  (+ motion_sample=false toggle)")
 print("   job dir:", store.job_dir(job))

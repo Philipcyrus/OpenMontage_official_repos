@@ -11,8 +11,11 @@ Your job is to generate all media — stills, motion clips, narration, music —
 brand + character consistency, recording everything in `asset_manifest`. You do it in **two
 phases with a human gate at each**:
 - **PHASE 1 (GATE 3 — approve_stills):** generate ONLY the stills, then STOP. No video yet.
-- **PHASE 2 (GATE 4 — approve_assets):** after stills are approved, animate them + add audio,
-  then STOP.
+- **PHASE 2 (GATE 3.5 — approve_motion_sample):** when the job option `motion_sample` is on
+  (default), animate ONE hero still into a single sample clip so the motion/animation is approved
+  before the full batch, then STOP. Skipped when `motion_sample` is off.
+- **PHASE 3 (GATE 4 — approve_assets):** after the motion sample is approved (or straight after
+  the stills when `motion_sample` is off), animate the remaining stills + add audio, then STOP.
 
 ## Prerequisites
 
@@ -45,22 +48,39 @@ still, never in `scene_plan`).
 On "request revision" at this gate, regenerate only the flagged scenes and re-checkpoint (keep
 `partial_progress.phase="stills"`). Do **not** proceed to video until the stills are approved.
 
-### 3. PHASE 2 — animate approved stills + audio, then STOP (GATE 4, approve_assets)
-Only AFTER the stills are approved:
-- **Motion clips**: animate each approved still into a clip via the Higgsfield MCP bridge
-  (`higgsfield_mcp_video`, image_to_video) — see `skills/meta/higgsfield-mcp-bridge.md`.
+### 3. PHASE 2 — MOTION SAMPLE (one hero clip), then STOP (GATE 3.5, approve_motion_sample)
+**Only when the `motion_sample` job option is on (default).** After the stills are approved,
+animate ONE representative **hero** still (the most important scene, else scene 1) into a **single**
+sample clip via the Higgsfield MCP bridge (`higgsfield_mcp_video`, image_to_video). This is the
+motion cost gate: the reviewer approves the motion/animation feel (camera, movement, how the panda
+moves) **before** committing to the whole batch. Record the sample's Higgsfield **credits** on that
+asset (`credits`, `credits_source: "actual"`). Then write the assets checkpoint
+`status='awaiting_human'` **AND `partial_progress={"phase": "motion_sample"}`** and STOP. Generate
+**no other clips and no audio yet.**
+
+On "request revision" here, regenerate ONLY the sample clip per the feedback (adjust motion prompt /
+model / motion params), keep `partial_progress.phase="motion_sample"`, and STOP again. Do not batch
+the rest until the motion is approved (max ~3 sample iterations, then escalate).
+
+> If `motion_sample` is off, skip this phase entirely — go straight from approved stills to PHASE 3.
+
+### 4. PHASE 3 — animate remaining stills + audio, then STOP (GATE 4, approve_assets)
+After the motion sample is approved (or straight after the stills when `motion_sample` is off):
+- **Motion clips**: animate the remaining approved stills into clips via the Higgsfield MCP bridge
+  (`higgsfield_mcp_video`, image_to_video), reusing the **same motion approach** (model + motion
+  params) as the approved sample — see `skills/meta/higgsfield-mcp-bridge.md`.
 - **Narration**: `elevenlabs_tts` per script section with the resolved voice id.
 - **Music** (if requested): `music_gen` (ElevenLabs Music), kept under the VO.
-Then write the assets checkpoint `status='awaiting_human'` **without** the `stills` phase marker
-and STOP. The launcher surfaces this as the **approve_assets** gate. On "request revision" here,
-regenerate only the flagged shots (`response.shots`).
+Then write the assets checkpoint `status='awaiting_human'` **without** any phase marker and STOP.
+The launcher surfaces this as the **approve_assets** gate. On "request revision" here, regenerate
+only the flagged shots (`response.shots`).
 
-### 4. Character consistency
+### 5. Character consistency
 The panda mascot must look identical across every still/clip. Always pass the panda master
 Element id from `config/panda-elements.json`; use the customer Element for the customer. Never
 invent a new panda.
 
-### 5. Build the asset_manifest (in PHASE 2)
+### 6. Build the asset_manifest (in PHASE 3)
 Record EVERY generated file canonically: per asset `id`, `type` (`image|video|audio|narration|
 music|...`), `path` (relative to the project dir), `source_tool`, `scene_id` (bind each asset to
 its scene), plus optional `prompt`/`model`/`cost_usd`/`duration_seconds`. Persist a schema-valid

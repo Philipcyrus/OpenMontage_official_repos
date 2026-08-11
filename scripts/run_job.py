@@ -86,6 +86,11 @@ def main() -> None:
                 opts["music"] = False; i += 1
             elif a == "--render-runtime" and i + 1 < len(rest):
                 opts["render_runtime"] = rest[i + 1].lower(); i += 2   # auto|ffmpeg|remotion|hyperframes
+            elif a == "--motion-sample" and i + 1 < len(rest):
+                opts["motion_sample"] = rest[i + 1].lower() not in ("false", "0", "no", "off")
+                i += 2
+            elif a == "--no-motion-sample":
+                opts["motion_sample"] = False; i += 1
             else:
                 brief_parts.append(a); i += 1
         brief = " ".join(brief_parts) or "Panda video"

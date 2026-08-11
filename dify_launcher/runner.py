@@ -11,13 +11,15 @@ Two runners:
   - ClaudeCodeRunner  : the EC2 path — invokes Claude Code headless against the engine repo.
                         Skeleton only; swap it in where the box has `claude` + OpenRouter + MCP.
 
-Gate sequence (matches pipeline_defs/panda-video.yaml — upstream shape + a Panda cost gate):
-    start ─▶ GATE 1 approve_script ─▶ GATE 2 approve_scene_plan (TEXT)
-          ─▶ GATE 3 approve_stills ─▶ GATE 4 approve_assets ─▶ GATE 5 approve_final ─▶ done
-scene_plan produces a TEXT plan only (no media). The assets stage runs in TWO human-reviewed
-phases (both stage="assets"): first STILLS ONLY (cheap — approve the look before any expensive
-video), then the full media (clips + voice + music) recorded in asset_manifest. The two pauses
-are distinguished by the checkpoint's partial_progress.phase ("stills" vs full).
+Gate sequence (matches pipeline_defs/panda-video.yaml — upstream shape + Panda cost gates):
+    start ─▶ GATE 1 approve_script ─▶ GATE 2 approve_scene_plan (TEXT) ─▶ GATE 3 approve_stills
+          ─▶ [GATE 3.5 approve_motion_sample] ─▶ GATE 4 approve_assets ─▶ GATE 5 approve_final ─▶ done
+scene_plan produces a TEXT plan only (no media). The assets stage runs in up to THREE human-
+reviewed phases (all stage="assets"): first STILLS ONLY (cheap — approve the look before any
+video); then, when the job option motion_sample is on (default), ONE hero still is animated into
+a MOTION SAMPLE (approve the motion/animation before batching all clips — the biggest cost/time
+gate); then the full media (all clips + voice + music) recorded in asset_manifest. The pauses are
+distinguished by the checkpoint's partial_progress.phase ("stills" | "motion_sample" | full).
 Branding is NOT a gate — it's a separate on-demand step after approve_final.
 """
 
@@ -33,11 +35,20 @@ from dify_launcher import store
 
 _ENGINE_ROOT = Path(__file__).resolve().parents[1]
 
-# ordered human-approval gates. Note: approve_stills + approve_assets are TWO pauses of the
-# single `assets` stage (stills-first cost gate, then full media) — see _sync/_do_stills.
-GATES = ["approve_script", "approve_scene_plan", "approve_stills", "approve_assets", "approve_final"]
+# ordered human-approval gates. Note: approve_stills + approve_motion_sample + approve_assets are
+# pauses of the SINGLE `assets` stage (stills cost gate, motion-sample cost gate, then full media)
+# — see _sync/_do_stills/_do_motion_sample. approve_motion_sample only occurs when the job option
+# motion_sample is on (default true).
+GATES = ["approve_script", "approve_scene_plan", "approve_stills",
+         "approve_motion_sample", "approve_assets", "approve_final"]
 # gates from the previous storyboard-stills flow — resuming one is refused with a migration note
 _LEGACY_GATES = {"approve_storyboard", "approve_clips"}
+
+
+def _motion_sample_enabled(state: dict[str, Any]) -> bool:
+    """Whether to insert the one-clip motion-sample cost gate (job option, default ON)."""
+    v = (state.get("options") or {}).get("motion_sample", True)
+    return str(v).lower() not in ("false", "0", "no", "off", "")
 
 _MIGRATION_MSG = (
     "This job was created under the previous storyboard-stills flow (gate "
@@ -86,6 +97,7 @@ class MockRunner(Runner):
                 "approve_script": self._do_script,
                 "approve_scene_plan": self._do_scene_plan,
                 "approve_stills": self._do_stills,
+                "approve_motion_sample": self._do_motion_sample,
                 "approve_assets": self._do_assets,
                 "approve_final": self._do_production,
             }.get(gate)
@@ -99,7 +111,12 @@ class MockRunner(Runner):
         if gate == "approve_scene_plan":
             return self._do_stills(state, response)      # assets phase 1: stills only
         if gate == "approve_stills":
-            return self._do_assets(state, response)       # assets phase 2: clips + audio + manifest
+            # assets phase 2: one motion sample first (if enabled), else straight to full media
+            if _motion_sample_enabled(state):
+                return self._do_motion_sample(state, response)
+            return self._do_assets(state, response)
+        if gate == "approve_motion_sample":
+            return self._do_assets(state, response)       # assets phase 3: all clips + audio + manifest
         if gate == "approve_assets":
             return self._do_production(state, response)
         if gate == "approve_final":
@@ -186,7 +203,32 @@ class MockRunner(Runner):
         )
         return state
 
-    # --- GATE 4: assets PHASE 2 — animate approved stills + audio + manifest
+    # --- GATE 3.5: assets PHASE 2 — one MOTION SAMPLE (approve motion before batching) --
+    def _do_motion_sample(self, state: dict[str, Any], response: dict[str, Any]) -> dict[str, Any]:
+        """Animate ONE hero still into a sample clip so the reviewer approves the motion/animation
+        feel BEFORE all clips are generated (the biggest cost/time gate). Real gen is one
+        Higgsfield image_to_video; the mock renders a short clip from the first still. On the box
+        this checkpoint carries partial_progress.phase='motion_sample' -> approve_motion_sample."""
+        job_id = state["job_id"]
+        stills = list(state.get("artifacts", {}).get("stills", []))
+        if not stills:
+            stills = self._placeholder_stills(job_id, 3)
+        hero = stills[0]                                          # hero = scene 1 in the mock
+        sample_name = "motion_sample.mp4"
+        self._render_clean([str(store.artifact_path(job_id, hero))],
+                           str(store.artifact_path(job_id, sample_name)))
+        # entering the motion-sample phase drops any full clips/manifest from a prior pass
+        arts = {k: v for k, v in state.get("artifacts", {}).items()
+                if k not in ("clips", "asset_manifest")}
+        state.update(
+            stage="assets", status="awaiting_human", gate="approve_motion_sample",
+            question="Approve the MOTION on this one sample clip (camera, animation, how the panda "
+                     "moves) before all clips are generated — or request a revision of the motion.",
+            artifacts={**arts, "stills": stills, "motion_sample": sample_name},
+        )
+        return state
+
+    # --- GATE 4: assets PHASE 3 — animate approved stills + audio + manifest
     def _do_assets(self, state: dict[str, Any], response: dict[str, Any]) -> dict[str, Any]:
         """Animate the APPROVED stills into motion clips (and, on the box, voice/music) and
         record everything in asset_manifest. Real gen is the Higgsfield MCP (image_to_video) +
@@ -346,17 +388,32 @@ class ClaudeCodeRunner(Runner):
         decision = (response or {}).get("decision", "approve")
         stage = self._gate_stage(gate)
 
-        # Approving the STILLS phase must NOT complete the assets stage — it only unlocks the
-        # video/audio phase WITHIN the same stage. Continue the agent from the stills checkpoint
-        # so it animates the approved stills and stops again at the full assets gate.
+        # Approving a within-assets phase (stills / motion sample) must NOT complete the assets
+        # stage — it only unlocks the next phase WITHIN the same stage. Continue the agent from the
+        # latest checkpoint so it does the next phase and stops again at the next assets sub-gate.
         if gate == "approve_stills":
-            if decision == "approve":
-                self._run_agent(self._stills_approved_prompt(job_id), job_id, "assets_media")
-            else:
+            if decision != "approve":
                 self._run_agent(self._revise_prompt(
                     job_id, "assets (STILLS phase — regenerate the flagged stills and stop again "
                             "at the stills gate; do NOT generate video yet)", response or {}),
                     job_id, "stills_revise")
+            elif _motion_sample_enabled(state):
+                # one hero clip first — approve the motion before batching all clips
+                self._run_agent(self._motion_sample_prompt(job_id), job_id, "motion_sample")
+            else:
+                # motion sample disabled: animate all approved stills straight away
+                self._run_agent(self._stills_approved_prompt(job_id), job_id, "assets_media")
+            return self._sync(state)
+
+        if gate == "approve_motion_sample":
+            if decision == "approve":
+                self._run_agent(self._motion_approved_prompt(job_id), job_id, "assets_media")
+            else:
+                self._run_agent(self._revise_prompt(
+                    job_id, "assets (MOTION SAMPLE phase — regenerate ONLY the sample clip per the "
+                            "feedback, keep partial_progress.phase='motion_sample', do NOT batch the "
+                            "remaining clips yet)", response or {}),
+                    job_id, "motion_sample_revise")
             return self._sync(state)
 
         if decision == "approve":
@@ -438,9 +495,10 @@ class ClaudeCodeRunner(Runner):
                          question=latest.get("error", "stage failed"), artifacts=arts)
         elif status == "awaiting_human":
             if stage == "assets":
-                # the assets stage pauses twice: stills-first (cheap, pre-video), then full media.
+                # the assets stage pauses up to 3×: stills, one motion sample, then full media.
                 phase = (latest.get("partial_progress") or {}).get("phase")
-                gate = "approve_stills" if phase == "stills" else "approve_assets"
+                gate = {"stills": "approve_stills",
+                        "motion_sample": "approve_motion_sample"}.get(phase, "approve_assets")
             else:
                 gate = _STAGE_GATE.get(stage, f"approve_{stage}")
             state.update(status="awaiting_human", stage=stage, gate=gate,
@@ -581,8 +639,8 @@ class ClaudeCodeRunner(Runner):
 
     # -- approvals + prompts ------------------------------------------------
     def _gate_stage(self, gate: Optional[str]) -> Optional[str]:
-        if gate in ("approve_stills", "approve_assets"):
-            return "assets"                 # both are pauses of the single assets stage
+        if gate in ("approve_stills", "approve_motion_sample", "approve_assets"):
+            return "assets"                 # all are pauses of the single assets stage
         for s, g in _STAGE_GATE.items():
             if g == gate:
                 return s
@@ -606,6 +664,8 @@ class ClaudeCodeRunner(Runner):
         voice_id = options.get("voice_id")            # explicit override from Dify
         music = options.get("music", True)            # BGM: mood string, True (default bed), or False
         runtime = str(options.get("render_runtime", "auto")).lower()  # auto|ffmpeg|remotion|hyperframes
+        motion_sample = str(options.get("motion_sample", True)).lower() \
+            not in ("false", "0", "no", "off", "")    # one-clip motion cost gate (default on)
 
         if runtime in ("ffmpeg", "remotion", "hyperframes"):
             runtime_line = (
@@ -651,18 +711,35 @@ class ClaudeCodeRunner(Runner):
             "checkpoint with status='awaiting_human' and STOP (end your turn) — do NOT "
             "self-approve.\n"
             "PIPELINE SHAPE: the `scene_plan` stage produces ONLY a structured TEXT plan — NO "
-            "media, NO generation tools. The `assets` stage then runs in TWO human-reviewed "
-            "phases (a cost gate):\n"
+            "media, NO generation tools. The `assets` stage then runs in human-reviewed phases "
+            "(cost gates):\n"
+            + self._assets_phases_text(motion_sample) +
+            "Finally compose the approved assets with the `panda_render` tool. Stop at the first gate."
+        )
+
+    def _assets_phases_text(self, motion_sample: bool) -> str:
+        stills = (
             "  PHASE 1 (stills): generate ONLY the stills — one per scene — via the Higgsfield "
             "MCP bridge (skills/meta/higgsfield-mcp-bridge.md), then write the assets checkpoint "
             "with status='awaiting_human' AND partial_progress={\"phase\":\"stills\"} and STOP. "
-            "Do NOT generate any video yet.\n"
+            "Do NOT generate any video yet.\n")
+        if motion_sample:
+            return stills + (
+                "  PHASE 2 (motion sample): only after the stills are approved, animate ONE "
+                "representative HERO still into a SINGLE sample clip (image_to_video) so the "
+                "motion/animation can be approved before the full batch. Write the assets "
+                "checkpoint status='awaiting_human' AND partial_progress={\"phase\":"
+                "\"motion_sample\"} and STOP — no other clips, no audio yet.\n"
+                "  PHASE 3 (media): only after the motion sample is approved, animate the "
+                "REMAINING stills using the SAME motion approach + generate narration/music "
+                "(ElevenLabs), record everything (incl. the sample) in asset_manifest with "
+                "per-asset Higgsfield credits, then write the assets checkpoint "
+                "status='awaiting_human' (no phase marker) and STOP.\n")
+        return stills + (
             "  PHASE 2 (media): only after the stills are approved, animate the approved stills "
             "into motion clips (image_to_video) + generate narration/music (ElevenLabs), record "
             "everything in asset_manifest, then write the assets checkpoint status='awaiting_human' "
-            "(no 'stills' phase marker) and STOP.\n"
-            "Finally compose the approved assets with the `panda_render` tool. Stop at the first gate."
-        )
+            "(no 'stills' phase marker) and STOP.\n")
 
     def _continue_prompt(self, job_id: str) -> str:
         return (
@@ -679,6 +756,29 @@ class ClaudeCodeRunner(Runner):
             "(ElevenLabs), record every file in asset_manifest, then rewrite the assets checkpoint "
             "with status='awaiting_human' (WITHOUT the 'stills' phase marker) and STOP for the "
             "full media approval."
+        )
+
+    def _motion_sample_prompt(self, job_id: str) -> str:
+        return (
+            f"For project_id: {job_id}, the STILLS phase of the `assets` stage is APPROVED. Do NOT "
+            "mark the assets stage completed yet, and do NOT batch-generate all clips. Animate ONE "
+            "representative HERO still (the most important scene, else scene 1) into a single MOTION "
+            "SAMPLE clip (image_to_video via the Higgsfield MCP bridge) so the reviewer can approve "
+            "the motion/animation feel before committing to the full batch. Record the sample's "
+            "Higgsfield credits on that asset (credits + credits_source='actual'). Then rewrite the "
+            "assets checkpoint with status='awaiting_human' AND partial_progress={\"phase\":"
+            "\"motion_sample\"} and STOP. Generate NO other clips and NO audio yet."
+        )
+
+    def _motion_approved_prompt(self, job_id: str) -> str:
+        return (
+            f"For project_id: {job_id}, the MOTION SAMPLE is APPROVED. Do NOT mark the assets stage "
+            "completed yet. Animate the REMAINING approved stills into motion clips using the SAME "
+            "motion approach (model + motion params) as the approved sample, then generate "
+            "narration/music (ElevenLabs). Record every file (incl. the already-approved sample) in "
+            "asset_manifest with per-asset Higgsfield credits, then rewrite the assets checkpoint "
+            "with status='awaiting_human' (WITHOUT any phase marker) and STOP for the full media "
+            "approval."
         )
 
     def _revise_prompt(self, job_id: str, stage: Optional[str], response: dict[str, Any]) -> str:

@@ -46,17 +46,18 @@ Claude Code + OpenMontage 流水线            ← 智能体：script → scene_
 
 ## 审批关卡
 
-`panda-video` 流水线在**五个**节点暂停以等待人工审批（见 `pipeline_defs/panda-video.yaml`）：
+`panda-video` 流水线最多在**六个**节点暂停以等待人工审批（见 `pipeline_defs/panda-video.yaml`）：
 
 | # | 关卡 | 审阅者审批的内容 |
 |---|------|-------------------|
 | 1 | `approve_script` | 脚本 |
 | 2 | `approve_scene_plan` | 结构化的**文本**场景规划（此阶段尚未生成任何媒体） |
 | 3 | `approve_stills` | 每个场景一张定格图 —— **尚未生成视频**，所以此处驳回不产生成本 |
-| 4 | `approve_assets` | 完整媒体集（已批准的定格图动画成镜头 + 配音 + 配乐；可按镜头单独返修） |
+| 3.5 | `approve_motion_sample` | **一段**主镜头样片 —— 在整批生成**之前**先审批运动/动画效果（成本关卡；默认开启，可跳过） |
+| 4 | `approve_assets` | 完整媒体集（其余定格图动画成镜头 + 配音 + 配乐；可按镜头单独返修） |
 | 5 | `approve_final` | 完成的（未叠加品牌的）成片 |
 
-关卡 3 与 4 是**同一个** `assets` 阶段的两次暂停（通过 `gate` 字段区分）。批准即推进；“返修（revise）”会重新生成该阶段（或仅指定的镜头）。品牌叠加在关卡 5 **之后**、且仅在被要求时才提供。
+关卡 3、3.5、4 是**同一个** `assets` 阶段的多次暂停（通过 `gate` 字段区分）。`approve_motion_sample` 关卡仅在作业选项 `motion_sample` 开启（**默认**）时出现；快速草稿可设 `motion_sample:false` 跳过。批准即推进；“返修（revise）”会重新生成该阶段（或仅指定的镜头）。品牌叠加在关卡 5 **之后**、且仅在被要求时才提供。
 
 ## 成本与耗时报告
 

@@ -22,9 +22,11 @@ Dify ──HTTP──▶ Dify Launcher ──▶ runner ──▶ agent/pipeline
 | GET  | `/jobs/{id}/cost` | per-project cost & time report — Higgsfield credits, ElevenLabs usage, generation time (native units) |
 
 **Gate sequence** (matches `pipeline_defs/panda-video.yaml`):
-`start → approve_script → approve_scene_plan → approve_stills → approve_assets → approve_final → done`.
-`approve_stills` and `approve_assets` are two pauses of the **same** `assets` stage (tell them
-apart by the `gate` field). Branding is **not** a gate — it's an on-demand step after `approve_final`.
+`start → approve_script → approve_scene_plan → approve_stills → approve_motion_sample → approve_assets → approve_final → done`.
+`approve_stills`, `approve_motion_sample`, and `approve_assets` are pauses of the **same** `assets`
+stage (tell them apart by the `gate` field). `approve_motion_sample` (one hero clip, approve the
+motion before batching) appears only when the `motion_sample` option is on (**default**); it's
+skipped when off. Branding is **not** a gate — it's an on-demand step after `approve_final`.
 
 At `approve_scene_plan` the reviewer approves a structured **text** plan — no media yet.
 
@@ -70,11 +72,13 @@ DIFY_RUNNER=mock uvicorn dify_launcher.app:app --host 0.0.0.0 --port 8600
 - `language`, `narrator`, `voice_id`, `music`
 - `render_runtime` — `auto` (default) | `ffmpeg` | `remotion` | `hyperframes`. The `ffmpeg`
   lane (`panda_render`) needs no Node; `remotion`/`hyperframes` need **Node ≥ 22** on the box.
+- `motion_sample` — `true` (default) | `false`. When on, adds the `approve_motion_sample` gate
+  (one hero clip approved before the full batch). Set `false` for quick drafts.
 
 ## Connecting Dify
 Point Dify's HTTP/tool nodes at this service's base URL:
 1. **Start** → `POST /jobs` with the brief; show `question` + the `script` artifact.
-2. On user approve/revise → `POST /jobs/{id}/respond`; repeat through `scene_plan → stills → assets → final`.
+2. On user approve/revise → `POST /jobs/{id}/respond`; repeat through `scene_plan → stills → motion_sample → assets → final` (`motion_sample` gate is on by default; set option `motion_sample:false` to skip it).
 3. Render the `final` artifact inline; on approve the job is `done`.
 4. Fetch `GET /jobs/{id}/cost` (or the `cost_report.md` artifact) for the per-project credits/time report.
 5. Panda branding is a separate, on-demand `panda_brand` step applied only after final approval.
