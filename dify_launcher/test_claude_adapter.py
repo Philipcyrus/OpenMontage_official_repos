@@ -41,6 +41,17 @@ assert R._STAGE_GATE["scene_plan"] == "approve_scene_plan"
 assert "assets" not in R._STAGE_GATE          # assets is phase-resolved, not a 1:1 map entry
 print("[ok] gate<->stage mapping")
 
+# 1b) idea is INTERNAL — no human gate. The manifest is authoritative; the agent must never
+# surface an unexpected `approve_idea`. (Guards the reused-skill "Gate Reminder" conflict.)
+import yaml as _yaml
+_pv = _yaml.safe_load(open(_ENGINE_ROOT / "pipeline_defs" / "panda-video.yaml", encoding="utf-8"))
+_idea = next(s for s in _pv["stages"] if s["name"] == "idea")
+assert _idea["human_approval_default"] is False, "panda idea must be internal (no gate)"
+assert "approve_idea" not in R.GATES, "approve_idea must not be a real gate"
+assert "idea" not in R._STAGE_GATE, "idea must not map 1:1 to a gate"
+assert _idea["skill"] == "pipelines/panda-video/idea-director", "idea must use the Panda idea-director"
+print("[ok] idea stage is internal — no approve_idea gate, Panda-specific director")
+
 # 2) _mirror_artifacts: copy project files into the store, grouped by kind --
 JOB = "job_mirror"
 proj = run._projects_dir / JOB

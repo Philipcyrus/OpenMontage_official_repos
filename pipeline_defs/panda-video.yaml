@@ -35,7 +35,7 @@ required_skills:
   # NOTE: idea/script/edit reuse hybrid's directors (functional in production). Panda-specific
   # versions are a future specialization, not a blocker.
   - pipelines/hybrid/executive-producer
-  - pipelines/hybrid/idea-director
+  - pipelines/panda-video/idea-director          # OUR internal idea (no gate); replaces hybrid's gated one
   - pipelines/hybrid/script-director
   - pipelines/panda-video/scene-plan-director    # OUR text-only scene planner (no media)
   - pipelines/panda-video/asset-director         # OUR asset generator (all media -> asset_manifest)
@@ -53,13 +53,13 @@ compatible_playbooks:
 stages:
   # ---- research / proposal : internal, NO gate ----
   - name: idea
-    skill: pipelines/hybrid/idea-director
+    skill: pipelines/panda-video/idea-director   # OUR internal idea (no gate; brief + decision_log)
     produces:
       - brief
       - decision_log
     tools_available: []
     checkpoint_required: true
-    human_approval_default: false
+    human_approval_default: false      # INTERNAL — no human pause; agent writes 'completed' -> script
 
   # ---- GATE 1 : approve script ----
   - name: script
