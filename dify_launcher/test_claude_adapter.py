@@ -33,6 +33,7 @@ run = R.ClaudeCodeRunner()
 # both assets sub-gates reverse-map to the single `assets` stage
 assert run._gate_stage("approve_stills") == "assets"
 assert run._gate_stage("approve_motion_sample") == "assets"
+assert run._gate_stage("budget_exceeded") == "assets"
 assert run._gate_stage("approve_assets") == "assets"
 assert run._gate_stage("approve_scene_plan") == "scene_plan"
 assert run._gate_stage("approve_script") == "script"
@@ -108,6 +109,12 @@ _fake_latest.cp = {"stage": "assets", "status": "awaiting_human", "artifacts": {
                    "partial_progress": {"phase": "motion_sample"}}
 st = run._sync({"job_id": "jX"})
 assert st["status"] == "awaiting_human" and st["gate"] == "approve_motion_sample"
+
+# assets stage, BUDGET HOLD phase -> budget_exceeded (conditional cost-cap gate)
+_fake_latest.cp = {"stage": "assets", "status": "awaiting_human", "artifacts": {},
+                   "partial_progress": {"phase": "budget_hold"}}
+st = run._sync({"job_id": "jX"})
+assert st["status"] == "awaiting_human" and st["gate"] == "budget_exceeded"
 
 # assets stage, no phase marker -> full media gate approve_assets
 _fake_latest.cp = {"stage": "assets", "status": "awaiting_human", "artifacts": {}}

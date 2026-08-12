@@ -87,6 +87,10 @@ sudo systemctl disable --now montage-svc
 uvicorn dify_launcher.app:app --host 127.0.0.1 --port 8501
 ```
 
+**Budget cap:** set the `max_higgsfield_credits` job option to enforce a hard credit ceiling — the
+agent blocks *before* any generation that would exceed it and pauses at a `budget_exceeded` gate
+(raise the cap / revise / cancel). Unset = no cap.
+
 **Auth is optional:** leave `DIFY_TOKEN` empty for no token; set it to require `X-Dify-Token`.
 **Node:** the default `ffmpeg`/`panda_render` render lane needs no Node; the `remotion` and
 `hyperframes` lanes need **Node ≥ 22** (installed via `nvm` alongside system Node 18).

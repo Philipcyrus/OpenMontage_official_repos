@@ -127,10 +127,11 @@ class StartJob(BaseModel):
 
 
 class Respond(BaseModel):
-    decision: str = "approve"          # "approve" | "revise"
+    decision: str = "approve"          # "approve" | "revise" | "cancel" (cancel: only at budget gate)
     answer: Optional[str] = None
     stills: list[str] = []             # optional user-supplied storyboard stills (paths)
     shots: list[int] = []              # optional: at the clips gate, which shot indices to revise
+    max_higgsfield_credits: Optional[int] = None   # at the budget gate: raise the approved cap
 
 
 @app.get("/health")

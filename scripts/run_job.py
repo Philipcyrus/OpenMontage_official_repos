@@ -91,6 +91,8 @@ def main() -> None:
                 i += 2
             elif a == "--no-motion-sample":
                 opts["motion_sample"] = False; i += 1
+            elif a == "--max-credits" and i + 1 < len(rest):
+                opts["max_higgsfield_credits"] = int(rest[i + 1]); i += 2   # Higgsfield credit ceiling
             else:
                 brief_parts.append(a); i += 1
         brief = " ".join(brief_parts) or "Panda video"

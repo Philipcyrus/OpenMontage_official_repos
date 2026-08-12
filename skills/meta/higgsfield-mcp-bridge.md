@@ -87,3 +87,24 @@ replaced by the narration/music mix so the compose stage doesn't double up.
 Higgsfield bills in **credits**, not USD. `higgsfield_mcp_video.estimate_cost`
 returns a rough USD figure for budget governance only; the authoritative number
 is the `get_cost:true` preflight from MCP. Check `balance` before large batches.
+
+## BUDGET HARD RULE (run-level credit ceiling)
+
+When the job sets **`max_higgsfield_credits`** (a per-project credit cap), enforce a **hard
+pre-generation block** — credits are the authoritative unit:
+
+1. **Before calling ANY Higgsfield generation** (`generate_image`, `generate_video`, image→video —
+   stills, motion sample, OR the full batch), compute:
+   - `spent` = sum of `credits` already recorded in `asset_manifest` (this project so far), and
+   - `requested` = sum of the `get_cost:true` preflight credits for the batch you are about to submit.
+2. If `spent + requested > max_higgsfield_credits`: **DO NOT call the generation tool.** Write the
+   `assets` checkpoint `status='awaiting_human'` **AND `partial_progress={"phase":"budget_hold"}`**,
+   include the numbers (`cap`, `spent`, `requested`, `projected = spent+requested`) in the checkpoint,
+   and **STOP**. The launcher surfaces this as the **`budget_exceeded`** gate.
+3. The human then either **raises the cap** (resume carries a new `max_higgsfield_credits`), **revises**
+   (regenerate a cheaper/smaller plan), or **cancels**. On resume, **re-run this check** before
+   generating — never assume the raise is enough without re-summing.
+
+No cap set (`max_higgsfield_credits` unset) → no ceiling; still record each asset's `get_cost`
+credits in `asset_manifest`. This is stop-and-ask, not silent truncation: never quietly drop scenes
+to fit a budget — always pause for the human decision.

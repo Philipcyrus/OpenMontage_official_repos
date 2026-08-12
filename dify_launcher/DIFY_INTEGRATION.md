@@ -161,7 +161,7 @@ done                   artifacts: final                     (branding is a SEPAR
 
 `status` values: `running` (working, keep polling) · `awaiting_human` (a gate — act) · `done` (finished) · `failed` (see `question`).
 
-> **The assets stage surfaces up to THREE gates.** `approve_stills`, `approve_motion_sample`, and `approve_assets` are `awaiting_human` pauses of the **same** `assets` stage (`stage:"assets"` at all of them). `approve_stills` shows **stills only** (no video — a rejection costs nothing). `approve_motion_sample` shows **one sample clip** so you approve the motion/animation before the full batch is generated — it appears only when the `motion_sample` job option is on (**default**), and is skipped when off. `approve_assets` shows the full media set. All are enforced by the engine's checkpoint layer (a gated stage cannot complete without human approval). **Tell them apart by the `gate` field — do not rely on `stage` alone.**
+> **The assets stage surfaces up to FOUR pauses.** `approve_stills`, `approve_motion_sample`, `budget_exceeded`, and `approve_assets` are `awaiting_human` pauses of the **same** `assets` stage (`stage:"assets"` at all of them). `approve_stills` shows **stills only** (no video — a rejection costs nothing). `approve_motion_sample` shows **one sample clip** so you approve the motion before the full batch — appears only when the `motion_sample` option is on (**default**). `budget_exceeded` is **conditional** — it appears only if a generation would push cumulative Higgsfield spend past `max_higgsfield_credits`; the agent blocks *before* spending and you raise the cap / revise / cancel. `approve_assets` shows the full media set. **Tell them apart by the `gate` field — do not rely on `stage` alone.**
 
 ---
 
@@ -184,6 +184,7 @@ Plain-language description of the video. **Be specific** — duration, what happ
 | `music` | mood string, or `false` | background music via ElevenLabs (`"upbeat, light"`), or `false` to skip |
 | `render_runtime` | `"auto"` \| `"ffmpeg"` \| `"remotion"` \| `"hyperframes"` | which render engine composes the video. Default `"auto"` |
 | `motion_sample` | `true` (default) \| `false` | insert the `approve_motion_sample` gate — animate one hero clip for motion approval before batching all clips. Set `false` for quick drafts (stills → assets directly) |
+| `max_higgsfield_credits` | integer, or unset | **hard credit ceiling** for the run. Before any Higgsfield generation, if cumulative spend would exceed this, the agent blocks and pauses at the `budget_exceeded` gate. Unset = no cap. |
 
 If `voice_id` is omitted, the engine picks the brand voice from config by `narrator`+`language`.
 
@@ -206,6 +207,8 @@ If `voice_id` is omitted, the engine picks the brand voice from config by `narra
 | `{"decision":"revise","answer":"<what to change>"}` | regenerate this gate's output honoring the note, stay at the same gate (at `approve_scene_plan` this rewrites the text plan; at `approve_stills` this regenerates stills; at `approve_motion_sample` this regenerates only the sample clip) |
 | `{"decision":"revise","shots":[1,3],"answer":"…"}` | at `approve_stills` (regenerate those scenes' stills) **or** `approve_assets` (regenerate those shots' clips) |
 | `{"decision":"approve","stills":["/abs/path.png", …]}` | **at `approve_stills` / `approve_assets`** — supply your own media instead of generated ones (associated with the asset manifest, not the scene plan) |
+| `{"decision":"approve","max_higgsfield_credits":<n>}` | **at `budget_exceeded`** — raise the credit cap and resume generation (the agent re-checks before spending) |
+| `{"decision":"cancel"}` | **at `budget_exceeded`** — stop the job; no further Higgsfield credits are spent |
 
 > Approving `approve_stills` does **not** finish the assets stage — with `motion_sample` on (default) the next gate is `approve_motion_sample` (one sample clip); approving that then unlocks the full batch (`approve_assets`). With `motion_sample` off, approving stills goes straight to `approve_assets`. Poll again after each — tell the gates apart by the `gate` field.
 

@@ -50,6 +50,24 @@ def _motion_sample_enabled(state: dict[str, Any]) -> bool:
     v = (state.get("options") or {}).get("motion_sample", True)
     return str(v).lower() not in ("false", "0", "no", "off", "")
 
+
+def _budget_cap(state: dict[str, Any]) -> Optional[int]:
+    """Approved Higgsfield credit ceiling for the run (job option `max_higgsfield_credits`).
+    None = no cap (unlimited — today's behavior). Credits are the authoritative enforcement unit."""
+    v = (state.get("options") or {}).get("max_higgsfield_credits")
+    if v is None or str(v).strip() == "":
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+# Placeholder per-asset Higgsfield credits the MockRunner uses to exercise budget enforcement
+# (the real runner uses each asset's actual get_cost credits from the manifest).
+_MOCK_STILL_CREDITS = 4
+_MOCK_CLIP_CREDITS = 14
+
 _MIGRATION_MSG = (
     "This job was created under the previous storyboard-stills flow (gate "
     "'{gate}'), which no longer exists after the scene_plan revert to the upstream "
@@ -91,6 +109,17 @@ class MockRunner(Runner):
         if gate in _LEGACY_GATES:
             return _legacy_migration(state)
 
+        # a raised budget cap may accompany any response — persist it onto the job options
+        new_cap = (response or {}).get("max_higgsfield_credits")
+        if new_cap is not None:
+            state.setdefault("options", {})["max_higgsfield_credits"] = new_cap
+
+        # cancel: only meaningful at the budget hold — stop the job, spend nothing more
+        if decision == "cancel":
+            state.update(status="failed", gate=None,
+                         question="Job cancelled at the budget gate — no further Higgsfield credits spent.")
+            return state
+
         # revise: regenerate the CURRENT gate's artifact, stay at the same gate
         if decision == "revise":
             regen = {
@@ -99,6 +128,7 @@ class MockRunner(Runner):
                 "approve_stills": self._do_stills,
                 "approve_motion_sample": self._do_motion_sample,
                 "approve_assets": self._do_assets,
+                "budget_exceeded": self._do_assets,          # revise the requested generation to fit
                 "approve_final": self._do_production,
             }.get(gate)
             if not regen:
@@ -106,6 +136,8 @@ class MockRunner(Runner):
             return regen(state, response)
 
         # approve: advance to the next stage/gate
+        if gate == "budget_exceeded":
+            return self._do_assets(state, response)          # cap raised → retry the batch (re-checks)
         if gate == "approve_script":
             return self._do_scene_plan(state, response)
         if gate == "approve_scene_plan":
@@ -243,6 +275,16 @@ class MockRunner(Runner):
             stills = self._placeholder_stills(job_id, n)
         only = set((response or {}).get("shots", []))  # optional: regenerate specific shots
 
+        # HARD PRE-GENERATION BUDGET BLOCK: if animating the batch would push cumulative Higgsfield
+        # spend past the approved credit cap, generate NOTHING and pause for a human decision.
+        cap = _budget_cap(state)
+        if cap is not None:
+            spent = len(stills) * _MOCK_STILL_CREDITS \
+                + (_MOCK_CLIP_CREDITS if state.get("artifacts", {}).get("motion_sample") else 0)
+            requested = n * _MOCK_CLIP_CREDITS               # clips about to be animated
+            if spent + requested > cap:
+                return self._budget_hold(state, cap, spent, requested)
+
         clips = list(state.get("artifacts", {}).get("clips", []))
         if len(clips) != n:
             clips = [None] * n
@@ -260,9 +302,11 @@ class MockRunner(Runner):
         for i in range(n):
             sid = scenes[i]["id"] if i < len(scenes) else f"scene-{i+1}"
             assets.append({"id": f"img-{i:02d}", "type": "image", "path": stills[i],
-                           "source_tool": "mock_still", "scene_id": sid})
+                           "source_tool": "mock_still", "scene_id": sid, "provider": "higgsfield",
+                           "credits": _MOCK_STILL_CREDITS, "credits_source": "estimated"})
             assets.append({"id": f"vid-{i:02d}", "type": "video", "path": clips[i],
-                           "source_tool": "mock_clip", "scene_id": sid})
+                           "source_tool": "mock_clip", "scene_id": sid, "provider": "higgsfield",
+                           "credits": _MOCK_CLIP_CREDITS, "credits_source": "estimated"})
         asset_manifest = {"version": "1.0", "assets": assets, "total_cost_usd": 0.0}
         store.artifact_path(job_id, "asset_manifest.json").write_text(
             json.dumps(asset_manifest, indent=2), encoding="utf-8")
@@ -273,6 +317,21 @@ class MockRunner(Runner):
                      "specific shots (send {\"decision\":\"revise\",\"shots\":[i,...]}).",
             artifacts={**state.get("artifacts", {}), "stills": stills, "clips": clips,
                        "asset_manifest": asset_manifest},
+        )
+        return state
+
+    # --- BUDGET HOLD: hard pre-generation block inside the assets lifecycle -
+    def _budget_hold(self, state: dict[str, Any], cap: int, spent: int, requested: int) -> dict[str, Any]:
+        """Nothing was generated. Pause and require the human to raise the cap, revise, or cancel."""
+        projected = spent + requested
+        state.update(
+            stage="assets", status="awaiting_human", gate="budget_exceeded",
+            question=(f"BUDGET HOLD — generating the requested clips would use ~{requested} more "
+                      f"Higgsfield credits ({spent} already spent → ~{projected} total), over the "
+                      f"approved cap of {cap}. NO clips were generated. Respond with one of: raise "
+                      "the cap {\"decision\":\"approve\",\"max_higgsfield_credits\":<n>}; revise the "
+                      "plan {\"decision\":\"revise\",\"answer\":\"…\"}; or cancel {\"decision\":\"cancel\"}."),
+            artifacts={**state.get("artifacts", {})},
         )
         return state
 
@@ -388,6 +447,26 @@ class ClaudeCodeRunner(Runner):
         decision = (response or {}).get("decision", "approve")
         stage = self._gate_stage(gate)
 
+        # BUDGET HOLD — the agent blocked a generation that would exceed max_higgsfield_credits.
+        # The human must raise the cap, revise the requested generation, or cancel. Nothing was spent.
+        if gate == "budget_exceeded":
+            new_cap = (response or {}).get("max_higgsfield_credits")
+            if new_cap is not None:                       # persist a raised cap for later legs
+                state.setdefault("options", {})["max_higgsfield_credits"] = new_cap
+            if decision == "cancel":
+                state.update(status="failed", gate=None,
+                             question="Job cancelled at the budget gate — no further Higgsfield credits spent.")
+                return state
+            if decision == "approve":
+                self._run_agent(self._budget_raised_prompt(job_id, new_cap), job_id, "assets_media")
+            else:  # revise — reduce/cheapen the requested generation to fit the cap
+                self._run_agent(self._revise_prompt(
+                    job_id, "assets (BUDGET HOLD — reduce or cheapen the requested Higgsfield generation "
+                            "to fit the approved max_higgsfield_credits cap, re-check the budget hard-rule, "
+                            "then continue)", response or {}),
+                    job_id, "assets_revise")
+            return self._sync(state)
+
         # Approving a within-assets phase (stills / motion sample) must NOT complete the assets
         # stage — it only unlocks the next phase WITHIN the same stage. Continue the agent from the
         # latest checkpoint so it does the next phase and stops again at the next assets sub-gate.
@@ -495,10 +574,12 @@ class ClaudeCodeRunner(Runner):
                          question=latest.get("error", "stage failed"), artifacts=arts)
         elif status == "awaiting_human":
             if stage == "assets":
-                # the assets stage pauses up to 3×: stills, one motion sample, then full media.
+                # the assets stage pauses at: stills, one motion sample, a CONDITIONAL budget hold
+                # (only when a generation would exceed max_higgsfield_credits), then full media.
                 phase = (latest.get("partial_progress") or {}).get("phase")
                 gate = {"stills": "approve_stills",
-                        "motion_sample": "approve_motion_sample"}.get(phase, "approve_assets")
+                        "motion_sample": "approve_motion_sample",
+                        "budget_hold": "budget_exceeded"}.get(phase, "approve_assets")
             else:
                 gate = _STAGE_GATE.get(stage, f"approve_{stage}")
             state.update(status="awaiting_human", stage=stage, gate=gate,
@@ -639,7 +720,7 @@ class ClaudeCodeRunner(Runner):
 
     # -- approvals + prompts ------------------------------------------------
     def _gate_stage(self, gate: Optional[str]) -> Optional[str]:
-        if gate in ("approve_stills", "approve_motion_sample", "approve_assets"):
+        if gate in ("approve_stills", "approve_motion_sample", "budget_exceeded", "approve_assets"):
             return "assets"                 # all are pauses of the single assets stage
         for s, g in _STAGE_GATE.items():
             if g == gate:
@@ -666,6 +747,20 @@ class ClaudeCodeRunner(Runner):
         runtime = str(options.get("render_runtime", "auto")).lower()  # auto|ffmpeg|remotion|hyperframes
         motion_sample = str(options.get("motion_sample", True)).lower() \
             not in ("false", "0", "no", "off", "")    # one-clip motion cost gate (default on)
+        cap = _budget_cap({"options": options})       # max_higgsfield_credits, or None (no cap)
+
+        if cap is not None:
+            budget_line = (
+                f"BUDGET — HARD CAP of {cap} Higgsfield credits for this project. Before ANY "
+                "Higgsfield generation (stills, motion sample, or clips), follow the BUDGET HARD RULE "
+                "in skills/meta/higgsfield-mcp-bridge.md: sum the credits already recorded in "
+                "asset_manifest PLUS the get_cost of the batch you are about to generate; if that "
+                f"total would exceed {cap}, DO NOT call the generation tool — write the assets "
+                "checkpoint status='awaiting_human' with partial_progress={\"phase\":\"budget_hold\"} "
+                "(include the cap, spent, requested, projected credits) and STOP for a human decision.")
+        else:
+            budget_line = ("BUDGET — no credit cap set for this job (max_higgsfield_credits unset). "
+                           "Still record each asset's get_cost credits in asset_manifest.")
 
         if runtime in ("ffmpeg", "remotion", "hyperframes"):
             runtime_line = (
@@ -705,7 +800,7 @@ class ClaudeCodeRunner(Runner):
             "BRAND — MANDATORY, do NOT improvise: read config/panda-elements.json and USE its "
             "Higgsfield reference Element IDs for character consistency — the panda Element for "
             "every panda shot, the customer Element for the customer. Never invent a new panda.\n"
-            f"{voice_line}\n{music_line}\n{runtime_line}\n\n"
+            f"{voice_line}\n{music_line}\n{runtime_line}\n{budget_line}\n\n"
             "Follow AGENT_GUIDE.md and skills/meta/checkpoint-protocol.md. Execute stages in "
             "order. At every stage whose manifest sets human_approval_default: true, write the "
             "checkpoint with status='awaiting_human' and STOP (end your turn) — do NOT "
@@ -756,6 +851,16 @@ class ClaudeCodeRunner(Runner):
             "(ElevenLabs), record every file in asset_manifest, then rewrite the assets checkpoint "
             "with status='awaiting_human' (WITHOUT the 'stills' phase marker) and STOP for the "
             "full media approval."
+        )
+
+    def _budget_raised_prompt(self, job_id: str, new_cap: Any) -> str:
+        cap_txt = f" The approved cap is now {new_cap} Higgsfield credits." if new_cap is not None else ""
+        return (
+            f"For project_id: {job_id}, the BUDGET HOLD is cleared — the human authorized continuing."
+            f"{cap_txt} Resume the Higgsfield generation that was blocked, RE-CHECKING the budget "
+            "hard-rule (spent + get_cost vs the cap) before generating. If it now fits, generate the "
+            "batch, record each asset's credits in asset_manifest, and stop at the next assets gate. "
+            "If it STILL exceeds the cap, do NOT generate — write the budget_hold checkpoint again."
         )
 
     def _motion_sample_prompt(self, job_id: str) -> str:

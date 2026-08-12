@@ -162,6 +162,38 @@ assert b2["artifacts"].get("clips"), "with motion_sample off, approving stills m
 assert "motion_sample" not in b2["artifacts"], "motion_sample off must not create a sample clip"
 print("   motion_sample=false: stills -> assets directly (no motion gate)")
 
+# 4e) BUDGET HARD CAP: a low max_higgsfield_credits blocks the batch (budget_exceeded); raise to proceed
+b3 = _step("POST /jobs (budget cap 20)", c.post("/jobs", json={
+    "brief": "capped run", "options": {"motion_sample": False, "max_higgsfield_credits": 20}}),
+    want_gate="approve_script", want_status="awaiting_human")
+job3 = b3["job_id"]
+c.post(f"/jobs/{job3}/respond", json={"decision": "approve"})            # -> scene_plan
+c.post(f"/jobs/{job3}/respond", json={"decision": "approve"})            # -> stills
+# approving stills would animate the full batch (~54 credits) > cap 20 -> HARD BLOCK, nothing generated
+b3 = _step("respond approve (stills, over budget)", c.post(f"/jobs/{job3}/respond", json={"decision": "approve"}),
+           want_gate="budget_exceeded", want_status="awaiting_human")
+assert "clips" not in b3["artifacts"], "budget hold must NOT generate clips"
+assert not list(store.artifacts_dir(job3).glob("clip_*.mp4")), "budget hold must generate no clip files"
+assert "cap of 20" in (b3.get("question") or ""), "budget hold should state the approved cap"
+print("   budget hold: batch blocked at cap 20, zero clips generated (hard pre-generation block)")
+# raise the cap -> generation proceeds to approve_assets, credits recorded
+b3 = _step("respond raise cap -> 100", c.post(f"/jobs/{job3}/respond",
+           json={"decision": "approve", "max_higgsfield_credits": 100}),
+           want_gate="approve_assets", want_status="awaiting_human")
+assert b3["artifacts"].get("clips"), "raising the cap must let generation proceed"
+assert any(a.get("credits") for a in b3["artifacts"]["asset_manifest"]["assets"]), "manifest records credits"
+print("   cap raised to 100 -> clips generated, Higgsfield credits recorded in manifest")
+
+# cancel path: a capped job cancelled at the budget gate -> failed, no further spend
+jc = c.post("/jobs", json={"brief": "cancel me", "options": {"motion_sample": False, "max_higgsfield_credits": 5}}).json()["job_id"]
+c.post(f"/jobs/{jc}/respond", json={"decision": "approve"})              # -> scene_plan
+c.post(f"/jobs/{jc}/respond", json={"decision": "approve"})              # -> stills
+c.post(f"/jobs/{jc}/respond", json={"decision": "approve"})              # -> budget_exceeded
+bc = _step("respond cancel (budget)", c.post(f"/jobs/{jc}/respond", json={"decision": "cancel"}),
+           want_status="failed")
+assert "cancel" in (bc.get("question") or "").lower(), "cancel should report a cancellation"
+print("   budget cancel -> job failed cleanly, no clips")
+
 # 5) (g) a legacy job (old storyboard-stills gate) is readable but resume returns a migration note
 legacy = store.new_job_id()
 store.ensure_job(legacy)
