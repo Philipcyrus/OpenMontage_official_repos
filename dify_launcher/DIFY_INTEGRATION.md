@@ -101,9 +101,10 @@ cross-platform USD total, by design):
 - **time** → active generation time per stage + total. This is machine time only; it **excludes** the human review waits between gates.
 - Before any generation has run the endpoint returns `{"cost_report":null,"note":"…"}`.
 
-The same data is also written as downloadable artifacts on every job:
-`cost_report.md` (human-readable table) and `cost_report.json`, and surfaced in the poll
-response under `artifacts.cost_report` (link) + `artifacts.cost_report_summary` (inline).
+**Cost is API-only** — it is **not** attached to the normal `GET /jobs/{id}` poll responses (so the
+gate flow stays uncluttered). Fetch it explicitly when you want it via this `GET /jobs/{id}/cost`
+endpoint, or download the `cost_report.md` / `cost_report.json` artifact by name
+(`GET /jobs/{id}/artifacts/cost_report.md`). The report files are refreshed after every leg.
 
 > **Not tracked:** LLM (Claude) cost/tokens, and fal/Seedance/Kling — by request, only
 > Higgsfield credits, ElevenLabs usage, and generation time are reported.

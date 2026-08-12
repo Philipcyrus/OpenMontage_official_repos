@@ -489,7 +489,7 @@ class ClaudeCodeRunner(Runner):
             return state
         stage, status = latest.get("stage"), latest.get("status")
         arts = self._mirror_artifacts(job_id, latest.get("artifacts", {}))
-        self._add_cost_report(job_id, arts)
+        self._write_cost_report(job_id)     # refresh the report files (API-only; not attached to arts)
         if status == "failed":
             state.update(status="failed", stage=stage, gate=None,
                          question=latest.get("error", "stage failed"), artifacts=arts)
@@ -617,13 +617,15 @@ class ClaudeCodeRunner(Runner):
         out["_checkpoint_artifacts"] = artifacts  # raw non-file data for Dify context
         return out
 
-    def _add_cost_report(self, job_id: str, arts: dict[str, Any]) -> None:
+    def _write_cost_report(self, job_id: str) -> None:
         """Build the per-project cost/time report (Higgsfield credits, ElevenLabs usage,
-        generation time), mirror it into the job store, and surface it in the Dify view:
-        `cost_report` as a downloadable .md link, `cost_report_summary` inline. Non-fatal."""
+        generation time) and mirror it into the job store so it's available ON DEMAND via
+        `GET /jobs/{id}/cost` and the downloadable `cost_report.md` artifact. It is deliberately
+        NOT attached to the polled job state — cost is API-only, not injected into every gate
+        response. Non-fatal: a report failure must never break a run."""
         try:
             from lib import cost_report as cr
-            summary = cr.write_report(job_id)
+            cr.write_report(job_id)
         except Exception:  # noqa: BLE001 — the report must never break a run
             return
         try:
@@ -634,8 +636,6 @@ class ClaudeCodeRunner(Runner):
                     store.artifact_path(job_id, name).write_bytes(src.read_bytes())
         except OSError:
             pass
-        arts["cost_report"] = "cost_report.md"     # ends .md -> surfaced as a download link
-        arts["cost_report_summary"] = summary       # inline dict for Dify context
 
     # -- approvals + prompts ------------------------------------------------
     def _gate_stage(self, gate: Optional[str]) -> Optional[str]:
