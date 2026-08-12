@@ -17,7 +17,7 @@ Dify  ──HTTP──▶  Launcher (this API)  ──▶  headless Claude agent
 - **One base URL**, a handful of endpoints (below).
 - The pipeline **pauses for human approval at 5 gates**: script → scene_plan (text) → stills (before video) → assets (all media) → final.
 - Real generation takes **minutes**, so the API is **asynchronous**: you `POST`, then **poll** `GET` until the gate is ready. (See §4 — this is the single most important thing to build correctly.)
-- Output at each gate is **real reviewable material** — a structured text plan at scene_plan, and downloadable files (script, stills, clips, final MP4) at the other gates.
+- Output at each gate is **real reviewable material** — the **script** (dialogue/sections) and the **scene plan** come **inline** as structured JSON (show them directly at their gates), and the visual media (stills, clips, final MP4) come as downloadable files at the asset/final gates.
 
 ---
 
@@ -224,16 +224,16 @@ Returned under `artifacts` in every state; grouped by kind:
 
 | key | type | when |
 |---|---|---|
-| `script` | file (or inline under `_checkpoint_artifacts.script`) | after script stage |
+| `script` | **inline JSON object** (`title`, `sections[]` with `text` + `speaker_directions`/`delivery_cues` — the actual dialogue; show it, don't fetch) | at the **script** gate |
 | `scene_plan` | **inline JSON object** (the text plan — show it, don't fetch) | at the scene_plan gate |
 | `stills` | list of image paths | at the **stills** gate (and still present at the assets gate) |
 | `clips` | list of video paths | at the **assets** gate |
 | `asset_manifest` | **inline JSON object** (all generated media: `path`+`scene_id` per asset) | at the **assets** gate |
 | `final` | single MP4 path | after compose |
 | `branded` | bool (always `false` in base video) | after compose |
-| `_checkpoint_artifacts` | raw structured data (script JSON, render report) | context/debug |
+| `_checkpoint_artifacts` | raw structured data (render report, decision log) | context/debug |
 
-File artifacts (`script`, `stills`, `clips`, `final`) come as **relative URLs** — fetch with `GET /jobs/{id}/artifacts/{basename}` (prepend the base URL). Structured artifacts (`scene_plan`, `asset_manifest`) come as **inline JSON objects** — display them directly for review, no fetch needed. Show `scene_plan` (text) at the scene_plan gate; show `stills`/`clips` at the assets gate; show `final` at the final gate.
+Structured artifacts (`script`, `scene_plan`, `asset_manifest`) come as **inline JSON objects** — display them directly for review, no fetch needed. **You MUST show `script` at the `approve_script` gate** so the reviewer reads the actual dialogue before approving — do not just show the gate label. (If a pipeline ever emits the script only as a markdown file instead of structured JSON, `script` falls back to a **relative URL** to fetch — but the panda-video script-director emits structured JSON.) File artifacts (`stills`, `clips`, `final`) come as **relative URLs** — fetch with `GET /jobs/{id}/artifacts/{basename}` (prepend the base URL). Show `stills`/`clips` at the assets gate; show `final` at the final gate.
 
 ---
 

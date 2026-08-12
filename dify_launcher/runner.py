@@ -670,15 +670,13 @@ class ClaudeCodeRunner(Runner):
             pref = [p for p in renders if "final" in p.name.lower()] or renders
             final = _copy(pref[-1])
 
-        md = _scan(proj / "artifacts", (".md",))
-        if md:
-            n = _copy(md[-1])
-            if n:
-                out["script"] = n
-        # Surface structured TEXT artifacts inline for review at their gates: scene_plan (text
-        # plan at GATE 2) and asset_manifest (media inventory at GATE 3). Prefer the checkpoint's
-        # inline dict; fall back to the on-disk artifacts/<name>.json the skills write.
-        for aname in ("scene_plan", "asset_manifest"):
+        # Surface structured TEXT artifacts INLINE for review at their gates so the human in Dify
+        # actually sees the content: script (dialogue/sections at GATE 1 approve_script),
+        # scene_plan (text plan at GATE 2), asset_manifest (media inventory at GATE 3/4). Prefer
+        # the checkpoint's inline dict; fall back to the on-disk artifacts/<name>.json the skills
+        # write. Without this, the script gate would surface only a gate label and no script body,
+        # so the reviewer has nothing to approve and the flow appears to skip the human.
+        for aname in ("script", "scene_plan", "asset_manifest"):
             val = artifacts.get(aname)
             if not isinstance(val, dict):
                 ap = proj / "artifacts" / f"{aname}.json"
@@ -688,6 +686,14 @@ class ClaudeCodeRunner(Runner):
                     val = None
             if isinstance(val, dict):
                 out[aname] = val
+        # Fallback ONLY when there is no structured script (e.g. a script written as a markdown
+        # file): surface it as a downloadable link so it's still reviewable.
+        if "script" not in out:
+            md = _scan(proj / "artifacts", (".md",))
+            if md:
+                n = _copy(md[-1])
+                if n:
+                    out["script"] = n
         if stills:
             out["stills"] = stills
         if clips:

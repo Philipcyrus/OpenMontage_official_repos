@@ -90,6 +90,27 @@ assert store.artifact_path(JOB, "final.mp4").is_file()       # actually copied i
 assert store.artifact_path(JOB, "clip_2.mp4").is_file()
 print("[ok] artifact mirroring: files (stills/clips/final/script) + inline scene_plan/asset_manifest")
 
+# 2b) SCRIPT-GATE FIX (regression guard): the real script-director writes a STRUCTURED script
+# (JSON per script.schema.json), not a .md. It MUST be surfaced INLINE at approve_script so the
+# human in Dify sees the actual dialogue/sections — otherwise the gate shows only a label and the
+# flow appears to skip the reviewer. Covers: inline checkpoint dict, on-disk script.json, and
+# that a structured script wins over a stray .md (surfaced as a dict, never just a link).
+JOB2 = "job_script_inline"
+proj2 = run._projects_dir / JOB2
+(proj2 / "artifacts").mkdir(parents=True, exist_ok=True)
+_script_obj = {"version": "1.0", "title": "Panda tip", "total_duration_seconds": 10.0,
+               "sections": [{"id": "hook", "text": "Meet Panda.",
+                             "start_seconds": 0, "end_seconds": 3}]}
+a = run._mirror_artifacts(JOB2, {"script": _script_obj})                 # (a) inline in checkpoint
+assert isinstance(a.get("script"), dict) and a["script"]["sections"][0]["text"] == "Meet Panda.", a.get("script")
+(proj2 / "artifacts" / "script.json").write_text(_json.dumps(_script_obj), encoding="utf-8")
+b = run._mirror_artifacts(JOB2, {})                                      # (b) on-disk script.json
+assert isinstance(b.get("script"), dict) and b["script"]["title"] == "Panda tip", b.get("script")
+(proj2 / "artifacts" / "notes.md").write_text("# not the script", encoding="utf-8")
+c = run._mirror_artifacts(JOB2, {"script": _script_obj})                 # (c) structured wins over .md
+assert isinstance(c.get("script"), dict), c.get("script")
+print("[ok] structured script surfaced INLINE at approve_script (checkpoint dict + script.json + wins over .md)")
+
 # 3) _sync: checkpoint status -> launcher state (stub the reads) -----------
 def _fake_latest(_pd, _jid):
     return _fake_latest.cp
