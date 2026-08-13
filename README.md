@@ -73,6 +73,12 @@ TTS, or compose. Optional `options.gates: ["scene_plan", "stills"]` skips the sc
 After `done`, `POST /jobs/{id}/brand` stamps the BGC wordmark onto copies of the stills.
 See [`dify_launcher/CAROUSEL.md`](dify_launcher/CAROUSEL.md).
 
+**`panda-image`** (single still): `POST /jobs` with `"pipeline": "panda-image"`.
+Gates: `approve_scene_plan` → `approve_stills` → `done`. No script, motion, clips, TTS, or
+compose. `options.aspect_ratio` default `1:1`. Dual-mode stills revise (`edit` | `fresh`).
+After `done`, `POST /jobs/{id}/brand` stamps the BGC wordmark onto a copy.
+See [`dify_launcher/IMAGE.md`](dify_launcher/IMAGE.md).
+
 ## Cost & time report
 
 Every job produces a per-project consumption report in native units (no cross-platform USD
@@ -124,6 +130,8 @@ Or drive the live API with curl — see [`deploy/README.md`](deploy/README.md).
 
 **panda-carousel** (usage, aspect ratios, dual-mode revise, recorded walks):
 [`dify_launcher/CAROUSEL.md`](dify_launcher/CAROUSEL.md).
+**panda-image** (single still, same revise + `/brand`):
+[`dify_launcher/IMAGE.md`](dify_launcher/IMAGE.md).
 
 ## Repo layout
 
@@ -131,6 +139,7 @@ Or drive the live API with curl — see [`deploy/README.md`](deploy/README.md).
 |------|------|
 | `pipeline_defs/panda-video.yaml` | the pipeline + the 5 gates |
 | `pipeline_defs/panda-carousel.yaml` | stills-only sibling (script → scene_plan → stills → done) |
+| `pipeline_defs/panda-image.yaml` | single still (scene_plan → stills → done) |
 | `skills/pipelines/panda-video/` | stage skills (scene-plan director, asset director, compose director) |
 | `lib/cost_report.py` | per-project cost & time report (Higgsfield credits, ElevenLabs usage, gen time) |
 | `tools/video/panda_render.py` | clean compose (folded render) |

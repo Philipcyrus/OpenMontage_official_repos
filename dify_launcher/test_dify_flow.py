@@ -323,7 +323,64 @@ sq = b6["artifacts"].get("stills") or []
 assert sq and all(_size(b6["job_id"], s) == (1080, 1080) for s in sq), "1:1 must be 1080x1080"
 print("   carousel 1:1: 1080x1080 stills")
 
+# 7) panda-image: scene_plan → one still → edit → fresh → done + /brand
+b7 = _step("POST /jobs (panda-image)", c.post("/jobs", json={
+    "brief": "One square still: panda at the airport holding a phone with full signal.",
+    "pipeline": "panda-image",
+    "options": {"language": "zh"},
+}), want_gate="approve_scene_plan", want_status="awaiting_human")
+assert b7.get("pipeline") == "panda-image"
+job7 = b7["job_id"]
+sp7 = b7["artifacts"].get("scene_plan")
+assert isinstance(sp7, dict) and len(sp7.get("scenes") or []) == 1, "image plan is exactly 1 scene"
+validate_artifact("scene_plan", sp7)
+assert "script" not in b7["artifacts"]
+assert "stills" not in b7["artifacts"]
+c.post(f"/jobs/{job7}/respond", json={"decision": "approve"})
+b7 = _step("image stills", c.get(f"/jobs/{job7}"),
+           want_gate="approve_stills", want_status="awaiting_human")
+istills = b7["artifacts"].get("stills") or []
+assert len(istills) == 1, istills
+assert _size(job7, istills[0]) == (1080, 1080), "image default is 1:1"
+assert not list(store.artifacts_dir(job7).glob("*.mp4")), "image must not generate video"
+id0 = _digest(job7, istills[0])
+b7 = _step("image stills revise mode=edit", c.post(f"/jobs/{job7}/respond", json={
+    "decision": "revise", "mode": "edit", "shots": [1],
+    "answer": "warm sunset; keep layout",
+}), want_gate="approve_stills", want_status="awaiting_human")
+istills_e = b7["artifacts"].get("stills") or []
+assert len(istills_e) == 1
+assert _digest(job7, istills_e[0]) != id0
+assert _size(job7, istills_e[0]) == (1080, 1080)
+id1 = _digest(job7, istills_e[0])
+b7 = _step("image stills revise mode=fresh", c.post(f"/jobs/{job7}/respond", json={
+    "decision": "revise", "mode": "fresh", "shots": [1],
+    "answer": "new composition; do not reuse the PNG",
+}), want_gate="approve_stills", want_status="awaiting_human")
+istills_f = b7["artifacts"].get("stills") or []
+assert len(istills_f) == 1
+assert _digest(job7, istills_f[0]) != id1
+assert _size(job7, istills_f[0]) == (1080, 1080)
+b7 = _step("image approve stills -> done",
+           c.post(f"/jobs/{job7}/respond", json={"decision": "approve"}),
+           want_status="done")
+assert b7.get("gate") is None
+assert len(b7["artifacts"].get("stills") or []) == 1
+validate_artifact("asset_manifest", b7["artifacts"]["asset_manifest"])
+assert "clips" not in b7["artifacts"] and "final" not in b7["artifacts"]
+print("   image: scene_plan → 1 still (1080x1080) → edit → fresh → done")
+
+ibr = c.post(f"/jobs/{job7}/brand", json={"profile": "bgc"})
+assert ibr.status_code == 200, ibr.text
+ibb = ibr.json()
+assert ibb["status"] == "done" and ibb["artifacts"].get("branded") is True
+ibstills = ibb["artifacts"].get("branded_stills")
+assert ibstills and len(ibstills) == 1 and ibstills[0].endswith(".bgc.png")
+assert ibb["artifacts"].get("stills")
+print("   image brand pass: one BGC copy, UGC original kept")
+
 print("\n[PASS] FULL DIFY GATE FLOW: start -> script -> scene_plan(text) -> stills(no video) -> "
       "motion_sample(1 clip) -> assets(media) -> final -> done  (+ motion_sample=false toggle)")
 print("   + panda-carousel: script → scene_plan → stills → done + /brand")
+print("   + panda-image: scene_plan → one still → edit → fresh → done + /brand")
 print("   job dir:", store.job_dir(job))

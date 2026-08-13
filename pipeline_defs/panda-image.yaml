@@ -1,0 +1,91 @@
+name: panda-image
+version: "1.0"
+description: >
+  Panda Mobile single-still pipeline. Truncated sibling of panda-carousel:
+  idea → scene_plan (GATE 1) → assets stills only (GATE 2, one PNG) → done.
+  No script, motion_sample, clips, TTS, music, edit, or compose. The job
+  reaches `done` once the still is approved. Branding (UGC → BGC wordmark)
+  is a separate on-demand POST /jobs/{id}/brand pass after approval — never
+  baked into generation. Same styles/panda.yaml look and panda Element IDs
+  as panda-video / panda-carousel. Dual-mode stills revise (fresh | edit).
+category: hybrid
+stability: production
+default_checkpoint_policy: guided
+
+orchestration:
+  mode: executive-producer
+  skill: pipelines/hybrid/executive-producer
+  budget_default_usd: 2.00          # one still; Higgsfield bills in credits
+  max_revisions_per_stage: 3
+  max_send_backs: 3
+  max_wall_time_minutes: 15
+
+extensions:
+  custom_scripts: true
+  custom_playbooks: true
+  custom_skills: true
+  custom_tools: true
+
+required_skills:
+  - pipelines/hybrid/executive-producer
+  - pipelines/panda-image/idea-director
+  - pipelines/panda-image/scene-plan-director
+  - pipelines/panda-image/asset-director
+  - meta/higgsfield-mcp-bridge
+  - meta/reviewer
+  - meta/checkpoint-protocol
+
+compatible_playbooks:
+  recommended:
+    - panda
+  custom_allowed: true
+
+stages:
+  # ---- research / proposal : internal, NO gate ----
+  - name: idea
+    skill: pipelines/panda-image/idea-director
+    produces:
+      - brief
+      - decision_log
+    tools_available: []
+    checkpoint_required: true
+    human_approval_default: false      # INTERNAL — write 'completed' -> scene_plan
+
+  # ---- GATE 1 : approve the TEXT plan (no media generated here) ----
+  - name: scene_plan
+    skill: pipelines/panda-image/scene-plan-director
+    required_artifacts_in:
+      - brief
+    produces:
+      - scene_plan          # structured TEXT plan only (exactly 1 scene)
+    tools_available: []
+    checkpoint_required: true
+    human_approval_default: true       # 🚦 GATE 1
+    review_focus:
+      - Exactly one scene; required_assets is a still only (no video/audio)
+      - "Social ratio matches options.aspect_ratio (default 1:1); do not rewrite a caller-set ratio"
+      - Bilingual captions (zh + en) are carried on the scene when copy is on-image
+      - Panda identity / Element ids / composition are specified as plan requirements
+
+  # ---- GATE 2 : ONE STILL — terminal. Approving this completes the job. ----
+  # partial_progress.phase="stills" -> approve_stills. No motion_sample, no clips.
+  # BUDGET hold (phase="budget_hold") still applies if the still would exceed
+  # max_higgsfield_credits. On approval the launcher completes the assets stage
+  # and the job is done. Branding is POST /jobs/{id}/brand.
+  - name: assets
+    skill: pipelines/panda-image/asset-director
+    required_artifacts_in:
+      - scene_plan
+    produces:
+      - asset_manifest
+    tools_available:
+      - image_selector           # one still via the Higgsfield MCP bridge
+    checkpoint_required: true
+    human_approval_default: true       # 🚦 GATE 2 (terminal)
+    review_focus:
+      - One still, on-brand (styles/panda.yaml) and character-consistent (panda Elements)
+      - "Social ratio matches options.aspect_ratio (default 1:1); a still that READS"
+      - On-image copy matches the scene_plan captions (primary language baked in)
+      - The still exists on disk and is listed in asset_manifest (path + scene_id)
+      - "Budget: Higgsfield credits stay within max_higgsfield_credits (if set)"
+      - Reviewer can approve or request revision (mode fresh | edit)
