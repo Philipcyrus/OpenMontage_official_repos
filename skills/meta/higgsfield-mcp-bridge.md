@@ -34,14 +34,60 @@ The relevant ones:
   preflight the credit cost without spending.
 - `job_status` / `show_generations` — poll until the job is `completed`.
 - `reveal_generation` / `job_display` — obtain the finished clip's CDN URL.
-- `generate_image` — make a still first when doing image-to-video.
-- `media_import_url` — register a web image URL, returns a `media_id` to pass as
-  a `medias[]` value (never pass raw https URLs into `medias`).
+- `generate_image` — make a still first when doing image-to-video. Also used for
+  stills-only carousel slides, and for GATE 3 **edit** revises (pass a registered
+  `media_id` as the start/reference image).
+- `media_import_url` — register a **public** web image URL, returns a `media_id` to
+  pass as a `medias[]` value (never pass raw https URLs into `medias`). **Cannot**
+  fetch `localhost` / launcher artifact URLs.
+- `media_import` (local upload) — register a PNG already on disk. Use this for
+  GATE 3 **edit** revises: load the still from the absolute path in the revise
+  prompt and upload it. Confirm the live tool name with the MCP catalog.
 
 Always confirm the live model catalog with `models_explore` rather than trusting
 hardcoded ids. Model guidance from the server: `seedance_2_0` for identity /
 cinematic; `kling3_0` for multi-shot, native audio, or motion transfer;
-`kling3_0_turbo` for fast text-to-video or single start-frame animation.
+`kling3_0_turbo` for fast text-to-video or single start-frame animation. For
+image generation, `models_explore` the stills model and confirm which media role
+it uses for a start/reference image before an **edit** revise.
+
+## Stills revise — FRESH vs EDIT (GATE 3)
+
+At `approve_stills` (both `panda-video` and `panda-carousel`) the human may send
+`{"decision":"revise","mode":"fresh"|"edit","shots":[…],"answer":"…"}`. If `mode`
+is omitted, infer: `shots` set and the note is a local change (change / fix /
+remove / keep / edit) → **edit**; regenerate / redo / new / from scratch /
+different scene → **fresh**; no `shots` and ambiguous → **fresh**.
+
+Motion, clips, and final gates stay regenerate-only. Do not image-to-image after
+the job is `done`. Panda stills stay on Higgsfield MCP (not FLUX/BFL).
+
+### FRESH
+
+`generate_image` from the revised prompt + panda/customer Element IDs only. Do
+**not** pass the previous PNG. Replace only the flagged still files and their
+`asset_manifest` rows (new `credits` / `job_id`). Leave other slides untouched.
+Then rewrite the assets checkpoint `status='awaiting_human'` with **top-level**
+`partial_progress={"phase":"stills"}` (not nested under `metadata`) and STOP.
+
+### EDIT (image-to-image)
+
+1. Load each flagged still from disk (absolute path in the revise prompt —
+   typically `projects/<job_id>/assets/images/…`; launcher artifact URLs on
+   localhost are not fetchable).
+2. Register it with Higgsfield MCP via local upload / `media_import`.
+   `media_import_url` cannot fetch localhost.
+3. `models_explore` — confirm the image model's start/reference media role.
+4. `generate_image` with that `media_id` plus a **preservation prompt**: keep
+   composition, character, layout, and typography; apply only `{answer}`. Keep
+   Element IDs. Same aspect ratio as the source still.
+5. Replace that slide's file + `asset_manifest` row (new `credits` / `job_id`).
+   Leave other slides untouched.
+6. Checkpoint `awaiting_human` with **top-level**
+   `partial_progress={"phase":"stills"}` and STOP.
+
+If the image model rejects a source still, surface a blocker and wait. Do **not**
+silently fall back to FRESH.
 
 ## Per-clip generation loop
 

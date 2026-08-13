@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from typing import Any, Optional
@@ -61,6 +62,193 @@ def _budget_cap(state: dict[str, Any]) -> Optional[int]:
         return int(v)
     except (TypeError, ValueError):
         return None
+
+
+_DEFAULT_PIPELINE = os.environ.get("PANDA_PIPELINE_TYPE", "panda-video")
+
+
+def _pipeline_of(state: dict[str, Any]) -> str:
+    """Per-job pipeline name. Falls back to PANDA_PIPELINE_TYPE / panda-video."""
+    p = state.get("pipeline") or _DEFAULT_PIPELINE
+    return str(p).strip() or _DEFAULT_PIPELINE
+
+
+def _is_carousel(state: dict[str, Any]) -> bool:
+    return _pipeline_of(state) == "panda-carousel"
+
+
+def _script_gate_enabled(state: dict[str, Any]) -> bool:
+    """False when options.gates is set and omits script (carousel gate-collapse). Default True."""
+    gates = (state.get("options") or {}).get("gates")
+    if not gates:
+        return True
+    names = {str(g).lower().replace("approve_", "").strip() for g in gates}
+    return "script" in names
+
+
+# stills revise at GATE 3 (carousel + video): explicit mode, else infer from the note
+_FRESH_NOTE_RE = re.compile(
+    r"\b(regenerate|redo|new|from scratch|different scene|start over|fresh)\b", re.I)
+_EDIT_NOTE_RE = re.compile(
+    r"\b(change|fix|remove|keep|edit|adjust|replace)\b", re.I)
+
+
+def _stills_revise_mode(response: dict[str, Any]) -> str:
+    """Resolve stills revise mode: explicit `fresh`/`edit`, else infer. Default fresh."""
+    raw = (response or {}).get("mode")
+    if raw is not None and str(raw).strip():
+        m = str(raw).strip().lower()
+        if m in ("fresh", "edit"):
+            return m
+    note = str((response or {}).get("answer") or "")
+    shots = (response or {}).get("shots") or []
+    if _FRESH_NOTE_RE.search(note):
+        return "fresh"
+    if shots and _EDIT_NOTE_RE.search(note):
+        return "edit"
+    return "fresh"
+
+
+def _revise_shot_indices(response: dict[str, Any], n: int) -> list[int]:
+    """1-based `shots` from /respond; empty means all. Returns 0-based indices in range."""
+    shots = (response or {}).get("shots") or []
+    if not shots or n <= 0:
+        return list(range(max(n, 0)))
+    out: list[int] = []
+    for s in shots:
+        try:
+            i = int(s)
+        except (TypeError, ValueError):
+            continue
+        if i >= 1:
+            i -= 1
+        if 0 <= i < n and i not in out:
+            out.append(i)
+    return out or list(range(n))
+
+
+def _still_basename(name: Any) -> str:
+    return Path(str(name)).name
+
+
+def _still_abs_paths(job_id: str, state: Optional[dict[str, Any]], shots: list[Any],
+                     projects_dir: Optional[Path] = None) -> list[str]:
+    """Absolute paths of current stills (flagged shots if set, else all)."""
+    names = [_still_basename(n) for n in (state or {}).get("artifacts", {}).get("stills") or []]
+    if not names:
+        return []
+    indices = _revise_shot_indices({"shots": shots}, len(names))
+    engine_images = (projects_dir / job_id / "assets" / "images") if projects_dir else None
+    paths: list[str] = []
+    for i in indices:
+        basename = names[i]
+        if engine_images is not None:
+            eng = engine_images / basename
+            if eng.is_file():
+                paths.append(str(eng.resolve()))
+                continue
+        p = store.artifact_path(job_id, basename)
+        paths.append(str(p.resolve()) if p.exists() else str(p))
+    return paths
+
+
+# carousel slide canvas — caller sets options.aspect_ratio (default 4:5). Do not coerce to 4:5/1:1.
+_CAROUSEL_PIXEL_SIZES = {
+    "1:1": (1080, 1080),
+    "4:5": (1080, 1350),
+    "3:4": (1080, 1440),
+    "9:16": (1080, 1920),
+    "16:9": (1920, 1080),
+    "4:3": (1440, 1080),
+}
+
+
+def _carousel_aspect(options: Optional[dict[str, Any]] = None,
+                     state: Optional[dict[str, Any]] = None) -> str:
+    """Job option `aspect_ratio`, default 4:5. Pass-through — no 4:5/1:1 rewrite."""
+    opts = options if options is not None else ((state or {}).get("options") or {})
+    raw = str((opts or {}).get("aspect_ratio") or "4:5").strip()
+    return raw or "4:5"
+
+
+def _carousel_pixel_size(ratio: str) -> tuple[int, int]:
+    """Mock placeholder size for a carousel ratio. Unknown W:H → 1080 on the short side."""
+    key = str(ratio or "4:5").strip().lower().replace(" ", "")
+    if key in _CAROUSEL_PIXEL_SIZES:
+        return _CAROUSEL_PIXEL_SIZES[key]
+    m = re.match(r"^(\d+)x(\d+)$", key)
+    if m:
+        w, h = int(m.group(1)), int(m.group(2))
+        if w > 0 and h > 0:
+            return (w, h)
+    m = re.match(r"^(\d+):(\d+)$", key)
+    if m:
+        a, b = int(m.group(1)), int(m.group(2))
+        if a > 0 and b > 0:
+            if a <= b:
+                return (1080, max(1, round(1080 * b / a)))
+            return (max(1, round(1080 * a / b)), 1080)
+    return _CAROUSEL_PIXEL_SIZES["4:5"]
+
+
+class BrandError(ValueError):
+    """Raised by brand_job when the job cannot be branded. `.status_code` is the HTTP code."""
+
+    def __init__(self, message: str, status_code: int = 409):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def brand_job(state: dict[str, Any], profile: str = "bgc") -> dict[str, Any]:
+    """Stamp the BGC wordmark onto approved stills. Job must be `done`. Idempotent.
+
+    UGC originals in artifacts.stills are left untouched. Branded copies are written
+    as `<stem>.bgc.png` and listed under artifacts.branded_stills.
+    """
+    if state.get("status") != "done":
+        raise BrandError(f"job is {state.get('status')!r}, not done — approve stills first", 409)
+    profile = (profile or "bgc").strip().lower()
+    if profile != "bgc":
+        raise BrandError("only profile 'bgc' is supported for the brand pass", 400)
+
+    stills = list(state.get("artifacts", {}).get("stills") or [])
+    if not stills:
+        raise BrandError("no stills to brand (video-master brand pass is not in this slice)", 409)
+
+    existing = list(state.get("artifacts", {}).get("branded_stills") or [])
+    if existing and all(store.artifact_path(state["job_id"], n).is_file() for n in existing):
+        state.setdefault("artifacts", {})["branded"] = True
+        return state
+
+    _VENDOR = _ENGINE_ROOT / "vendor"
+    os.environ.setdefault("MONTAGE_BRAND_DIR", str(_VENDOR / "brand"))
+    os.environ.setdefault("MONTAGE_DATA_DIR", str(_VENDOR / "data"))
+    if str(_VENDOR) not in sys.path:
+        sys.path.insert(0, str(_VENDOR))
+    from montage_svc.storage import ensure_profiles, load_profile  # noqa: WPS433
+    from montage_svc.render.overlays import draw_logo  # noqa: WPS433
+    from PIL import Image
+
+    ensure_profiles()
+    prof = load_profile("bgc")
+    job_id = state["job_id"]
+    branded: list[str] = []
+    for name in stills:
+        src = store.artifact_path(job_id, name)
+        if not src.is_file():
+            raise BrandError(f"still {name!r} is missing from the job store", 409)
+        stem = Path(name).stem
+        out_name = f"{stem}.bgc.png"
+        img = Image.open(src).convert("RGBA")
+        draw_logo(img, prof)
+        img.save(store.artifact_path(job_id, out_name))
+        branded.append(out_name)
+
+    arts = dict(state.get("artifacts") or {})
+    arts["branded_stills"] = branded
+    arts["branded"] = True
+    state["artifacts"] = arts
+    return state
 
 
 # Placeholder per-asset Higgsfield credits the MockRunner uses to exercise budget enforcement
@@ -100,6 +288,10 @@ class Runner:
 
 class MockRunner(Runner):
     def start(self, state: dict[str, Any]) -> dict[str, Any]:
+        state.setdefault("pipeline", _pipeline_of(state))
+        if not _script_gate_enabled(state):
+            self._do_script(state, {})
+            return self._do_scene_plan(state, {})
         return self._do_script(state, {})
 
     def resume(self, state: dict[str, Any], response: dict[str, Any]) -> dict[str, Any]:
@@ -143,6 +335,8 @@ class MockRunner(Runner):
         if gate == "approve_scene_plan":
             return self._do_stills(state, response)      # assets phase 1: stills only
         if gate == "approve_stills":
+            if _is_carousel(state):
+                return self._finish_carousel(state)   # terminal — no motion / clips / compose
             # assets phase 2: one motion sample first (if enabled), else straight to full media
             if _motion_sample_enabled(state):
                 return self._do_motion_sample(state, response)
@@ -182,9 +376,13 @@ class MockRunner(Runner):
         brief = state.get("brief", "")
         note = (response or {}).get("answer")
         n = 3
+        carousel = _is_carousel(state)
         scenes = []
         for i in range(n):
-            scenes.append({
+            role = ("hook", "content", "cta")[i] if i < 3 else "content"
+            asset = {"type": "image", "description": f"Panda keyframe for scene {i+1}",
+                     "source": "generate"}
+            scene = {
                 "id": f"scene-{i+1}",
                 "type": "generated",
                 "description": (f"Scene {i+1} for: {brief}"
@@ -193,14 +391,23 @@ class MockRunner(Runner):
                 "end_seconds": float((i + 1) * 3),
                 "framing": "medium",
                 "movement": "static",
-                "required_assets": [
-                    {"type": "image", "description": f"Panda keyframe for scene {i+1}",
-                     "source": "generate"},
+                "narrative_role": {"hook": "establish_context", "content": "deliver_payload",
+                                   "cta": "call_to_action"}[role],
+                "required_assets": [asset] if carousel else [
+                    asset,
                     {"type": "video", "description": f"Motion clip for scene {i+1}",
                      "source": "generate"},
                 ],
-            })
+            }
+            if carousel:
+                scene["captions"] = {
+                    "en": f"Slide {i+1} {role}",
+                    "zh": f"第{i+1}页 {role}",
+                }
+            scenes.append(scene)
         scene_plan = {"version": "1.0", "scenes": scenes}
+        if carousel:
+            scene_plan["metadata"] = {"aspect_ratio": _carousel_aspect(state=state)}
         store.artifact_path(job_id, "scene_plan.json").write_text(
             json.dumps(scene_plan, indent=2), encoding="utf-8")
         # Surface the plan inline (dict) so Dify can review it as TEXT — no stills here.
@@ -218,12 +425,27 @@ class MockRunner(Runner):
         This is the cost/visual checkpoint: approve the look (on-model panda, composition)
         before any expensive image->video spend. Real gen is Higgsfield image generation; the
         mock makes placeholder stills. On the box this checkpoint carries
-        partial_progress.phase='stills' so the launcher surfaces it as approve_stills."""
+        partial_progress.phase='stills' so the launcher surfaces it as approve_stills.
+
+        Revise at this gate is dual-mode: `mode=fresh` regenerates placeholders; `mode=edit`
+        draws the note onto copies of the existing PNGs (keeps size/colors). Honor `shots`."""
         job_id = state["job_id"]
         scene_plan = state.get("artifacts", {}).get("scene_plan") or {}
         scenes = scene_plan.get("scenes") or []
         n = len(scenes) or 3
-        stills = self._placeholder_stills(job_id, n)              # stills are made HERE (no video)
+        existing = [_still_basename(x) for x in (state.get("artifacts", {}).get("stills") or [])]
+        decision = (response or {}).get("decision", "approve")
+        if decision == "revise" and existing:
+            indices = _revise_shot_indices(response, len(existing))
+            if _stills_revise_mode(response) == "edit":
+                stills = self._edit_existing_stills(
+                    job_id, existing, indices, (response or {}).get("answer") or "")
+            else:
+                stills = self._placeholder_stills(
+                    job_id, max(n, len(existing)), state=state,
+                    indices=indices, existing=existing)
+        else:
+            stills = self._placeholder_stills(job_id, n, state=state)
         # entering the stills phase drops any clips/manifest from a prior pass
         arts = {k: v for k, v in state.get("artifacts", {}).items()
                 if k not in ("clips", "asset_manifest")}
@@ -355,18 +577,74 @@ class MockRunner(Runner):
         return state
 
     # --- helpers -----------------------------------------------------------
-    def _placeholder_stills(self, job_id: str, n: int) -> list[str]:
+    def _finish_carousel(self, state: dict[str, Any]) -> dict[str, Any]:
+        """Approve stills on panda-carousel: write image-only asset_manifest and mark done."""
+        job_id = state["job_id"]
+        stills = list(state.get("artifacts", {}).get("stills") or [])
+        scene_plan = state.get("artifacts", {}).get("scene_plan") or {}
+        scenes = scene_plan.get("scenes") or []
+        assets = []
+        for i, name in enumerate(stills):
+            sid = scenes[i]["id"] if i < len(scenes) else f"scene-{i+1}"
+            assets.append({"id": f"img-{i:02d}", "type": "image", "path": name,
+                           "source_tool": "mock_still", "scene_id": sid, "provider": "higgsfield",
+                           "credits": _MOCK_STILL_CREDITS, "credits_source": "estimated"})
+        asset_manifest = {"version": "1.0", "assets": assets, "total_cost_usd": 0.0}
+        store.artifact_path(job_id, "asset_manifest.json").write_text(
+            json.dumps(asset_manifest, indent=2), encoding="utf-8")
+        state.update(
+            status="done", stage="assets", gate=None, question=None,
+            artifacts={**state.get("artifacts", {}), "stills": stills,
+                       "asset_manifest": asset_manifest, "branded": False},
+        )
+        return state
+
+    def _placeholder_stills(self, job_id: str, n: int,
+                            state: Optional[dict[str, Any]] = None,
+                            indices: Optional[list[int]] = None,
+                            existing: Optional[list[str]] = None) -> list[str]:
         from PIL import Image, ImageDraw
-        names = []
         colors = [(11, 11, 11), (253, 197, 13), (30, 30, 30)]
-        for i in range(n):
-            img = Image.new("RGB", (1080, 1920), colors[i % len(colors)])
+        if state and _is_carousel(state):
+            size = _carousel_pixel_size(_carousel_aspect(state=state))
+        else:
+            size = (1080, 1920)
+        if existing:
+            names = [_still_basename(x) for x in existing]
+            while len(names) < n:
+                names.append(f"still_{len(names):02d}.png")
+        else:
+            names = [f"still_{i:02d}.png" for i in range(n)]
+        targets = list(range(len(names))) if indices is None else indices
+        for i in targets:
+            if not (0 <= i < len(names)):
+                continue
+            img = Image.new("RGB", size, colors[i % len(colors)])
             d = ImageDraw.Draw(img)
-            d.text((60, 900), f"Scene {i+1}", fill=(255, 255, 255))
-            p = store.artifact_path(job_id, f"still_{i:02d}.png")
+            d.text((60, size[1] // 2), f"Scene {i+1}", fill=(255, 255, 255))
+            p = store.artifact_path(job_id, names[i])
             img.save(p)
-            names.append(p.name)
+            names[i] = p.name
         return names
+
+    def _edit_existing_stills(self, job_id: str, names: list[str],
+                              indices: list[int], note: str) -> list[str]:
+        """Image-to-image mock: stamp the revision note onto copies of existing stills.
+        Keeps original size and colors; only the flagged indices are rewritten."""
+        from PIL import Image, ImageDraw
+        out = [_still_basename(x) for x in names]
+        for i in indices:
+            if not (0 <= i < len(out)):
+                continue
+            p = store.artifact_path(job_id, out[i])
+            img = Image.open(p).convert("RGB")
+            w, h = img.size
+            d = ImageDraw.Draw(img)
+            bar_h = min(80, max(40, h // 16))
+            d.rectangle([0, h - bar_h, w, h], fill=(0, 0, 0))
+            d.text((20, h - bar_h + 10), f"EDIT: {(note or '')[:120]}", fill=(255, 255, 255))
+            img.save(p)
+        return out
 
     def _render_clean(self, scene_paths: list[str], out_path: str) -> None:
         """Real render via the folded panda_render tool (clean/ugc, no branding)."""
@@ -395,7 +673,6 @@ _STAGE_GATE = {
     "scene_plan": "approve_scene_plan",   # TEXT plan (no media)
     "compose": "approve_final",
 }
-_PIPELINE_TYPE = os.environ.get("PANDA_PIPELINE_TYPE", "panda-video")
 
 
 class ClaudeCodeRunner(Runner):
@@ -431,12 +708,23 @@ class ClaudeCodeRunner(Runner):
     # -- lifecycle ----------------------------------------------------------
     def start(self, state: dict[str, Any]) -> dict[str, Any]:
         job_id = state["job_id"]
+        pipeline = _pipeline_of(state)
+        state["pipeline"] = pipeline
         from lib import checkpoint as cp
-        cp.init_project(job_id, title=(state.get("brief") or "Panda video")[:80],
-                        pipeline_type=_PIPELINE_TYPE)
-        self._run_agent(self._start_prompt(job_id, state.get("brief", ""), state.get("options") or {}),
+        title_prefix = "Panda carousel" if pipeline == "panda-carousel" else "Panda video"
+        cp.init_project(job_id, title=(state.get("brief") or title_prefix)[:80],
+                        pipeline_type=pipeline)
+        self._run_agent(self._start_prompt(job_id, state.get("brief", ""),
+                                           state.get("options") or {}, pipeline),
                         job_id, "script")
-        return self._sync(state)
+        state = self._sync(state)
+        # Gate-collapse: options.gates omits script → auto-approve GATE 1 and continue.
+        if (state.get("status") == "awaiting_human" and state.get("gate") == "approve_script"
+                and not _script_gate_enabled(state)):
+            self._approve_stage(job_id, "script", pipeline)
+            self._run_agent(self._continue_prompt(job_id, pipeline), job_id, "scene_plan")
+            state = self._sync(state)
+        return state
 
     def resume(self, state: dict[str, Any], response: dict[str, Any]) -> dict[str, Any]:
         job_id = state["job_id"]
@@ -473,9 +761,13 @@ class ClaudeCodeRunner(Runner):
         if gate == "approve_stills":
             if decision != "approve":
                 self._run_agent(self._revise_prompt(
-                    job_id, "assets (STILLS phase — regenerate the flagged stills and stop again "
-                            "at the stills gate; do NOT generate video yet)", response or {}),
+                    job_id, "assets (STILLS phase — revise the flagged stills and stop again "
+                            "at the stills gate; do NOT generate video yet)",
+                    response or {}, state=state),
                     job_id, "stills_revise")
+            elif _is_carousel(state):
+                # carousel is stills-terminal: complete assets and let _sync mark the job done
+                self._approve_stage(job_id, "assets", _pipeline_of(state))
             elif _motion_sample_enabled(state):
                 # one hero clip first — approve the motion before batching all clips
                 self._run_agent(self._motion_sample_prompt(job_id), job_id, "motion_sample")
@@ -496,13 +788,13 @@ class ClaudeCodeRunner(Runner):
             return self._sync(state)
 
         if decision == "approve":
-            self._approve_stage(job_id, stage)
+            self._approve_stage(job_id, stage, _pipeline_of(state))
             # Approving the LAST gate finishes the job — there is no next stage to run, so do
             # NOT spin up a pointless agent turn; just report done.
-            nxt = cp.get_next_stage(self._projects_dir, job_id, _PIPELINE_TYPE)
+            nxt = cp.get_next_stage(self._projects_dir, job_id, _pipeline_of(state))
             if nxt is None:
                 return self._sync(state)
-            prompt = self._continue_prompt(job_id)
+            prompt = self._continue_prompt(job_id, _pipeline_of(state))
             label = nxt
         else:
             prompt = self._revise_prompt(job_id, stage, response or {})
@@ -585,7 +877,7 @@ class ClaudeCodeRunner(Runner):
             state.update(status="awaiting_human", stage=stage, gate=gate,
                          question=f"Approve {stage}, or request a revision.", artifacts=arts)
         else:  # completed
-            nxt = cp.get_next_stage(self._projects_dir, job_id, _PIPELINE_TYPE)
+            nxt = cp.get_next_stage(self._projects_dir, job_id, _pipeline_of(state))
             if nxt is None:
                 state.update(status="done", stage=stage, gate=None, question=None, artifacts=arts)
             else:
@@ -733,19 +1025,23 @@ class ClaudeCodeRunner(Runner):
                 return s
         return None
 
-    def _approve_stage(self, job_id: str, stage: Optional[str]) -> None:
+    def _approve_stage(self, job_id: str, stage: Optional[str],
+                       pipeline_type: Optional[str] = None) -> None:
         if not stage:
             return
         from lib import checkpoint as cp
         existing = cp.read_checkpoint(self._projects_dir, job_id, stage) or {}
         cp.write_checkpoint(
             self._projects_dir, job_id, stage, "completed",
-            existing.get("artifacts", {}), pipeline_type=_PIPELINE_TYPE,
+            existing.get("artifacts", {}), pipeline_type=pipeline_type or _DEFAULT_PIPELINE,
             human_approval_required=True, human_approved=True,
         )
 
-    def _start_prompt(self, job_id: str, brief: str, options: Optional[dict[str, Any]] = None) -> str:
+    def _start_prompt(self, job_id: str, brief: str, options: Optional[dict[str, Any]] = None,
+                      pipeline: str = "panda-video") -> str:
         options = options or {}
+        if pipeline == "panda-carousel":
+            return self._carousel_start_prompt(job_id, brief, options)
         lang = str(options.get("language", "en")).lower()
         narrator = str(options.get("narrator", "panda")).lower()
         voice_id = options.get("voice_id")            # explicit override from Dify
@@ -800,7 +1096,7 @@ class ClaudeCodeRunner(Runner):
                           f"(ElevenLabs Music, same ELEVENLABS_API_KEY).{mood} Keep it under the VO.")
 
         return (
-            f"Run the `{_PIPELINE_TYPE}` pipeline to produce a video.\n"
+            f"Run the `{pipeline}` pipeline to produce a video.\n"
             f"project_id: {job_id}\nBrief: {brief}\n"
             f"language: {lang}    narrator: {narrator}\n\n"
             "BRAND — MANDATORY, do NOT improvise: read config/panda-elements.json and USE its "
@@ -816,6 +1112,53 @@ class ClaudeCodeRunner(Runner):
             "(cost gates):\n"
             + self._assets_phases_text(motion_sample) +
             "Finally compose the approved assets with the `panda_render` tool. Stop at the first gate."
+        )
+
+    def _carousel_start_prompt(self, job_id: str, brief: str, options: dict[str, Any]) -> str:
+        lang = str(options.get("language", "en")).lower()
+        ratio = _carousel_aspect(options)
+        cap = _budget_cap({"options": options})
+        auto_script = not _script_gate_enabled({"options": options})
+        if cap is not None:
+            budget_line = (
+                f"BUDGET — HARD CAP of {cap} Higgsfield credits. Before ANY Higgsfield still "
+                "generation, follow the BUDGET HARD RULE in skills/meta/higgsfield-mcp-bridge.md. "
+                f"If spent + get_cost would exceed {cap}, write the assets checkpoint "
+                "status='awaiting_human' with partial_progress={{\"phase\":\"budget_hold\"}} and STOP.")
+        else:
+            budget_line = ("BUDGET — no credit cap set. Still record each still's get_cost credits "
+                           "in asset_manifest.")
+        script_line = (
+            "SCRIPT GATE — this job auto-approves script: write the script checkpoint "
+            "status='completed' with human_approved=True, log decision_log category="
+            "'approval_policy' (auto-approved by job option), and continue to scene_plan in "
+            "the SAME turn."
+            if auto_script else
+            "SCRIPT GATE — write script status='awaiting_human' and STOP. Do NOT self-approve."
+        )
+        return (
+            f"Run the `panda-carousel` pipeline to produce a STILLS-ONLY social carousel "
+            f"(NOT a video).\n"
+            f"project_id: {job_id}\nBrief: {brief}\n"
+            f"language: {lang}    aspect_ratio: {ratio}\n\n"
+            "BRAND — MANDATORY: read config/panda-elements.json and USE its Higgsfield reference "
+            "Element IDs — the panda Element for every panda slide, the customer Element for the "
+            "customer. Never invent a new panda. Look: styles/panda.yaml.\n"
+            f"{budget_line}\n{script_line}\n\n"
+            "Follow AGENT_GUIDE.md, pipeline_defs/panda-carousel.yaml, and "
+            "skills/pipelines/panda-carousel/*-director.md. Execute stages in order.\n"
+            "PIPELINE SHAPE: idea (internal, no gate) → script (GATE 1) → scene_plan TEXT "
+            "(GATE 2) → assets STILLS ONLY (GATE 3) → DONE.\n"
+            "  - scene_plan: one scene per slide, bilingual captions.zh/en, required_assets are "
+            "images only. Set metadata.aspect_ratio to the job option "
+            f"'{ratio}' (caller-set; default 4:5). Pass that same ratio to generate_image.\n"
+            "  - assets: generate ONLY stills via Higgsfield generate_image at that aspect ratio. "
+            "Bake primary-language copy into each still. Write asset_manifest (images only) with "
+            "per-still credits. Checkpoint status='awaiting_human' AND "
+            "partial_progress={\"phase\":\"stills\"} and STOP.\n"
+            "Do NOT generate motion clips, TTS, music, edit_decisions, or a compose/render. "
+            "Do NOT brand the stills (no wordmark overlay) — branding is a later POST /brand. "
+            "Stop at the first human_approval gate."
         )
 
     def _assets_phases_text(self, motion_sample: bool) -> str:
@@ -842,11 +1185,16 @@ class ClaudeCodeRunner(Runner):
             "everything in asset_manifest, then write the assets checkpoint status='awaiting_human' "
             "(no 'stills' phase marker) and STOP.\n")
 
-    def _continue_prompt(self, job_id: str) -> str:
+    def _continue_prompt(self, job_id: str, pipeline: Optional[str] = None) -> str:
+        p = pipeline or _DEFAULT_PIPELINE
+        extra = ""
+        if p == "panda-carousel":
+            extra = (" This is a stills-only carousel — do NOT generate video, TTS, music, or "
+                     "compose. After stills the pipeline is complete.")
         return (
-            f"Continue the `{_PIPELINE_TYPE}` pipeline for project_id: {job_id}. Read the latest "
+            f"Continue the `{p}` pipeline for project_id: {job_id}. Read the latest "
             "checkpoint, proceed from the next stage, and STOP at the next human_approval gate "
-            "(status='awaiting_human', end your turn). If the pipeline is complete, finish."
+            f"(status='awaiting_human', end your turn). If the pipeline is complete, finish.{extra}"
         )
 
     def _stills_approved_prompt(self, job_id: str) -> str:
@@ -892,12 +1240,50 @@ class ClaudeCodeRunner(Runner):
             "approval."
         )
 
-    def _revise_prompt(self, job_id: str, stage: Optional[str], response: dict[str, Any]) -> str:
+    def _revise_prompt(self, job_id: str, stage: Optional[str], response: dict[str, Any],
+                       state: Optional[dict[str, Any]] = None) -> str:
         note = response.get("answer", "(no note)")
         shots = response.get("shots") or []
         shot_txt = f" Regenerate only shots {shots}." if shots else ""
+        extra = ""
+        is_stills = ((state or {}).get("gate") == "approve_stills"
+                     or "STILLS" in str(stage or "").upper())
+        if is_stills:
+            mode = _stills_revise_mode(response)
+            mode_label = "EDIT" if mode == "edit" else "FRESH"
+            paths = _still_abs_paths(
+                job_id, state, shots, getattr(self, "_projects_dir", None))
+            path_txt = (f" Current still absolute paths: {paths}." if paths else
+                        f" Current stills live under projects/{job_id}/assets/images/ "
+                        "and the launcher artifacts dir.")
+            shot_txt = (f" Flagged shots (1-based): {shots}." if shots else
+                        " All current stills.")
+            if mode == "edit":
+                extra = (
+                    f" MODE={mode_label}.{path_txt} EDIT: load each flagged still from disk, "
+                    "register it with Higgsfield MCP via local upload / media_import "
+                    "(media_import_url cannot fetch localhost artifact URLs), confirm the image "
+                    "model's start/reference media role with models_explore, then generate_image "
+                    "with that media_id plus a preservation prompt: keep composition, character, "
+                    "layout, and typography; apply only the feedback. Keep Element IDs. Same "
+                    "aspect ratio. Replace only those files and their asset_manifest rows "
+                    "(new credits / job_id). Leave other slides untouched. If the image model "
+                    "rejects a source still, surface a blocker — do NOT silently switch to FRESH."
+                )
+            else:
+                extra = (
+                    f" MODE={mode_label}.{path_txt} FRESH: generate_image from text + "
+                    "panda/customer Element IDs only. Do NOT pass the old PNG. Replace only "
+                    "the flagged files and their asset_manifest rows. Leave other slides untouched."
+                )
+            extra += (
+                " Rewrite the assets checkpoint with status='awaiting_human' AND top-level "
+                "partial_progress={\"phase\":\"stills\"} (not nested under metadata) and STOP. "
+                "Do NOT generate video."
+            )
         return (
-            f"Revise stage '{stage}' for project_id: {job_id} per this feedback: {note}.{shot_txt} "
+            f"Revise stage '{stage}' for project_id: {job_id} per this feedback: {note}.{shot_txt}"
+            f"{extra} "
             "Rewrite that stage's checkpoint with status='awaiting_human' and STOP for approval."
         )
 
