@@ -687,11 +687,15 @@ class ClaudeCodeRunner(Runner):
             if isinstance(val, dict):
                 out[aname] = val
         # Fallback ONLY when there is no structured script (e.g. a script written as a markdown
-        # file): surface it as a downloadable link so it's still reviewable.
+        # file): surface it as a downloadable link so it's still reviewable. Match ONLY a file
+        # literally named script.* — never another stray .md (e.g. cost_report.md), which would
+        # otherwise be mislabeled as the script at gates whose checkpoint carries no script
+        # artifact (regression seen at the scene_plan gate: artifacts.script -> cost_report.md).
         if "script" not in out:
-            md = _scan(proj / "artifacts", (".md",))
-            if md:
-                n = _copy(md[-1])
+            script_md = [p for p in _scan(proj / "artifacts", (".md",))
+                         if p.stem.lower() == "script"]
+            if script_md:
+                n = _copy(script_md[-1])
                 if n:
                     out["script"] = n
         if stills:
