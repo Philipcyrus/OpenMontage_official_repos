@@ -54,7 +54,8 @@ Body:
   "options": { "language": "en", "narrator": "panda", "music": "upbeat, light" }
 }
 ```
-`pipeline` is optional (`"panda-video"` default, or `"panda-carousel"` for a stills-only carousel).
+`pipeline` is optional (`"panda-video"` default, `"panda-carousel"` for a stills-only carousel,
+or `"panda-image"` for a single still).
 Returns **immediately**:
 ```json
 {"job_id":"job_xxxx","status":"running","stage":null,"gate":null,"question":"starting…","artifacts":{}}
@@ -200,6 +201,24 @@ done                   artifacts: stills[] + asset_manifest
    └─ optional POST /jobs/{id}/brand  →  branded_stills[] (BGC wordmark copies)
 ```
 
+**`panda-image`** (`"pipeline": "panda-image"`). One still. Size is `options.aspect_ratio`
+(default `1:1` — see [`IMAGE.md`](IMAGE.md)). Same dual-mode stills revise as carousel.
+
+```
+POST /jobs  { "pipeline": "panda-image", ... }
+   │
+   ▼
+approve_scene_plan     artifacts: scene_plan (exactly 1 scene)
+   │
+   ▼
+approve_stills         artifacts: stills[] (one UGC PNG)     approve│revise (edit|fresh)
+   │
+   ▼
+done
+   │
+   └─ optional POST /jobs/{id}/brand  →  branded_stills[]
+```
+
 `status` values: `running` (working, keep polling) · `awaiting_human` (a gate — act) · `done` (finished) · `failed` (see `question`).
 
 > **The assets stage surfaces up to FOUR pauses.** `approve_stills`, `approve_motion_sample`, `budget_exceeded`, and `approve_assets` are `awaiting_human` pauses of the **same** `assets` stage (`stage:"assets"` at all of them). `approve_stills` shows **stills only** (no video — a rejection costs nothing). `approve_motion_sample` shows **one sample clip** so you approve the motion before the full batch — appears only when the `motion_sample` option is on (**default**). `budget_exceeded` is **conditional** — it appears only if a generation would push cumulative Higgsfield spend past `max_higgsfield_credits`; the agent blocks *before* spending and you raise the cap / revise / cancel. `approve_assets` shows the full media set. **Tell them apart by the `gate` field — do not rely on `stage` alone.**
@@ -215,9 +234,9 @@ Plain-language description of the video. **Be specific** — duration, what happ
 
 ### `pipeline` (optional, default `"panda-video"`)
 Which manifest to run. `"panda-video"` is the full 5-gate video. `"panda-carousel"` is the
-stills-only sibling: `approve_script` → `approve_scene_plan` → `approve_stills` → `done`
-(no motion, clips, TTS, or compose). Persist this per job — mixed video + carousel on one
-launcher is supported.
+stills-only sibling: `approve_script` → `approve_scene_plan` → `approve_stills` → `done`.
+`"panda-image"` is a single still: `approve_scene_plan` → `approve_stills` → `done` (no script).
+Persist this per job — mixed video + carousel + image on one launcher is supported.
 
 ### `profile` (optional, default `"ugc"`)
 `"ugc"` = clean, **no branding baked in** (recommended). Branding (logo/watermark) is a
@@ -234,7 +253,7 @@ generation.
 | `render_runtime` | `"auto"` \| `"ffmpeg"` \| `"remotion"` \| `"hyperframes"` | which render engine composes the video. Default `"auto"` |
 | `motion_sample` | `true` (default) \| `false` | insert the `approve_motion_sample` gate (video only) |
 | `max_higgsfield_credits` | integer, or unset | **hard credit ceiling** for the run |
-| `aspect_ratio` | string, default `"4:5"` | carousel stills: `4:5`, `1:1`, `9:16`, `3:4`, `16:9`, or `WIDTHxHEIGHT` — passed through to `generate_image` |
+| `aspect_ratio` | string | stills canvas, passed through to `generate_image`. Carousel default `"4:5"`; **panda-image** default `"1:1"`. Also `9:16`, `WIDTHxHEIGHT`, … |
 | `gates` | e.g. `["scene_plan", "stills"]` | carousel only — omit `script` to auto-approve GATE 1 |
 
 If `voice_id` is omitted, the engine picks the brand voice from config by `narrator`+`language`.
@@ -257,12 +276,12 @@ If `voice_id` is omitted, the engine picks the brand voice from config by `narra
 | `{"decision":"approve"}` | accept this gate, advance to the next |
 | `{"decision":"revise","answer":"<what to change>"}` | regenerate this gate's output honoring the note, stay at the same gate (at `approve_scene_plan` this rewrites the text plan; at `approve_stills` this regenerates stills unless `mode` is `edit`; at `approve_motion_sample` this regenerates only the sample clip) |
 | `{"decision":"revise","shots":[1,3],"answer":"…"}` | at `approve_stills` (those scenes' stills) **or** `approve_assets` (those shots' clips) |
-| `{"decision":"revise","mode":"edit","shots":[3],"answer":"…"}` | **at `approve_stills` only** (carousel and video): image-to-image the flagged stills (keep composition; apply the note). `mode:"fresh"` regenerates from text + Element IDs and does not pass the old PNG. Omit `mode` to infer: `shots` + local-change language → edit; regenerate/redo/new → fresh; otherwise fresh |
+| `{"decision":"revise","mode":"edit","shots":[3],"answer":"…"}` | **at `approve_stills` only** (video, carousel, and image): image-to-image the flagged stills (keep composition; apply the note). `mode:"fresh"` regenerates from text + Element IDs and does not pass the old PNG. Omit `mode` to infer: `shots` + local-change language → edit; regenerate/redo/new → fresh; otherwise fresh |
 | `{"decision":"approve","stills":["/abs/path.png", …]}` | **at `approve_stills` / `approve_assets`** — supply your own media instead of generated ones (associated with the asset manifest, not the scene plan) |
 | `{"decision":"approve","max_higgsfield_credits":<n>}` | **at `budget_exceeded`** — raise the credit cap and resume generation (the agent re-checks before spending) |
 | `{"decision":"cancel"}` | **at `budget_exceeded`** — stop the job; no further Higgsfield credits are spent |
 
-> Approving `approve_stills` on **panda-video** does **not** finish the assets stage — with `motion_sample` on (default) the next gate is `approve_motion_sample`; with it off, stills go to `approve_assets`. On **panda-carousel**, approving stills **does** finish the job (`status: done`).
+> Approving `approve_stills` on **panda-video** does **not** finish the assets stage — with `motion_sample` on (default) the next gate is `approve_motion_sample`; with it off, stills go to `approve_assets`. On **panda-carousel** and **panda-image**, approving stills **does** finish the job (`status: done`).
 
 Notes:
 - Edits are a **text instruction** the agent acts on (not a manual pixel editor). More specific = closer result.

@@ -73,8 +73,20 @@ def _pipeline_of(state: dict[str, Any]) -> str:
     return str(p).strip() or _DEFAULT_PIPELINE
 
 
+_STILLS_TERMINAL = frozenset({"panda-carousel", "panda-image"})
+
+
 def _is_carousel(state: dict[str, Any]) -> bool:
     return _pipeline_of(state) == "panda-carousel"
+
+
+def _is_image(state: dict[str, Any]) -> bool:
+    return _pipeline_of(state) == "panda-image"
+
+
+def _is_stills_terminal(state: dict[str, Any]) -> bool:
+    """Carousel and single-image jobs finish at approve_stills (no motion/clips/compose)."""
+    return _pipeline_of(state) in _STILLS_TERMINAL
 
 
 def _script_gate_enabled(state: dict[str, Any]) -> bool:
@@ -163,12 +175,21 @@ _CAROUSEL_PIXEL_SIZES = {
 }
 
 
+def _stills_aspect(options: Optional[dict[str, Any]] = None,
+                   state: Optional[dict[str, Any]] = None,
+                   pipeline: Optional[str] = None) -> str:
+    """Job option `aspect_ratio`. Default 1:1 for panda-image, 4:5 otherwise. Pass-through."""
+    p = pipeline or _pipeline_of(state or {})
+    default = "1:1" if p == "panda-image" else "4:5"
+    opts = options if options is not None else ((state or {}).get("options") or {})
+    raw = str((opts or {}).get("aspect_ratio") or default).strip()
+    return raw or default
+
+
 def _carousel_aspect(options: Optional[dict[str, Any]] = None,
                      state: Optional[dict[str, Any]] = None) -> str:
-    """Job option `aspect_ratio`, default 4:5. Pass-through — no 4:5/1:1 rewrite."""
-    opts = options if options is not None else ((state or {}).get("options") or {})
-    raw = str((opts or {}).get("aspect_ratio") or "4:5").strip()
-    return raw or "4:5"
+    """Job option `aspect_ratio`, default 4:5 (carousel / video). Pass-through."""
+    return _stills_aspect(options=options, state=state)
 
 
 def _carousel_pixel_size(ratio: str) -> tuple[int, int]:
@@ -199,6 +220,15 @@ class BrandError(ValueError):
         self.status_code = status_code
 
 
+def _is_superseded_still(path: Any) -> bool:
+    """True for archived revise leftovers (history/ or `*.pre-*` backups), not live stills."""
+    p = Path(str(path))
+    parts = {x.lower() for x in p.parts}
+    if "history" in parts or "superseded-stills" in parts:
+        return True
+    return ".pre-" in p.name.lower()
+
+
 def brand_job(state: dict[str, Any], profile: str = "bgc") -> dict[str, Any]:
     """Stamp the BGC wordmark onto approved stills. Job must be `done`. Idempotent.
 
@@ -211,7 +241,8 @@ def brand_job(state: dict[str, Any], profile: str = "bgc") -> dict[str, Any]:
     if profile != "bgc":
         raise BrandError("only profile 'bgc' is supported for the brand pass", 400)
 
-    stills = list(state.get("artifacts", {}).get("stills") or [])
+    stills = [_still_basename(n) for n in (state.get("artifacts", {}).get("stills") or [])
+              if not _is_superseded_still(n)]
     if not stills:
         raise BrandError("no stills to brand (video-master brand pass is not in this slice)", 409)
 
@@ -289,6 +320,8 @@ class Runner:
 class MockRunner(Runner):
     def start(self, state: dict[str, Any]) -> dict[str, Any]:
         state.setdefault("pipeline", _pipeline_of(state))
+        if _is_image(state):
+            return self._do_scene_plan(state, {})
         if not _script_gate_enabled(state):
             self._do_script(state, {})
             return self._do_scene_plan(state, {})
@@ -335,8 +368,8 @@ class MockRunner(Runner):
         if gate == "approve_scene_plan":
             return self._do_stills(state, response)      # assets phase 1: stills only
         if gate == "approve_stills":
-            if _is_carousel(state):
-                return self._finish_carousel(state)   # terminal — no motion / clips / compose
+            if _is_stills_terminal(state):
+                return self._finish_stills_job(state)   # terminal — no motion / clips / compose
             # assets phase 2: one motion sample first (if enabled), else straight to full media
             if _motion_sample_enabled(state):
                 return self._do_motion_sample(state, response)
@@ -375,11 +408,13 @@ class MockRunner(Runner):
         job_id = state["job_id"]
         brief = state.get("brief", "")
         note = (response or {}).get("answer")
-        n = 3
-        carousel = _is_carousel(state)
+        stills_only = _is_stills_terminal(state)
+        n = 1 if _is_image(state) else 3
         scenes = []
         for i in range(n):
             role = ("hook", "content", "cta")[i] if i < 3 else "content"
+            if _is_image(state):
+                role = "cta"
             asset = {"type": "image", "description": f"Panda keyframe for scene {i+1}",
                      "source": "generate"}
             scene = {
@@ -393,21 +428,21 @@ class MockRunner(Runner):
                 "movement": "static",
                 "narrative_role": {"hook": "establish_context", "content": "deliver_payload",
                                    "cta": "call_to_action"}[role],
-                "required_assets": [asset] if carousel else [
+                "required_assets": [asset] if stills_only else [
                     asset,
                     {"type": "video", "description": f"Motion clip for scene {i+1}",
                      "source": "generate"},
                 ],
             }
-            if carousel:
+            if stills_only:
                 scene["captions"] = {
                     "en": f"Slide {i+1} {role}",
                     "zh": f"第{i+1}页 {role}",
                 }
             scenes.append(scene)
         scene_plan = {"version": "1.0", "scenes": scenes}
-        if carousel:
-            scene_plan["metadata"] = {"aspect_ratio": _carousel_aspect(state=state)}
+        if stills_only:
+            scene_plan["metadata"] = {"aspect_ratio": _stills_aspect(state=state)}
         store.artifact_path(job_id, "scene_plan.json").write_text(
             json.dumps(scene_plan, indent=2), encoding="utf-8")
         # Surface the plan inline (dict) so Dify can review it as TEXT — no stills here.
@@ -577,8 +612,8 @@ class MockRunner(Runner):
         return state
 
     # --- helpers -----------------------------------------------------------
-    def _finish_carousel(self, state: dict[str, Any]) -> dict[str, Any]:
-        """Approve stills on panda-carousel: write image-only asset_manifest and mark done."""
+    def _finish_stills_job(self, state: dict[str, Any]) -> dict[str, Any]:
+        """Approve stills on carousel/image: write image-only asset_manifest and mark done."""
         job_id = state["job_id"]
         stills = list(state.get("artifacts", {}).get("stills") or [])
         scene_plan = state.get("artifacts", {}).get("scene_plan") or {}
@@ -605,8 +640,8 @@ class MockRunner(Runner):
                             existing: Optional[list[str]] = None) -> list[str]:
         from PIL import Image, ImageDraw
         colors = [(11, 11, 11), (253, 197, 13), (30, 30, 30)]
-        if state and _is_carousel(state):
-            size = _carousel_pixel_size(_carousel_aspect(state=state))
+        if state and _is_stills_terminal(state):
+            size = _carousel_pixel_size(_stills_aspect(state=state))
         else:
             size = (1080, 1920)
         if existing:
@@ -711,12 +746,14 @@ class ClaudeCodeRunner(Runner):
         pipeline = _pipeline_of(state)
         state["pipeline"] = pipeline
         from lib import checkpoint as cp
-        title_prefix = "Panda carousel" if pipeline == "panda-carousel" else "Panda video"
+        title_prefix = {"panda-carousel": "Panda carousel", "panda-image": "Panda image"}.get(
+            pipeline, "Panda video")
         cp.init_project(job_id, title=(state.get("brief") or title_prefix)[:80],
                         pipeline_type=pipeline)
+        start_label = "scene_plan" if pipeline == "panda-image" else "script"
         self._run_agent(self._start_prompt(job_id, state.get("brief", ""),
                                            state.get("options") or {}, pipeline),
-                        job_id, "script")
+                        job_id, start_label)
         state = self._sync(state)
         # Gate-collapse: options.gates omits script → auto-approve GATE 1 and continue.
         if (state.get("status") == "awaiting_human" and state.get("gate") == "approve_script"
@@ -765,8 +802,8 @@ class ClaudeCodeRunner(Runner):
                             "at the stills gate; do NOT generate video yet)",
                     response or {}, state=state),
                     job_id, "stills_revise")
-            elif _is_carousel(state):
-                # carousel is stills-terminal: complete assets and let _sync mark the job done
+            elif _is_stills_terminal(state):
+                # carousel / image are stills-terminal: complete assets and let _sync mark done
                 self._approve_stage(job_id, "assets", _pipeline_of(state))
             elif _motion_sample_enabled(state):
                 # one hero clip first — approve the motion before batching all clips
@@ -938,15 +975,18 @@ class ClaudeCodeRunner(Runner):
                     found += _paths_in(vv)
             return found
 
-        # a storyboard contact sheet is a review aid, not a scene still — keep it out of stills
+        # a storyboard contact sheet is a review aid, not a scene still — keep it out of stills.
+        # Archived revise leftovers (history/superseded-stills, *.pre-*) must not surface as
+        # live stills or get /brand stamped.
         imgs = [p for p in _scan(proj / "assets" / "images", (".png", ".jpg", ".jpeg"))
-                if "contact" not in p.name.lower() and "sheet" not in p.name.lower()]
+                if "contact" not in p.name.lower() and "sheet" not in p.name.lower()
+                and not _is_superseded_still(p)]
         vids = _scan(proj / "assets" / "video", (".mp4", ".mov", ".webm"))
         renders = _scan(proj / "renders", (".mp4", ".mov"))
 
         for p in _paths_in(artifacts):
             ext = p.suffix.lower()
-            if ext in (".png", ".jpg", ".jpeg") and p not in imgs:
+            if ext in (".png", ".jpg", ".jpeg") and p not in imgs and not _is_superseded_still(p):
                 imgs.append(p)
             elif ext in (".mp4", ".mov", ".webm"):
                 if p.parent.name == "renders" or "final" in p.name.lower():
@@ -1046,6 +1086,8 @@ class ClaudeCodeRunner(Runner):
         options = options or {}
         if pipeline == "panda-carousel":
             return self._carousel_start_prompt(job_id, brief, options)
+        if pipeline == "panda-image":
+            return self._image_start_prompt(job_id, brief, options)
         lang = str(options.get("language", "en")).lower()
         narrator = str(options.get("narrator", "panda")).lower()
         voice_id = options.get("voice_id")            # explicit override from Dify
@@ -1165,6 +1207,44 @@ class ClaudeCodeRunner(Runner):
             "Stop at the first human_approval gate."
         )
 
+    def _image_start_prompt(self, job_id: str, brief: str, options: dict[str, Any]) -> str:
+        lang = str(options.get("language", "en")).lower()
+        ratio = _stills_aspect(options, pipeline="panda-image")
+        cap = _budget_cap({"options": options})
+        if cap is not None:
+            budget_line = (
+                f"BUDGET — HARD CAP of {cap} Higgsfield credits. Before ANY Higgsfield still "
+                "generation, follow the BUDGET HARD RULE in skills/meta/higgsfield-mcp-bridge.md. "
+                f"If spent + get_cost would exceed {cap}, write the assets checkpoint "
+                "status='awaiting_human' with partial_progress={{\"phase\":\"budget_hold\"}} and STOP.")
+        else:
+            budget_line = ("BUDGET — no credit cap set. Still record the still's get_cost credits "
+                           "in asset_manifest.")
+        return (
+            f"Run the `panda-image` pipeline to produce ONE STILLS-ONLY social image "
+            f"(NOT a video, NOT a carousel).\n"
+            f"project_id: {job_id}\nBrief: {brief}\n"
+            f"language: {lang}    aspect_ratio: {ratio}\n\n"
+            "BRAND — MANDATORY: read config/panda-elements.json and USE its Higgsfield reference "
+            "Element IDs — the panda Element for every panda shot, the customer Element for the "
+            "customer. Never invent a new panda. Look: styles/panda.yaml.\n"
+            f"{budget_line}\n\n"
+            "Follow AGENT_GUIDE.md, pipeline_defs/panda-image.yaml, and "
+            "skills/pipelines/panda-image/*-director.md. Execute stages in order.\n"
+            "PIPELINE SHAPE: idea (internal, no gate) → scene_plan TEXT (GATE 1) → "
+            "assets ONE STILL (GATE 2) → DONE. There is NO script stage.\n"
+            "  - scene_plan: exactly ONE scene, bilingual captions.zh/en, required_assets is "
+            "one image only. Set metadata.aspect_ratio to the job option "
+            f"'{ratio}' (caller-set; default 1:1). Pass that same ratio to generate_image.\n"
+            "  - assets: generate ONE still via Higgsfield generate_image at that aspect ratio. "
+            "Bake primary-language copy into the still. Write asset_manifest (images only) with "
+            "credits. Checkpoint status='awaiting_human' AND "
+            "partial_progress={\"phase\":\"stills\"} and STOP.\n"
+            "Do NOT generate motion clips, TTS, music, edit_decisions, or a compose/render. "
+            "Do NOT brand the still (no wordmark overlay) — branding is a later POST /brand. "
+            "Stop at the first human_approval gate."
+        )
+
     def _assets_phases_text(self, motion_sample: bool) -> str:
         stills = (
             "  PHASE 1 (stills): generate ONLY the stills — one per scene — via the Higgsfield "
@@ -1195,6 +1275,9 @@ class ClaudeCodeRunner(Runner):
         if p == "panda-carousel":
             extra = (" This is a stills-only carousel — do NOT generate video, TTS, music, or "
                      "compose. After stills the pipeline is complete.")
+        elif p == "panda-image":
+            extra = (" This is a SINGLE still — do NOT generate video, TTS, music, or compose. "
+                     "There is no script stage. After the one still the pipeline is complete.")
         return (
             f"Continue the `{p}` pipeline for project_id: {job_id}. Read the latest "
             "checkpoint, proceed from the next stage, and STOP at the next human_approval gate "
