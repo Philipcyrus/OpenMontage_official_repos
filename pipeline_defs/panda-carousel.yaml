@@ -1,0 +1,108 @@
+name: panda-carousel
+version: "1.0"
+description: >
+  Panda Mobile stills-only carousel pipeline. Truncated sibling of panda-video:
+  idea → script (GATE 1) → scene_plan (GATE 2) → assets stills only (GATE 3) → done.
+  No motion_sample, clips, TTS, music, edit, or compose. The job reaches `done`
+  once stills are approved. Branding (UGC → BGC wordmark) is a separate on-demand
+  POST /jobs/{id}/brand pass after approval — never baked into generation.
+  Same styles/panda.yaml look and panda Element IDs as panda-video.
+category: hybrid
+stability: production
+default_checkpoint_policy: guided
+
+orchestration:
+  mode: executive-producer
+  skill: pipelines/hybrid/executive-producer
+  budget_default_usd: 4.00          # stills-only; Higgsfield bills in credits
+  max_revisions_per_stage: 3
+  max_send_backs: 3
+  max_wall_time_minutes: 20         # stills-only run is much shorter than a 5-gate video
+
+extensions:
+  custom_scripts: true
+  custom_playbooks: true
+  custom_skills: true
+  custom_tools: true
+
+required_skills:
+  - pipelines/hybrid/executive-producer
+  - pipelines/panda-carousel/idea-director
+  - pipelines/panda-carousel/script-director
+  - pipelines/panda-carousel/scene-plan-director
+  - pipelines/panda-carousel/asset-director
+  - meta/higgsfield-mcp-bridge
+  - meta/reviewer
+  - meta/checkpoint-protocol
+
+compatible_playbooks:
+  recommended:
+    - panda
+  custom_allowed: true
+
+stages:
+  # ---- research / proposal : internal, NO gate ----
+  - name: idea
+    skill: pipelines/panda-carousel/idea-director
+    produces:
+      - brief
+      - decision_log
+    tools_available: []
+    checkpoint_required: true
+    human_approval_default: false      # INTERNAL — no human pause; agent writes 'completed' -> script
+
+  # ---- GATE 1 : approve slide copy (may be auto-approved via options.gates) ----
+  - name: script
+    skill: pipelines/panda-carousel/script-director
+    required_artifacts_in:
+      - brief
+    produces:
+      - script
+    tools_available: []
+    checkpoint_required: true
+    human_approval_default: true       # 🚦 GATE 1 (default on; skippable via options.gates)
+    review_focus:
+      - Slide copy hierarchy is hook → content slides → CTA
+      - One script section per slide; copy is on-slide text, not VO
+      - Slide count is realistic for a social carousel (typically 4–8, default 6)
+
+  # ---- GATE 2 : approve the TEXT slide plan (no media generated here) ----
+  - name: scene_plan
+    skill: pipelines/panda-carousel/scene-plan-director
+    required_artifacts_in:
+      - script
+    produces:
+      - scene_plan          # structured TEXT plan only (schemas/artifacts/scene_plan.schema.json)
+    tools_available: []
+    checkpoint_required: true
+    human_approval_default: true       # 🚦 GATE 2
+    review_focus:
+      - One scene per slide; required_assets are stills only (no video/audio)
+      - "Social ratio matches options.aspect_ratio (default 4:5); do not rewrite a caller-set ratio"
+      - Per-slide bilingual captions (zh + en) are carried on the scene
+      - Copy hierarchy (hook / content / CTA) is specified via narrative_role
+      - Panda identity / Element ids / composition are specified as plan requirements
+
+  # ---- GATE 3 : STILLS ONLY — terminal. Approving this completes the job. ----
+  # partial_progress.phase="stills" -> approve_stills. No motion_sample, no clips.
+  # BUDGET hold (phase="budget_hold") still applies if a stills batch would exceed
+  # max_higgsfield_credits. On approval the launcher completes the assets stage
+  # and the job is done (get_next_stage is None). Branding is POST /jobs/{id}/brand.
+  - name: assets
+    skill: pipelines/panda-carousel/asset-director
+    required_artifacts_in:
+      - scene_plan
+      - script
+    produces:
+      - asset_manifest
+    tools_available:
+      - image_selector           # stills per slide via the Higgsfield MCP bridge
+    checkpoint_required: true
+    human_approval_default: true       # 🚦 GATE 3 (terminal)
+    review_focus:
+      - One still per slide, on-brand (styles/panda.yaml) and character-consistent (panda Elements)
+      - "Social ratio matches options.aspect_ratio (default 4:5); slides that READ, not frames that move"
+      - On-slide copy matches the scene_plan captions (primary language baked in)
+      - Every required still exists on disk and is listed in asset_manifest (path + scene_id)
+      - "Budget: cumulative Higgsfield credits stay within max_higgsfield_credits (if set)"
+      - Reviewer can approve the set or request revision of specific slides

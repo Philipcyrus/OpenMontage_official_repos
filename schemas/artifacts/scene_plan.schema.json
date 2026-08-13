@@ -94,6 +94,15 @@
             "items": { "type": "string" },
             "description": "Visual texture descriptors: grain, clean, anamorphic, gritty, ethereal, etc."
           },
+          "captions": {
+            "type": "object",
+            "description": "Bilingual on-slide / overlay copy for this scene (carousel slides; optional for video).",
+            "properties": {
+              "zh": { "type": "string" },
+              "en": { "type": "string" }
+            },
+            "additionalProperties": false
+          },
           "required_assets": {
             "type": "array",
             "items": {

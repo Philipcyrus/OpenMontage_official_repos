@@ -101,3 +101,7 @@ vendor/data/
 
 # Dify launcher job storage (local artifacts)
 data/jobs/
+data/carousel-mock/
+data/carousel-claude/
+data/carousel-claude-walk/
+projects-carousel-claude/
