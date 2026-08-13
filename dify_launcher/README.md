@@ -20,6 +20,7 @@ Dify ──HTTP──▶ Dify Launcher ──▶ runner ──▶ agent/pipeline
 | POST | `/jobs/{id}/respond` | `{decision: approve\|revise, answer?, stills?}` → resume to next gate |
 | POST | `/jobs/{id}/brand` | `{profile: bgc}` — stamp BGC wordmark on approved stills (job must be `done`) |
 | GET  | `/jobs/{id}/artifacts/{name}` | download a script / still / final.mp4 / `cost_report.md` |
+| GET  | `/jobs/{id}/artifacts/{name}` | download a **media** file — still / clip / final.mp4 — or `cost_report.md` (the `script`/`scene_plan`/`asset_manifest` come inline, see below) |
 | GET  | `/jobs/{id}/cost` | per-project cost & time report — Higgsfield credits, ElevenLabs usage, generation time (native units) |
 
 **Gate sequence** (matches `pipeline_defs/panda-video.yaml`):
@@ -33,7 +34,11 @@ skipped when off. Branding is **not** a gate — `POST /jobs/{id}/brand` after `
 `start → approve_script → approve_scene_plan → approve_stills → done`. Optional
 `options.gates: ["scene_plan", "stills"]` skips GATE 1. Then `/brand` for BGC stills.
 
-At `approve_scene_plan` the reviewer approves a structured **text** plan — no media yet.
+At `approve_script` and `approve_scene_plan`, the `script` and `scene_plan` come back **inline as
+structured JSON** inside the `/jobs/{id}` response (`artifacts.script` / `artifacts.scene_plan`) —
+display them directly, no fetch. **Dify must show `artifacts.script` at `approve_script`** (dialogue
+lives in `script.sections[].text`). Only media (stills, clips, `final.mp4`) are download links via
+`/artifacts/{name}`. The `approve_scene_plan` plan is text only — no media yet.
 
 At `approve_stills` / `approve_assets`, Dify may pass user-supplied media instead of generated:
 `POST /jobs/{id}/respond {"decision":"approve","stills":["/path/a.png","/path/b.png"]}`.
@@ -93,7 +98,7 @@ DIFY_RUNNER=mock uvicorn dify_launcher.app:app --host 0.0.0.0 --port 8600
 
 ## Connecting Dify
 Point Dify's HTTP/tool nodes at this service's base URL:
-1. **Start** → `POST /jobs` with the brief; show `question` + the `script` artifact.
+1. **Start** → `POST /jobs` with the brief; show `question` + the inline `artifacts.script` (structured JSON — the dialogue is in `script.sections[].text`).
 2. On user approve/revise → `POST /jobs/{id}/respond`; repeat through `scene_plan → stills → motion_sample → assets → final` (`motion_sample` gate is on by default; set option `motion_sample:false` to skip it).
 3. Render the `final` artifact inline; on approve the job is `done`.
 4. Fetch `GET /jobs/{id}/cost` (or the `cost_report.md` artifact) for the per-project credits/time report.

@@ -111,6 +111,20 @@ c = run._mirror_artifacts(JOB2, {"script": _script_obj})                 # (c) s
 assert isinstance(c.get("script"), dict), c.get("script")
 print("[ok] structured script surfaced INLINE at approve_script (checkpoint dict + script.json + wins over .md)")
 
+# 2c) A stray non-script .md (e.g. cost_report.md) must NOT be mislabeled as the script at a gate
+# whose checkpoint carries no script artifact. Regression: at the scene_plan gate the .md fallback
+# grabbed cost_report.md and surfaced it as artifacts.script.
+JOB3 = "job_no_script_md"
+proj3 = run._projects_dir / JOB3
+(proj3 / "artifacts").mkdir(parents=True, exist_ok=True)
+(proj3 / "artifacts" / "cost_report.md").write_text("# cost report", encoding="utf-8")
+sp = {"version": "1.0", "scenes": [{"id": "s1"}]}
+(proj3 / "artifacts" / "scene_plan.json").write_text(_json.dumps(sp), encoding="utf-8")
+d = run._mirror_artifacts(JOB3, {"scene_plan": sp})
+assert "script" not in d, f"cost_report.md must NOT be surfaced as script: {d.get('script')!r}"
+assert isinstance(d.get("scene_plan"), dict), d.get("scene_plan")
+print("[ok] stray cost_report.md not mislabeled as script at a scriptless gate")
+
 # 3) _sync: checkpoint status -> launcher state (stub the reads) -----------
 def _fake_latest(_pd, _jid):
     return _fake_latest.cp
