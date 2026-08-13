@@ -186,4 +186,71 @@ mig = run.resume({"job_id": "jLegacy", "gate": "approve_storyboard", "artifacts"
 assert mig["status"] == "failed" and "start a new job" in mig["question"].lower()
 print("[ok] legacy-gate resume returns migration message")
 
+# 6) carousel start prompt is stills-only; video prompt is unchanged ----------
+cv = run._start_prompt("jC", "6-slide carousel", {"aspect_ratio": "4:5"}, "panda-carousel")
+assert "STILLS-ONLY" in cv and "NOT a video" in cv
+assert "Do NOT generate motion clips" in cv
+assert "4:5" in cv
+wide = run._start_prompt("jW", "story stills", {"aspect_ratio": "9:16"}, "panda-carousel")
+assert "aspect_ratio: 9:16" in wide
+assert "NEVER 9:16" not in wide
+vid = run._start_prompt("jV", "a video", {}, "panda-video")
+assert "produce a video" in vid
+assert "STILLS-ONLY" not in vid
+print("[ok] start prompts: carousel stills-only vs video")
+
+# 7) _pipeline_of / gate-collapse helpers -----------------------------------
+assert R._pipeline_of({}) == "panda-video"
+assert R._pipeline_of({"pipeline": "panda-carousel"}) == "panda-carousel"
+assert R._is_carousel({"pipeline": "panda-carousel"})
+assert not R._is_carousel({"pipeline": "panda-video"})
+assert R._script_gate_enabled({})
+assert R._script_gate_enabled({"options": {}})
+assert not R._script_gate_enabled({"options": {"gates": ["scene_plan", "stills"]}})
+print("[ok] pipeline + gates helpers")
+
+assert R._carousel_aspect({}) == "4:5"
+assert R._carousel_aspect({"aspect_ratio": "9:16"}) == "9:16"
+assert R._carousel_pixel_size("1:1") == (1080, 1080)
+assert R._carousel_pixel_size("4:5") == (1080, 1350)
+assert R._carousel_pixel_size("9:16") == (1080, 1920)
+assert R._carousel_pixel_size("1080x1080") == (1080, 1080)
+print("[ok] carousel aspect helpers")
+
+# 8) stills revise prompt: EDIT vs FRESH + still path; infer-if-omitted ------
+assert R._stills_revise_mode({"mode": "edit", "answer": "redo everything"}) == "edit"
+assert R._stills_revise_mode({"mode": "fresh", "shots": [1], "answer": "remove the panda"}) == "fresh"
+assert R._stills_revise_mode({"shots": [3], "answer": "remove the peeking pandas"}) == "edit"
+assert R._stills_revise_mode({"answer": "make the panda brighter"}) == "fresh"
+assert R._stills_revise_mode({"answer": "regenerate from scratch"}) == "fresh"
+print("[ok] stills revise mode infer")
+
+JOBR = "job_revise_stills"
+p_flagged = store.artifact_path(JOBR, "still_02.png")
+p_flagged.parent.mkdir(parents=True, exist_ok=True)
+p_flagged.write_bytes(b"\x89PNG\r\n")
+st_rev = {"job_id": JOBR, "gate": "approve_stills",
+          "artifacts": {"stills": ["still_00.png", "still_01.png", "still_02.png"]}}
+pe = run._revise_prompt(
+    JOBR, "assets (STILLS phase — revise the flagged stills)",
+    {"decision": "revise", "mode": "edit", "shots": [3],
+     "answer": "remove the peeking pandas"},
+    state=st_rev)
+assert "MODE=EDIT" in pe, pe
+assert "MODE=FRESH" not in pe, pe
+assert str(p_flagged.resolve()) in pe or "still_02.png" in pe
+assert "media_import" in pe
+pf = run._revise_prompt(
+    JOBR, "assets (STILLS phase — revise the flagged stills)",
+    {"decision": "revise", "mode": "fresh", "shots": [1],
+     "answer": "different composition, panda on the right"},
+    state=st_rev)
+assert "MODE=FRESH" in pf, pf
+assert "MODE=EDIT" not in pf, pf
+assert "Do NOT pass the old PNG" in pf
+p_other = run._revise_prompt("jS", "script", {"answer": "shorter"},
+                             state={"gate": "approve_script"})
+assert "MODE=" not in p_other
+print("[ok] stills revise prompt: EDIT vs FRESH + still path")
+
 print("\n[PASS] ClaudeCodeRunner adapter: mapping, mirroring, sync, approval, migration")

@@ -7,7 +7,6 @@ checkpoints to resume pipelines and to present state at human checkpoints.
 from __future__ import annotations
 
 import json
-from functools import lru_cache
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
@@ -115,8 +114,8 @@ def _validate_style_playbook(style_playbook: str | None) -> None:
         ) from exc
 
 
-@lru_cache(maxsize=1)
 def _load_checkpoint_schema() -> dict[str, Any]:
+    """Read from disk each call so a long-lived launcher sees schema edits."""
     with open(CHECKPOINT_SCHEMA_PATH, encoding="utf-8") as f:
         return json.load(f)
 

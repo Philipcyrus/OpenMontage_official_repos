@@ -16,6 +16,7 @@ Run:  python dify_launcher/test_dify_flow.py
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 from pathlib import Path
@@ -25,6 +26,7 @@ _ENGINE_ROOT = Path(__file__).resolve().parents[1]
 if str(_ENGINE_ROOT) not in sys.path:
     sys.path.insert(0, str(_ENGINE_ROOT))
 
+from PIL import Image
 from fastapi.testclient import TestClient
 
 from dify_launcher.app import app
@@ -32,6 +34,15 @@ from dify_launcher import store
 from schemas.artifacts import validate_artifact
 
 c = TestClient(app)
+
+
+def _digest(job_id: str, name: str) -> str:
+    return hashlib.md5(store.artifact_path(job_id, Path(name).name).read_bytes()).hexdigest()
+
+
+def _size(job_id: str, name: str) -> tuple[int, int]:
+    with Image.open(store.artifact_path(job_id, Path(name).name)) as im:
+        return im.size
 
 
 def _step(label, resp, want_gate=None, want_status=None):
@@ -93,6 +104,21 @@ assert "asset_manifest" not in b["artifacts"], "stills gate must NOT carry an as
 vids = list(store.artifacts_dir(job).glob("*.mp4"))
 assert not vids, f"stills gate must generate NO video, found: {[p.name for p in vids]}"
 print(f"   stills gate: {len(stills)} stills, NO video on disk (cost gate holds)")
+
+# dual-mode: edit shot 3 keeps 1080x1920 and does not drop other stills
+assert len(stills) == 3
+assert all(_size(job, s) == (1080, 1920) for s in stills)
+d0, d1, d2 = [_digest(job, s) for s in stills]
+b = _step("respond revise stills mode=edit shot 3", c.post(f"/jobs/{job}/respond", json={
+    "decision": "revise", "mode": "edit", "shots": [3],
+    "answer": "remove the peeking pandas; keep the OnePool diagram",
+}), want_gate="approve_stills", want_status="awaiting_human")
+stills_e = b["artifacts"].get("stills")
+assert stills_e and len(stills_e) == 3, "edit must not drop other stills"
+assert [_digest(job, s) for s in stills_e[:2]] == [d0, d1], "unflagged stills must be unchanged"
+assert _digest(job, stills_e[2]) != d2, "flagged still must be rewritten"
+assert all(_size(job, s) == (1080, 1920) for s in stills_e), "edit must keep 9:16"
+print("   stills edit shot 3: 1080x1920 kept, other stills untouched")
 
 # revise the stills (still no video generated)
 b = _step("respond revise (stills)", c.post(f"/jobs/{job}/respond",
@@ -206,6 +232,98 @@ mig = _step("respond (legacy gate)", c.post(f"/jobs/{legacy}/respond", json={"de
 assert "start a new job" in (mig.get("question") or "").lower(), "legacy resume must return a migration message"
 print("   legacy migration message OK")
 
+# 6) panda-carousel: truncated sibling — script → scene_plan → stills → done
+b4 = _step("POST /jobs (panda-carousel)", c.post("/jobs", json={
+    "brief": "6-slide IG carousel: eSIM before you fly",
+    "pipeline": "panda-carousel",
+    "options": {"aspect_ratio": "4:5", "language": "zh"},
+}), want_gate="approve_script", want_status="awaiting_human")
+assert b4.get("pipeline") == "panda-carousel"
+job4 = b4["job_id"]
+c.post(f"/jobs/{job4}/respond", json={"decision": "approve"})            # -> scene_plan
+b4 = _step("carousel scene_plan", c.get(f"/jobs/{job4}"),
+           want_gate="approve_scene_plan", want_status="awaiting_human")
+sp4 = b4["artifacts"].get("scene_plan")
+assert isinstance(sp4, dict) and sp4.get("scenes")
+validate_artifact("scene_plan", sp4)
+assert all(s.get("captions", {}).get("zh") and s.get("captions", {}).get("en")
+           for s in sp4["scenes"]), "carousel scene_plan must carry bilingual captions"
+assert "stills" not in b4["artifacts"]
+c.post(f"/jobs/{job4}/respond", json={"decision": "approve"})            # -> stills
+b4 = _step("carousel stills", c.get(f"/jobs/{job4}"),
+           want_gate="approve_stills", want_status="awaiting_human")
+assert b4["artifacts"].get("stills") and len(b4["artifacts"]["stills"]) == 3
+assert "clips" not in b4["artifacts"] and "final" not in b4["artifacts"]
+assert not list(store.artifacts_dir(job4).glob("*.mp4")), "carousel must not generate video"
+cstills = b4["artifacts"]["stills"]
+assert all(_size(job4, s) == (1080, 1350) for s in cstills), "carousel default is 4:5"
+cd0, cd1, cd2 = [_digest(job4, s) for s in cstills]
+b4 = _step("carousel stills revise mode=edit shot 3", c.post(f"/jobs/{job4}/respond", json={
+    "decision": "revise", "mode": "edit", "shots": [3],
+    "answer": "remove the peeking pandas; keep the OnePool diagram",
+}), want_gate="approve_stills", want_status="awaiting_human")
+cstills2 = b4["artifacts"].get("stills")
+assert cstills2 and len(cstills2) == 3, "carousel edit must not drop other stills"
+assert [_digest(job4, s) for s in cstills2[:2]] == [cd0, cd1]
+assert _digest(job4, cstills2[2]) != cd2
+assert all(_size(job4, s) == (1080, 1350) for s in cstills2), "carousel edit must keep 4:5"
+print("   carousel stills edit shot 3: 1080x1350 kept, other stills untouched")
+# approve stills -> DONE (terminal)
+b4 = _step("carousel approve stills -> done",
+           c.post(f"/jobs/{job4}/respond", json={"decision": "approve"}),
+           want_status="done")
+assert b4.get("gate") is None
+assert b4["artifacts"].get("stills")
+assert isinstance(b4["artifacts"].get("asset_manifest"), dict)
+validate_artifact("asset_manifest", b4["artifacts"]["asset_manifest"])
+assert "clips" not in b4["artifacts"] and "final" not in b4["artifacts"]
+print("   carousel: script → scene_plan → stills → done (no clips/final)")
+
+# brand pass on done carousel stills
+br = c.post(f"/jobs/{job4}/brand", json={"profile": "bgc"})
+assert br.status_code == 200, br.text
+bb = br.json()
+assert bb["status"] == "done"
+assert bb["artifacts"].get("branded") is True
+bstills = bb["artifacts"].get("branded_stills")
+assert bstills and len(bstills) == 3, bstills
+assert all(u.endswith(".bgc.png") for u in bstills)
+# UGC originals still listed
+assert bb["artifacts"].get("stills")
+# idempotent
+br2 = c.post(f"/jobs/{job4}/brand", json={"profile": "bgc"})
+assert br2.status_code == 200 and br2.json()["artifacts"].get("branded_stills") == bstills
+print("   carousel brand pass: BGC wordmark stamped, UGC originals kept, idempotent")
+
+# brand before done -> 409
+early = c.post("/jobs", json={"brief": "too early", "pipeline": "panda-carousel"}).json()["job_id"]
+bad = c.post(f"/jobs/{early}/brand", json={"profile": "bgc"})
+assert bad.status_code == 409, bad.text
+print("   brand before done -> 409")
+
+# gate-collapse: options.gates omits script -> first gate is scene_plan
+b5 = _step("POST /jobs (carousel, skip script gate)", c.post("/jobs", json={
+    "brief": "carousel skip script",
+    "pipeline": "panda-carousel",
+    "options": {"gates": ["scene_plan", "stills"]},
+}), want_gate="approve_scene_plan", want_status="awaiting_human")
+assert b5.get("pipeline") == "panda-carousel"
+print("   carousel gates collapse: skipped approve_script")
+
+# 1:1 is caller-set, not rewritten to 4:5
+b6 = _step("POST /jobs (carousel 1:1)", c.post("/jobs", json={
+    "brief": "square carousel",
+    "pipeline": "panda-carousel",
+    "options": {"aspect_ratio": "1:1", "gates": ["scene_plan", "stills"]},
+}), want_gate="approve_scene_plan", want_status="awaiting_human")
+c.post(f"/jobs/{b6['job_id']}/respond", json={"decision": "approve"})
+b6 = _step("carousel 1:1 stills", c.get(f"/jobs/{b6['job_id']}"),
+           want_gate="approve_stills", want_status="awaiting_human")
+sq = b6["artifacts"].get("stills") or []
+assert sq and all(_size(b6["job_id"], s) == (1080, 1080) for s in sq), "1:1 must be 1080x1080"
+print("   carousel 1:1: 1080x1080 stills")
+
 print("\n[PASS] FULL DIFY GATE FLOW: start -> script -> scene_plan(text) -> stills(no video) -> "
       "motion_sample(1 clip) -> assets(media) -> final -> done  (+ motion_sample=false toggle)")
+print("   + panda-carousel: script → scene_plan → stills → done + /brand")
 print("   job dir:", store.job_dir(job))

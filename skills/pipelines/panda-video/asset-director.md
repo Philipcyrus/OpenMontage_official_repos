@@ -45,8 +45,21 @@ still, never in `scene_plan`).
 > Why stills-first: image generation is cheap; image→video is expensive. Approving the look
 > (on-model panda, composition) here prevents wasted video spend on a bad still.
 
-On "request revision" at this gate, regenerate only the flagged scenes and re-checkpoint (keep
-`partial_progress.phase="stills"`). Do **not** proceed to video until the stills are approved.
+On "request revision" at this gate, honor `mode` (`fresh` | `edit`; infer if
+omitted — see `skills/meta/higgsfield-mcp-bridge.md`):
+
+- **fresh:** `generate_image` from text + Element IDs only. Do not pass the old PNG.
+- **edit:** load the flagged still from disk, `media_import` it (not
+  `media_import_url` — localhost artifact URLs are not fetchable), then
+  `generate_image` with that `media_id` and a preservation prompt (keep
+  composition / character / layout / type; apply only the note). Same aspect
+  ratio. If the model rejects the source still, surface a blocker — do not
+  silently switch to fresh.
+
+Regenerate only the flagged scenes (`shots`). Replace those files + their
+`asset_manifest` rows; leave other slides untouched. Re-checkpoint with
+**top-level** `partial_progress={"phase":"stills"}` (not nested under
+`metadata`). Do **not** proceed to video until the stills are approved.
 
 ### 3. PHASE 2 — MOTION SAMPLE (one hero clip), then STOP (GATE 3.5, approve_motion_sample)
 **Only when the `motion_sample` job option is on (default).** After the stills are approved,

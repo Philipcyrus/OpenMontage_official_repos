@@ -15,9 +15,10 @@ Dify ──HTTP──▶ Dify Launcher ──▶ runner ──▶ agent/pipeline
 | Method | Path | Purpose |
 |---|---|---|
 | GET  | `/health` | liveness + which runner is active |
-| POST | `/jobs` | start a run from `{brief, profile?, options?}` → stops at GATE 1 |
+| POST | `/jobs` | start a run from `{brief, pipeline?, profile?, options?}` → first gate |
 | GET  | `/jobs/{id}` | current `{status, stage, gate, question, artifacts}` |
 | POST | `/jobs/{id}/respond` | `{decision: approve\|revise, answer?, stills?}` → resume to next gate |
+| POST | `/jobs/{id}/brand` | `{profile: bgc}` — stamp BGC wordmark on approved stills (job must be `done`) |
 | GET  | `/jobs/{id}/artifacts/{name}` | download a **media** file — still / clip / final.mp4 — or `cost_report.md` (the `script`/`scene_plan`/`asset_manifest` come inline, see below) |
 | GET  | `/jobs/{id}/cost` | per-project cost & time report — Higgsfield credits, ElevenLabs usage, generation time (native units) |
 
@@ -26,7 +27,11 @@ Dify ──HTTP──▶ Dify Launcher ──▶ runner ──▶ agent/pipeline
 `approve_stills`, `approve_motion_sample`, and `approve_assets` are pauses of the **same** `assets`
 stage (tell them apart by the `gate` field). `approve_motion_sample` (one hero clip, approve the
 motion before batching) appears only when the `motion_sample` option is on (**default**); it's
-skipped when off. Branding is **not** a gate — it's an on-demand step after `approve_final`.
+skipped when off. Branding is **not** a gate — `POST /jobs/{id}/brand` after `done`.
+
+**`panda-carousel`:** `POST /jobs` with `"pipeline": "panda-carousel"`.
+`start → approve_script → approve_scene_plan → approve_stills → done`. Optional
+`options.gates: ["scene_plan", "stills"]` skips GATE 1. Then `/brand` for BGC stills.
 
 At `approve_script` and `approve_scene_plan`, the `script` and `scene_plan` come back **inline as
 structured JSON** inside the `/jobs/{id}` response (`artifacts.script` / `artifacts.scene_plan`) —
@@ -56,6 +61,8 @@ At the **assets** gate, every generated shot is reviewed together; revise specif
 - `python dify_launcher/test_dify_flow.py` — full 5-gate handshake on the mock runner (real render)
 - `python dify_launcher/test_claude_adapter.py` — the claude runner's checkpoint adapter
   (gate mapping, artifact mirroring, sync, approval) against the real `lib/checkpoint`
+- [`CAROUSEL.md`](CAROUSEL.md) — carousel usage, `aspect_ratio`, dual-mode stills revise, recorded walks
+- [`CAROUSEL_TEST.md`](CAROUSEL_TEST.md) — how to re-run tests (do not bind :8501)
 
 ## Run it
 ```bash
@@ -81,6 +88,12 @@ DIFY_RUNNER=mock uvicorn dify_launcher.app:app --host 0.0.0.0 --port 8600
 - `max_higgsfield_credits` — integer credit ceiling (unset = no cap). Before any Higgsfield
   generation, if cumulative spend would exceed it the agent blocks and pauses at `budget_exceeded`
   (raise the cap / revise / cancel). Hard pre-generation block — never overspends silently.
+- `aspect_ratio` — carousel only: caller-set slide canvas. Default `4:5`. Also `1:1`, `9:16`,
+  `3:4`, `16:9`, or `WIDTHxHEIGHT`. See [`CAROUSEL.md`](CAROUSEL.md).
+- `gates` — carousel only: list of gates to surface. Default `["script", "scene_plan", "stills"]`.
+  Omit `script` to auto-approve GATE 1.
+
+`POST /jobs` also accepts top-level `pipeline`: `"panda-video"` (default) or `"panda-carousel"`.
 
 ## Connecting Dify
 Point Dify's HTTP/tool nodes at this service's base URL:

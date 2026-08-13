@@ -40,7 +40,15 @@
       }
     },
     "error": { "type": "string" },
-    "metadata": { "type": "object" }
+    "metadata": { "type": "object" },
+    "partial_progress": {
+      "type": "object",
+      "description": "Live within-stage progress marker. During assets/compose the launcher reads partial_progress.phase (e.g. 'stills', 'motion_sample', 'budget_hold') top-level to resolve the correct within-stage gate.",
+      "properties": {
+        "phase": { "type": "string" }
+      },
+      "additionalProperties": true
+    }
   },
   "additionalProperties": false
 }
