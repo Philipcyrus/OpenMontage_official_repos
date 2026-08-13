@@ -77,6 +77,7 @@ assert ALL_MANIFESTS, "No pipeline manifests found"
 _EXCLUDED_PIPELINES = {
     "framework-smoke": "minimal 2-stage smoke test, no compose stage",
     "panda-carousel": "stills-only carousel, no compose stage",
+    "panda-image": "stills-only single image, no compose stage",
 }
 
 

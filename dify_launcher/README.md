@@ -33,6 +33,9 @@ skipped when off. Branding is **not** a gate — `POST /jobs/{id}/brand` after `
 `start → approve_script → approve_scene_plan → approve_stills → done`. Optional
 `options.gates: ["scene_plan", "stills"]` skips GATE 1. Then `/brand` for BGC stills.
 
+**`panda-image`:** `POST /jobs` with `"pipeline": "panda-image"`.
+`start → approve_scene_plan → approve_stills → done` (no script). One PNG. Then `/brand`.
+
 At `approve_scene_plan` the reviewer approves a structured **text** plan — no media yet.
 
 At `approve_stills` / `approve_assets`, Dify may pass user-supplied media instead of generated:
@@ -58,6 +61,7 @@ At the **assets** gate, every generated shot is reviewed together; revise specif
 - `python dify_launcher/test_claude_adapter.py` — the claude runner's checkpoint adapter
   (gate mapping, artifact mirroring, sync, approval) against the real `lib/checkpoint`
 - [`CAROUSEL.md`](CAROUSEL.md) — carousel usage, `aspect_ratio`, dual-mode stills revise, recorded walks
+- [`IMAGE.md`](IMAGE.md) — single-still usage, default `1:1`, dual-mode revise, recorded walks
 - [`CAROUSEL_TEST.md`](CAROUSEL_TEST.md) — how to re-run tests (do not bind :8501)
 
 ## Run it
@@ -84,12 +88,13 @@ DIFY_RUNNER=mock uvicorn dify_launcher.app:app --host 0.0.0.0 --port 8600
 - `max_higgsfield_credits` — integer credit ceiling (unset = no cap). Before any Higgsfield
   generation, if cumulative spend would exceed it the agent blocks and pauses at `budget_exceeded`
   (raise the cap / revise / cancel). Hard pre-generation block — never overspends silently.
-- `aspect_ratio` — carousel only: caller-set slide canvas. Default `4:5`. Also `1:1`, `9:16`,
-  `3:4`, `16:9`, or `WIDTHxHEIGHT`. See [`CAROUSEL.md`](CAROUSEL.md).
+- `aspect_ratio` — carousel default `4:5`; **panda-image** default `1:1`. Also `9:16`,
+  `3:4`, `16:9`, or `WIDTHxHEIGHT`. See [`CAROUSEL.md`](CAROUSEL.md) / [`IMAGE.md`](IMAGE.md).
 - `gates` — carousel only: list of gates to surface. Default `["script", "scene_plan", "stills"]`.
   Omit `script` to auto-approve GATE 1.
 
-`POST /jobs` also accepts top-level `pipeline`: `"panda-video"` (default) or `"panda-carousel"`.
+`POST /jobs` also accepts top-level `pipeline`: `"panda-video"` (default), `"panda-carousel"`,
+or `"panda-image"`.
 
 ## Connecting Dify
 Point Dify's HTTP/tool nodes at this service's base URL:

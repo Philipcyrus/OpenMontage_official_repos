@@ -100,3 +100,62 @@ def test_credits_default_to_estimated(tmp_path, monkeypatch):
     ]})
     hf = cr.write_report("job_x")["platforms"]["higgsfield"]
     assert hf["total"] == 9 and hf["estimated"] == 9 and hf["actual"] == 0
+
+
+def test_superseded_revise_credits_are_counted(tmp_path, monkeypatch):
+    """Live still is 2 credits; two prior revises of 2 each → report 6, not 2."""
+    monkeypatch.setattr(cr, "PROJECTS_DIR", tmp_path)
+    _seed(tmp_path / "job_rev", manifest={
+        "version": "1.0",
+        "assets": [{
+            "id": "slide-1-still", "type": "image", "path": "assets/images/slide-1.png",
+            "scene_id": "slide-1", "credits": 2, "credits_source": "actual",
+            "model": "nano_banana_flash",
+        }],
+        "metadata": {
+            "budget": {"spent_credits": 6},
+            "revisions": [
+                {"slide": "slide-1", "mode": "edit", "prior_credits": 2, "new_credits": 2},
+                {"slide": "slide-1", "mode": "fresh", "prior_credits": 2, "new_credits": 2},
+            ],
+        },
+    })
+    hf = cr.write_report("job_rev")["platforms"]["higgsfield"]
+    assert hf["total"] == 6 and hf["actual"] == 6
+    assert hf["count"] == 3
+
+
+def test_spent_credits_fills_gap_without_revisions(tmp_path, monkeypatch):
+    monkeypatch.setattr(cr, "PROJECTS_DIR", tmp_path)
+    _seed(tmp_path / "job_gap", manifest={
+        "version": "1.0",
+        "assets": [{"id": "img", "type": "image", "credits": 2, "credits_source": "actual"}],
+        "metadata": {"budget": {"spent_credits": 6}},
+    })
+    hf = cr.write_report("job_gap")["platforms"]["higgsfield"]
+    assert hf["total"] == 6 and hf["actual"] == 6
+
+
+def test_checkpoint_manifest_wins_over_stale_json(tmp_path, monkeypatch):
+    monkeypatch.setattr(cr, "PROJECTS_DIR", tmp_path)
+    job = tmp_path / "job_ck"
+    _seed(job, manifest={
+        "version": "1.0",
+        "assets": [{"id": "img", "type": "image", "credits": 2, "credits_source": "actual"}],
+        "metadata": {"budget": {"spent_credits": 4}, "revisions": [
+            {"slide": "slide-1", "prior_credits": 2},
+        ]},
+    })
+    (job / "checkpoint_assets.json").write_text(json.dumps({
+        "stage": "assets",
+        "artifacts": {"asset_manifest": {
+            "version": "1.0",
+            "assets": [{"id": "img", "type": "image", "credits": 2, "credits_source": "actual"}],
+            "metadata": {"budget": {"spent_credits": 6}, "revisions": [
+                {"slide": "slide-1", "prior_credits": 2},
+                {"slide": "slide-1", "prior_credits": 2},
+            ]},
+        }},
+    }), encoding="utf-8")
+    hf = cr.write_report("job_ck")["platforms"]["higgsfield"]
+    assert hf["total"] == 6 and hf["actual"] == 6

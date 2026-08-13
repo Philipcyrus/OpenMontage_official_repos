@@ -66,9 +66,36 @@ def _read_jsonl(p: Path) -> list[dict[str, Any]]:
     return out
 
 
+def _load_asset_manifest(proj: Path) -> Any:
+    """Prefer the assets checkpoint's inline manifest (kept current on revise) over a
+    stale artifacts/asset_manifest.json the agent may not rewrite."""
+    ck = _read_json(proj / "checkpoint_assets.json")
+    if isinstance(ck, dict):
+        am = (ck.get("artifacts") or {}).get("asset_manifest")
+        if isinstance(am, dict) and am.get("assets"):
+            return am
+    return _read_json(proj / "artifacts" / "asset_manifest.json")
+
+
+def _add_credits(items: list[dict[str, Any]], *, aid: Any, scene_id: Any, typ: Any,
+                 model: Any, credits: float, source: str) -> tuple[float, float]:
+    items.append({
+        "id": aid, "scene_id": scene_id or "", "type": typ or "",
+        "model": model or "", "credits": credits, "source": source,
+    })
+    if source == "actual":
+        return credits, 0.0
+    return 0.0, credits
+
+
 def _higgsfield_from_manifest(proj: Path) -> dict[str, Any]:
-    """Native Higgsfield credits, summed from asset_manifest.json per-asset `credits`."""
-    manifest = _read_json(proj / "artifacts" / "asset_manifest.json")
+    """Native Higgsfield credits from the current asset_manifest, plus superseded revises.
+
+    Dual-mode stills revise keeps only the live still in `assets[]`. Prior generations are
+    recorded on `metadata.revisions[].prior_credits` (and sometimes
+    `metadata.budget.spent_credits`). Count those so the report matches what Higgsfield billed.
+    """
+    manifest = _load_asset_manifest(proj)
     items: list[dict[str, Any]] = []
     total = actual = estimated = 0.0
     for a in (manifest or {}).get("assets", []) if isinstance(manifest, dict) else []:
@@ -78,16 +105,42 @@ def _higgsfield_from_manifest(proj: Path) -> dict[str, Any]:
         if not isinstance(credits, (int, float)):
             continue
         src = a.get("credits_source") or "estimated"
-        items.append({
-            "id": a.get("id"), "scene_id": a.get("scene_id"), "type": a.get("type"),
-            "model": a.get("model") or a.get("source_tool"),
-            "credits": credits, "source": src,
-        })
+        act, est = _add_credits(
+            items, aid=a.get("id"), scene_id=a.get("scene_id"), typ=a.get("type"),
+            model=a.get("model") or a.get("source_tool"), credits=credits, source=src)
         total += credits
-        if src == "actual":
-            actual += credits
-        else:
-            estimated += credits
+        actual += act
+        estimated += est
+
+    meta = (manifest or {}).get("metadata") if isinstance(manifest, dict) else None
+    if isinstance(meta, dict):
+        for i, rev in enumerate(meta.get("revisions") or []):
+            if not isinstance(rev, dict):
+                continue
+            prior = rev.get("prior_credits")
+            if not isinstance(prior, (int, float)) or prior <= 0:
+                continue
+            act, est = _add_credits(
+                items,
+                aid=f"{rev.get('slide') or 'still'}-superseded-{i + 1}",
+                scene_id=rev.get("slide") or "",
+                typ="image",
+                model=rev.get("served_model") or rev.get("mode") or "superseded",
+                credits=prior, source="actual")
+            total += prior
+            actual += act
+            estimated += est
+        budget = meta.get("budget") if isinstance(meta.get("budget"), dict) else {}
+        spent = budget.get("spent_credits")
+        if isinstance(spent, (int, float)) and spent > total:
+            gap = round(spent - total, 4)
+            act, est = _add_credits(
+                items, aid="prior-generations", scene_id="", typ="image",
+                model="superseded", credits=gap, source="actual")
+            total += gap
+            actual += act
+            estimated += est
+
     return {
         "unit": "credits", "total": round(total, 4),
         "actual": round(actual, 4), "estimated": round(estimated, 4),

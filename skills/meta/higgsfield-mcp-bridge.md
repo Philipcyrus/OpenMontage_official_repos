@@ -53,7 +53,7 @@ it uses for a start/reference image before an **edit** revise.
 
 ## Stills revise — FRESH vs EDIT (GATE 3)
 
-At `approve_stills` (both `panda-video` and `panda-carousel`) the human may send
+At `approve_stills` (`panda-video`, `panda-carousel`, and `panda-image`) the human may send
 `{"decision":"revise","mode":"fresh"|"edit","shots":[…],"answer":"…"}`. If `mode`
 is omitted, infer: `shots` set and the note is a local change (change / fix /
 remove / keep / edit) → **edit**; regenerate / redo / new / from scratch /

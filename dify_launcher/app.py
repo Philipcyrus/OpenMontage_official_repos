@@ -124,7 +124,7 @@ def _spawn(job_id: str, fn: Callable[..., dict[str, Any]], state: dict[str, Any]
 
 class StartJob(BaseModel):
     brief: str
-    pipeline: Optional[str] = None     # panda-video (default) | panda-carousel
+    pipeline: Optional[str] = None     # panda-video (default) | panda-carousel | panda-image
     profile: Optional[str] = "ugc"
     options: dict[str, Any] = {}
 
@@ -148,7 +148,7 @@ def _resolve_pipeline(name: Optional[str]) -> str:
         from lib.pipeline_loader import list_pipelines
         known = list_pipelines()
     except Exception:  # noqa: BLE001 — launcher must still start if the loader isn't importable
-        known = ["panda-video", "panda-carousel"]
+        known = ["panda-video", "panda-carousel", "panda-image"]
     if p not in known:
         raise HTTPException(status_code=400,
                             detail=f"unknown pipeline {p!r}; known: {sorted(known)}")

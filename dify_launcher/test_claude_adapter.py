@@ -125,6 +125,26 @@ assert "script" not in d, f"cost_report.md must NOT be surfaced as script: {d.ge
 assert isinstance(d.get("scene_plan"), dict), d.get("scene_plan")
 print("[ok] stray cost_report.md not mislabeled as script at a scriptless gate")
 
+# 2d) superseded revise leftovers must NOT surface as live stills (history/ or *.pre-*)
+JOBS = "job_no_superseded_stills"
+projs = run._projects_dir / JOBS
+(projs / "assets" / "images").mkdir(parents=True, exist_ok=True)
+(projs / "history" / "superseded-stills").mkdir(parents=True, exist_ok=True)
+(projs / "assets" / "images" / "slide-1.png").write_bytes(b"\x89PNG\r\nLIVE")
+(projs / "history" / "superseded-stills" / "slide-1.pre-sunset-aff1e9c3.png").write_bytes(b"\x89PNG\r\nOLD")
+arts_s = run._mirror_artifacts(JOBS, {
+    "asset_manifest": {
+        "version": "1.0",
+        "assets": [{"id": "slide-1-still", "path": "assets/images/slide-1.png"}],
+        "metadata": {"revisions": [{
+            "slide": "slide-1", "mode": "edit",
+            "superseded_still": "history/superseded-stills/slide-1.pre-sunset-aff1e9c3.png",
+        }]},
+    },
+})
+assert arts_s.get("stills") == ["slide-1.png"], arts_s.get("stills")
+print("[ok] superseded stills stay out of artifacts.stills")
+
 # 3) _sync: checkpoint status -> launcher state (stub the reads) -----------
 def _fake_latest(_pd, _jid):
     return _fake_latest.cp
@@ -186,7 +206,7 @@ mig = run.resume({"job_id": "jLegacy", "gate": "approve_storyboard", "artifacts"
 assert mig["status"] == "failed" and "start a new job" in mig["question"].lower()
 print("[ok] legacy-gate resume returns migration message")
 
-# 6) carousel start prompt is stills-only; video prompt is unchanged ----------
+# 6) carousel/image start prompts are stills-only; video prompt is unchanged --
 cv = run._start_prompt("jC", "6-slide carousel", {"aspect_ratio": "4:5"}, "panda-carousel")
 assert "STILLS-ONLY" in cv and "NOT a video" in cv
 assert "Do NOT generate motion clips" in cv
@@ -194,16 +214,26 @@ assert "4:5" in cv
 wide = run._start_prompt("jW", "story stills", {"aspect_ratio": "9:16"}, "panda-carousel")
 assert "aspect_ratio: 9:16" in wide
 assert "NEVER 9:16" not in wide
+img = run._start_prompt("jI", "one still", {}, "panda-image")
+assert "ONE STILLS-ONLY" in img and "NO script" in img
+assert "1:1" in img
+assert "NOT a carousel" in img
 vid = run._start_prompt("jV", "a video", {}, "panda-video")
 assert "produce a video" in vid
 assert "STILLS-ONLY" not in vid
-print("[ok] start prompts: carousel stills-only vs video")
+print("[ok] start prompts: carousel/image stills-only vs video")
 
 # 7) _pipeline_of / gate-collapse helpers -----------------------------------
 assert R._pipeline_of({}) == "panda-video"
 assert R._pipeline_of({"pipeline": "panda-carousel"}) == "panda-carousel"
+assert R._pipeline_of({"pipeline": "panda-image"}) == "panda-image"
 assert R._is_carousel({"pipeline": "panda-carousel"})
 assert not R._is_carousel({"pipeline": "panda-video"})
+assert R._is_image({"pipeline": "panda-image"})
+assert not R._is_image({"pipeline": "panda-carousel"})
+assert R._is_stills_terminal({"pipeline": "panda-carousel"})
+assert R._is_stills_terminal({"pipeline": "panda-image"})
+assert not R._is_stills_terminal({"pipeline": "panda-video"})
 assert R._script_gate_enabled({})
 assert R._script_gate_enabled({"options": {}})
 assert not R._script_gate_enabled({"options": {"gates": ["scene_plan", "stills"]}})
@@ -211,11 +241,13 @@ print("[ok] pipeline + gates helpers")
 
 assert R._carousel_aspect({}) == "4:5"
 assert R._carousel_aspect({"aspect_ratio": "9:16"}) == "9:16"
+assert R._stills_aspect({}, pipeline="panda-image") == "1:1"
+assert R._stills_aspect({"aspect_ratio": "9:16"}, pipeline="panda-image") == "9:16"
 assert R._carousel_pixel_size("1:1") == (1080, 1080)
 assert R._carousel_pixel_size("4:5") == (1080, 1350)
 assert R._carousel_pixel_size("9:16") == (1080, 1920)
 assert R._carousel_pixel_size("1080x1080") == (1080, 1080)
-print("[ok] carousel aspect helpers")
+print("[ok] stills aspect helpers")
 
 # 8) stills revise prompt: EDIT vs FRESH + still path; infer-if-omitted ------
 assert R._stills_revise_mode({"mode": "edit", "answer": "redo everything"}) == "edit"
