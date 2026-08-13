@@ -64,7 +64,14 @@ The `panda-video` pipeline pauses for a human at up to six points (`pipeline_def
 Gates 3, 3.5 & 4 are pauses of the **same** `assets` stage (tell them apart by the `gate` field).
 The `approve_motion_sample` gate appears only when the `motion_sample` job option is on (**default**);
 set `motion_sample:false` for quick drafts. Approve advances; "revise" regenerates that stage (or
-just the named shots). Branding is offered **after** gate 5, only if asked.
+just the named shots). Branding is offered **after** gate 5, only if asked — `POST /jobs/{id}/brand`.
+
+**`panda-carousel`** (stills-only sibling): `POST /jobs` with `"pipeline": "panda-carousel"`.
+Gates: `approve_script` → `approve_scene_plan` → `approve_stills` → `done`. No motion, clips,
+TTS, or compose. Optional `options.gates: ["scene_plan", "stills"]` skips the script gate.
+`options.aspect_ratio` is caller-set (default `4:5`; also `1:1`, `9:16`, `WIDTHxHEIGHT`, …).
+After `done`, `POST /jobs/{id}/brand` stamps the BGC wordmark onto copies of the stills.
+See [`dify_launcher/CAROUSEL.md`](dify_launcher/CAROUSEL.md).
 
 ## Cost & time report
 
@@ -115,11 +122,15 @@ make test                                     # upstream engine contract tests
 ```
 Or drive the live API with curl — see [`deploy/README.md`](deploy/README.md).
 
+**panda-carousel** (usage, aspect ratios, dual-mode revise, recorded walks):
+[`dify_launcher/CAROUSEL.md`](dify_launcher/CAROUSEL.md).
+
 ## Repo layout
 
 | path | what |
 |------|------|
 | `pipeline_defs/panda-video.yaml` | the pipeline + the 5 gates |
+| `pipeline_defs/panda-carousel.yaml` | stills-only sibling (script → scene_plan → stills → done) |
 | `skills/pipelines/panda-video/` | stage skills (scene-plan director, asset director, compose director) |
 | `lib/cost_report.py` | per-project cost & time report (Higgsfield credits, ElevenLabs usage, gen time) |
 | `tools/video/panda_render.py` | clean compose (folded render) |

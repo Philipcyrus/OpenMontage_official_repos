@@ -5,9 +5,10 @@ starts/resumes agent runs and surfaces the approval gates so Dify can show them 
 
 Endpoints:
   GET  /health
-  POST /jobs                      {brief, profile?, options?}      -> start a run (-> GATE 1)
+  POST /jobs                      {brief, pipeline?, profile?, options?}  -> start a run
   GET  /jobs/{id}                                                  -> current state + gate + artifacts
   POST /jobs/{id}/respond         {decision: approve|revise, ...}  -> resume to next gate
+  POST /jobs/{id}/brand           {profile: bgc}                   -> stamp BGC wordmark on done stills
   GET  /jobs/{id}/artifacts/{name}                                 -> download a still/script/final.mp4
 
 Sync vs async:
@@ -26,7 +27,7 @@ from __future__ import annotations
 import json
 import os
 import threading
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Literal, Optional
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse
@@ -90,6 +91,7 @@ def _public(state: dict[str, Any]) -> dict[str, Any]:
             links[key] = val
     return {
         "job_id": job_id,
+        "pipeline": state.get("pipeline"),
         "status": state.get("status"),
         "stage": state.get("stage"),
         "gate": state.get("gate"),
@@ -122,6 +124,7 @@ def _spawn(job_id: str, fn: Callable[..., dict[str, Any]], state: dict[str, Any]
 
 class StartJob(BaseModel):
     brief: str
+    pipeline: Optional[str] = None     # panda-video (default) | panda-carousel
     profile: Optional[str] = "ugc"
     options: dict[str, Any] = {}
 
@@ -130,8 +133,26 @@ class Respond(BaseModel):
     decision: str = "approve"          # "approve" | "revise" | "cancel" (cancel: only at budget gate)
     answer: Optional[str] = None
     stills: list[str] = []             # optional user-supplied storyboard stills (paths)
-    shots: list[int] = []              # optional: at the clips gate, which shot indices to revise
+    shots: list[int] = []              # optional 1-based indices: stills (GATE 3) or clips (GATE 4)
+    mode: Optional[Literal["fresh", "edit"]] = None  # stills revise only; omit to infer
     max_higgsfield_credits: Optional[int] = None   # at the budget gate: raise the approved cap
+
+
+class BrandBody(BaseModel):
+    profile: str = "bgc"               # only bgc is implemented (wordmark stamp on stills)
+
+
+def _resolve_pipeline(name: Optional[str]) -> str:
+    p = (name or os.environ.get("PANDA_PIPELINE_TYPE") or "panda-video").strip()
+    try:
+        from lib.pipeline_loader import list_pipelines
+        known = list_pipelines()
+    except Exception:  # noqa: BLE001 — launcher must still start if the loader isn't importable
+        known = ["panda-video", "panda-carousel"]
+    if p not in known:
+        raise HTTPException(status_code=400,
+                            detail=f"unknown pipeline {p!r}; known: {sorted(known)}")
+    return p
 
 
 @app.get("/health")
@@ -145,10 +166,11 @@ def create_job(body: StartJob, x_dify_token: Optional[str] = Header(None)) -> di
     _auth(x_dify_token)
     job_id = store.new_job_id()
     store.ensure_job(job_id)          # create the job + artifacts dir before the runner writes
+    pipeline = _resolve_pipeline(body.pipeline)
     state = {
-        "job_id": job_id, "brief": body.brief, "profile": body.profile,
-        "options": body.options, "status": "running", "stage": None,
-        "gate": None, "artifacts": {},
+        "job_id": job_id, "brief": body.brief, "pipeline": pipeline,
+        "profile": body.profile, "options": body.options, "status": "running",
+        "stage": None, "gate": None, "artifacts": {},
     }
     if _ASYNC:
         state["question"] = "starting — poll GET /jobs/{id} until status is awaiting_human"
@@ -188,6 +210,26 @@ def respond(job_id: str, body: Respond, x_dify_token: Optional[str] = Header(Non
         _spawn(job_id, _RUNNER.resume, state, body.model_dump())
         return _public(running)
     state = _RUNNER.resume(state, body.model_dump())
+    store.save_state(state)
+    return _public(state)
+
+
+@app.post("/jobs/{job_id}/brand")
+def brand_job(job_id: str, body: BrandBody = BrandBody(),
+              x_dify_token: Optional[str] = Header(None)) -> dict[str, Any]:
+    """Stamp the BGC wordmark onto approved stills. Job must be `done`. Idempotent."""
+    _auth(x_dify_token)
+    state = store.load_state(job_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="job not found")
+    with _LOCK:
+        busy = job_id in _RUNNING
+    if busy:
+        raise HTTPException(status_code=409, detail="job is still processing; poll GET /jobs/{id}")
+    try:
+        state = _runner.brand_job(state, body.profile)
+    except _runner.BrandError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e)) from e
     store.save_state(state)
     return _public(state)
 

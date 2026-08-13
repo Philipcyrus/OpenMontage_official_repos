@@ -49,10 +49,12 @@ Body:
 ```json
 {
   "brief": "10-second vertical clip: Panda mascot waves at an airport and says 'Grab a Panda Mobile eSIM before you fly.'",
+  "pipeline": "panda-video",
   "profile": "ugc",
   "options": { "language": "en", "narrator": "panda", "music": "upbeat, light" }
 }
 ```
+`pipeline` is optional (`"panda-video"` default, or `"panda-carousel"` for a stills-only carousel).
 Returns **immediately**:
 ```json
 {"job_id":"job_xxxx","status":"running","stage":null,"gate":null,"question":"starting…","artifacts":{}}
@@ -78,6 +80,24 @@ Body (edit / revise):
 {"decision":"revise","answer":"make the panda wave bigger and brighter"}
 ```
 Returns immediately with `status:"running"` → poll again for the next gate.
+
+### `POST /jobs/{job_id}/brand` — stamp BGC wordmark on approved stills
+Job must already be `done`. Body:
+```json
+{"profile": "bgc"}
+```
+Stamps the Panda wordmark onto **copies** of the approved stills. UGC originals stay
+under `artifacts.stills`. Branded copies are listed as `artifacts.branded_stills`
+(filenames like `still_00.bgc.png`) and `artifacts.branded` becomes `true`.
+
+- Idempotent: a second call returns the same `branded_stills` without restamping.
+- `409` if the job is not `done`, or if there are no stills (video-master branding
+  is not in this slice).
+- `400` if `profile` is anything other than `"bgc"`.
+- Not a gate: no agent turn, no Higgsfield spend. Sync is fine (PIL stamp is seconds).
+
+Dify flow: after carousel `done`, show UGC stills; if the reviewer wants BGC, call
+`/brand` and download `branded_stills`.
 
 ### `GET /jobs/{job_id}/artifacts/{name}` — download a file
 e.g. `GET /jobs/job_xxxx/artifacts/final.mp4`. Returns the binary file.
@@ -122,7 +142,7 @@ loop: GET /jobs/{id} every ~20s
         status == awaiting_human → STOP polling, show the gate to the user
 POST /jobs/{id}/respond       → status: running        (instant)
 loop: GET again … repeat for each gate
-        status == done        → fetch final.mp4
+        status == done        → video: fetch final.mp4; carousel: fetch stills (optional /brand)
         status == failed      → show `question` (the error)
 ```
 
@@ -159,6 +179,27 @@ approve_final          artifacts: final (MP4)               approve│revise
 done                   artifacts: final                     (branding is a SEPARATE later step)
 ```
 
+**`panda-carousel`** (`"pipeline": "panda-carousel"`). Slide size is `options.aspect_ratio`
+(default `4:5` — see [`CAROUSEL.md`](CAROUSEL.md)). Dual-mode stills revise: `mode` `edit` | `fresh`.
+
+```
+POST /jobs  { "pipeline": "panda-carousel", ... }
+   │
+   ▼
+approve_script         artifacts: script                    (skippable via options.gates)
+   │
+   ▼
+approve_scene_plan     artifacts: scene_plan + captions     approve│revise
+   │
+   ▼
+approve_stills         artifacts: stills[] (UGC)            approve│revise
+   │
+   ▼
+done                   artifacts: stills[] + asset_manifest
+   │
+   └─ optional POST /jobs/{id}/brand  →  branded_stills[] (BGC wordmark copies)
+```
+
 `status` values: `running` (working, keep polling) · `awaiting_human` (a gate — act) · `done` (finished) · `failed` (see `question`).
 
 > **The assets stage surfaces up to FOUR pauses.** `approve_stills`, `approve_motion_sample`, `budget_exceeded`, and `approve_assets` are `awaiting_human` pauses of the **same** `assets` stage (`stage:"assets"` at all of them). `approve_stills` shows **stills only** (no video — a rejection costs nothing). `approve_motion_sample` shows **one sample clip** so you approve the motion before the full batch — appears only when the `motion_sample` option is on (**default**). `budget_exceeded` is **conditional** — it appears only if a generation would push cumulative Higgsfield spend past `max_higgsfield_credits`; the agent blocks *before* spending and you raise the cap / revise / cancel. `approve_assets` shows the full media set. **Tell them apart by the `gate` field — do not rely on `stage` alone.**
@@ -172,19 +213,29 @@ Plain-language description of the video. **Be specific** — duration, what happ
 - `"10-second vertical clip: panda mascot waves at an airport and says 'Grab a Panda Mobile eSIM before you fly.'"`
 - `"30s eSIM tutorial: panda explains how to install an eSIM before travel, friendly and clear."`
 
+### `pipeline` (optional, default `"panda-video"`)
+Which manifest to run. `"panda-video"` is the full 5-gate video. `"panda-carousel"` is the
+stills-only sibling: `approve_script` → `approve_scene_plan` → `approve_stills` → `done`
+(no motion, clips, TTS, or compose). Persist this per job — mixed video + carousel on one
+launcher is supported.
+
 ### `profile` (optional, default `"ugc"`)
-`"ugc"` = clean, **no branding baked in** (recommended). Branding (logo/watermark) is a **separate on-demand step applied after final approval** — never in the base video.
+`"ugc"` = clean, **no branding baked in** (recommended). Branding (logo/watermark) is a
+**separate on-demand step** after the job is `done` — `POST /jobs/{id}/brand` — never in
+generation.
 
 ### `options` (optional) — per-job control
 | key | values | meaning |
 |---|---|---|
-| `language` | `"en"` \| `"zh"` | narration language → selects the matching brand voice |
-| `narrator` | `"panda"` \| `"customer"` | which character narrates |
+| `language` | `"en"` \| `"zh"` | narration language (video) / primary on-slide language (carousel) |
+| `narrator` | `"panda"` \| `"customer"` | which character narrates (video) |
 | `voice_id` | ElevenLabs voice id (string) | **explicit override** — use this exact voice, ignore the default |
 | `music` | mood string, or `false` | background music via ElevenLabs (`"upbeat, light"`), or `false` to skip |
 | `render_runtime` | `"auto"` \| `"ffmpeg"` \| `"remotion"` \| `"hyperframes"` | which render engine composes the video. Default `"auto"` |
-| `motion_sample` | `true` (default) \| `false` | insert the `approve_motion_sample` gate — animate one hero clip for motion approval before batching all clips. Set `false` for quick drafts (stills → assets directly) |
-| `max_higgsfield_credits` | integer, or unset | **hard credit ceiling** for the run. Before any Higgsfield generation, if cumulative spend would exceed this, the agent blocks and pauses at the `budget_exceeded` gate. Unset = no cap. |
+| `motion_sample` | `true` (default) \| `false` | insert the `approve_motion_sample` gate (video only) |
+| `max_higgsfield_credits` | integer, or unset | **hard credit ceiling** for the run |
+| `aspect_ratio` | string, default `"4:5"` | carousel stills: `4:5`, `1:1`, `9:16`, `3:4`, `16:9`, or `WIDTHxHEIGHT` — passed through to `generate_image` |
+| `gates` | e.g. `["scene_plan", "stills"]` | carousel only — omit `script` to auto-approve GATE 1 |
 
 If `voice_id` is omitted, the engine picks the brand voice from config by `narrator`+`language`.
 
@@ -204,16 +255,18 @@ If `voice_id` is omitted, the engine picks the brand voice from config by `narra
 | Body | Effect |
 |---|---|
 | `{"decision":"approve"}` | accept this gate, advance to the next |
-| `{"decision":"revise","answer":"<what to change>"}` | regenerate this gate's output honoring the note, stay at the same gate (at `approve_scene_plan` this rewrites the text plan; at `approve_stills` this regenerates stills; at `approve_motion_sample` this regenerates only the sample clip) |
-| `{"decision":"revise","shots":[1,3],"answer":"…"}` | at `approve_stills` (regenerate those scenes' stills) **or** `approve_assets` (regenerate those shots' clips) |
+| `{"decision":"revise","answer":"<what to change>"}` | regenerate this gate's output honoring the note, stay at the same gate (at `approve_scene_plan` this rewrites the text plan; at `approve_stills` this regenerates stills unless `mode` is `edit`; at `approve_motion_sample` this regenerates only the sample clip) |
+| `{"decision":"revise","shots":[1,3],"answer":"…"}` | at `approve_stills` (those scenes' stills) **or** `approve_assets` (those shots' clips) |
+| `{"decision":"revise","mode":"edit","shots":[3],"answer":"…"}` | **at `approve_stills` only** (carousel and video): image-to-image the flagged stills (keep composition; apply the note). `mode:"fresh"` regenerates from text + Element IDs and does not pass the old PNG. Omit `mode` to infer: `shots` + local-change language → edit; regenerate/redo/new → fresh; otherwise fresh |
 | `{"decision":"approve","stills":["/abs/path.png", …]}` | **at `approve_stills` / `approve_assets`** — supply your own media instead of generated ones (associated with the asset manifest, not the scene plan) |
 | `{"decision":"approve","max_higgsfield_credits":<n>}` | **at `budget_exceeded`** — raise the credit cap and resume generation (the agent re-checks before spending) |
 | `{"decision":"cancel"}` | **at `budget_exceeded`** — stop the job; no further Higgsfield credits are spent |
 
-> Approving `approve_stills` does **not** finish the assets stage — with `motion_sample` on (default) the next gate is `approve_motion_sample` (one sample clip); approving that then unlocks the full batch (`approve_assets`). With `motion_sample` off, approving stills goes straight to `approve_assets`. Poll again after each — tell the gates apart by the `gate` field.
+> Approving `approve_stills` on **panda-video** does **not** finish the assets stage — with `motion_sample` on (default) the next gate is `approve_motion_sample`; with it off, stills go to `approve_assets`. On **panda-carousel**, approving stills **does** finish the job (`status: done`).
 
 Notes:
 - Edits are a **text instruction** the agent acts on (not a manual pixel editor). More specific = closer result.
+- `mode` (`fresh` | `edit`) applies only at `approve_stills`. Motion / clips / final revises stay regenerate-only. There is no image-to-image after `done`.
 - After any `respond`, the job goes back to `running` — **poll again**.
 
 ---
@@ -226,11 +279,12 @@ Returned under `artifacts` in every state; grouped by kind:
 |---|---|---|
 | `script` | **inline JSON object** (`title`, `sections[]` with `text` + `speaker_directions`/`delivery_cues` — the actual dialogue; show it, don't fetch) | at the **script** gate |
 | `scene_plan` | **inline JSON object** (the text plan — show it, don't fetch) | at the scene_plan gate |
-| `stills` | list of image paths | at the **stills** gate (and still present at the assets gate) |
-| `clips` | list of video paths | at the **assets** gate |
-| `asset_manifest` | **inline JSON object** (all generated media: `path`+`scene_id` per asset) | at the **assets** gate |
-| `final` | single MP4 path | after compose |
-| `branded` | bool (always `false` in base video) | after compose |
+| `stills` | list of image paths | at the **stills** gate (UGC originals; kept after `/brand`) |
+| `branded_stills` | list of image paths | after `POST /jobs/{id}/brand` (BGC wordmark copies) |
+| `clips` | list of video paths | at the **assets** gate (video pipeline) |
+| `asset_manifest` | **inline JSON object** (all generated media: `path`+`scene_id` per asset) | at the **assets** / carousel-done gate |
+| `final` | single MP4 path | after compose (video pipeline) |
+| `branded` | bool | `false` until `/brand`; then `true` |
 | `_checkpoint_artifacts` | raw structured data (render report, decision log) | context/debug |
 
 Structured artifacts (`script`, `scene_plan`, `asset_manifest`) come as **inline JSON objects** — display them directly for review, no fetch needed. **You MUST show `script` at the `approve_script` gate** so the reviewer reads the actual dialogue before approving — do not just show the gate label. (If a pipeline ever emits the script only as a markdown file instead of structured JSON, `script` falls back to a **relative URL** to fetch — but the panda-video script-director emits structured JSON.) File artifacts (`stills`, `clips`, `final`) come as **relative URLs** — fetch with `GET /jobs/{id}/artifacts/{basename}` (prepend the base URL). Show `stills`/`clips` at the assets gate; show `final` at the final gate.
@@ -299,7 +353,7 @@ Long `running` stretches are **normal** — that's why it's async.
 | `200` + `status:"failed"` | a stage errored | show `question` (the error); optionally restart or revise |
 | `401` | bad/missing `X-Dify-Token` | fix the header |
 | `404` | unknown `job_id` | check the id |
-| `409` | responded while still `running`, or not at a gate | keep polling until `awaiting_human` before `respond` |
+| `409` | responded while still `running`, not at a gate, or `/brand` before `done` / with no stills | keep polling until `awaiting_human` before `respond`; only brand a finished carousel |
 
 ---
 
@@ -310,7 +364,10 @@ Long `running` stretches are **normal** — that's why it's async.
 ---
 
 ## 14. Scope notes
-- **Branding** (logo/watermark/cards) is **not** in the base video — it's a separate post-approval step (`panda_brand`), applied only when explicitly requested.
+- **Branding** (logo/watermark) is **not** baked into generation. After the job is `done`,
+  call `POST /jobs/{id}/brand` with `{"profile":"bgc"}` to stamp the Panda wordmark onto
+  copies of the approved stills (`artifacts.branded_stills`). UGC originals stay under
+  `stills`. Video intro/outro cards are not part of this pass.
 - **Voice/music** need `ELEVENLABS_API_KEY` configured on the server; otherwise narration falls back to a generic voice and music is skipped.
 - **Consistency**: the panda/customer use fixed Higgsfield reference Elements, so the character stays on-model across shots.
 
