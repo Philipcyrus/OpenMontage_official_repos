@@ -61,6 +61,7 @@ At the **assets** gate, every generated shot is reviewed together; revise specif
 - `python dify_launcher/test_dify_flow.py` — full 5-gate handshake on the mock runner (real render)
 - `python dify_launcher/test_claude_adapter.py` — the claude runner's checkpoint adapter
   (gate mapping, artifact mirroring, sync, approval) against the real `lib/checkpoint`
+- [`CAROUSEL_DIFY.md`](CAROUSEL_DIFY.md) — **Dify team wiring guide** for the carousel (gate loop, field bindings, revise modes)
 - [`CAROUSEL.md`](CAROUSEL.md) — carousel usage, `aspect_ratio`, dual-mode stills revise, recorded walks
 - [`CAROUSEL_TEST.md`](CAROUSEL_TEST.md) — how to re-run tests (do not bind :8501)
 
