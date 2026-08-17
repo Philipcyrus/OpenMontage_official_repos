@@ -40,9 +40,10 @@ At `approve_script` and `approve_scene_plan`, the `script` and `scene_plan` come
 structured JSON** inside the `/jobs/{id}` response (`artifacts.script` / `artifacts.scene_plan`) —
 display them directly. Dialogue lives in `script.sections[].text`. The same content is also a
 markdown file: `artifacts.preview` is `[ /jobs/{id}/artifacts/script.md ]` at the script gate and
-`[ …/scene_plan.md ]` at the scene-plan gate (bind this for Dify’s file-preview slot). Only media
-(stills, clips, `final.mp4`) are image/video download links. The `approve_scene_plan` plan is text
-only — no stills yet.
+`[ …/scene_plan.md ]` at the scene-plan gate. At `approve_stills`, `artifacts.preview` is
+`[ …/storyboard.png ]` (shot grid + descriptions). Bind `artifacts.preview` to Dify’s file-preview
+slot. Only media (stills, clips, `final.mp4`) plus that storyboard PNG are download links via
+`/artifacts/{name}`. The `approve_scene_plan` plan is text only — no media yet.
 
 At `approve_stills` / `approve_assets`, Dify may pass user-supplied media instead of generated:
 `POST /jobs/{id}/respond {"decision":"approve","stills":["/path/a.png","/path/b.png"]}`.

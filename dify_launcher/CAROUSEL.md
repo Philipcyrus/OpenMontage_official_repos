@@ -98,7 +98,7 @@ python3 dify_launcher/test_dify_flow.py
 python3 dify_launcher/test_claude_adapter.py
 ```
 
-Do not commit `data/carousel-*` or `projects-carousel-claude/` (local artifacts).
+Do not commit `data/carousel-*`, `data/storyboard-*`, or `projects-*-claude/` (local artifacts).
 
 ---
 

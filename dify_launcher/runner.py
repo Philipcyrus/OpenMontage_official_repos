@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from dify_launcher import store
+from dify_launcher.storyboard_preview import apply_storyboard_preview, is_storyboard_name
 
 _ENGINE_ROOT = Path(__file__).resolve().parents[1]
 
@@ -304,6 +305,31 @@ def _write_text_previews(job_id: str, arts: dict[str, Any],
     if preview_name:
         arts["preview"] = [preview_name]
     else:
+        arts.pop("preview", None)
+    return arts
+
+
+def _apply_previews(job_id: str, arts: dict[str, Any],
+                    gate: Optional[str] = None) -> dict[str, Any]:
+    """Unified preview resolver for the single Dify `preview` slot.
+
+    Dual-surfaces the text .md copies (script.md / scene_plan.md) and, at the stills
+    gate, the storyboard composite — then picks ONE preview for the current gate:
+    script.md at approve_script, scene_plan.md at approve_scene_plan, the storyboard
+    at approve_stills, and nothing at any other gate. Inline JSON on artifacts.script /
+    artifacts.scene_plan is left untouched (a structured dict still wins over a stray .md).
+    """
+    # Always write the .md copies (so downloads exist); no preview set here.
+    _write_text_previews(job_id, arts, None)
+    # Storyboard writes its files + preview only at approve_stills; drops preview otherwise.
+    apply_storyboard_preview(job_id, arts,
+                             "approve_stills" if gate == "approve_stills" else None)
+    # Text gates own the preview slot over the (now-cleared) storyboard default.
+    if gate == "approve_script" and arts.get("script_md"):
+        arts["preview"] = ["script.md"]
+    elif gate == "approve_scene_plan" and arts.get("scene_plan_md"):
+        arts["preview"] = ["scene_plan.md"]
+    elif gate != "approve_stills":
         arts.pop("preview", None)
     return arts
 
@@ -595,7 +621,7 @@ class MockRunner(Runner):
         arts = {k: v for k, v in state.get("artifacts", {}).items()
                 if k not in ("clips", "asset_manifest")}
         arts["stills"] = stills
-        _write_text_previews(job_id, arts, "approve_stills")  # drop text-gate preview
+        _apply_previews(job_id, arts, "approve_stills")
         state.update(
             stage="assets", status="awaiting_human", gate="approve_stills",
             question="Approve the stills (one per scene) — on-model and well-composed? — or "
@@ -623,7 +649,7 @@ class MockRunner(Runner):
                 if k not in ("clips", "asset_manifest")}
         arts["stills"] = stills
         arts["motion_sample"] = sample_name
-        _write_text_previews(job_id, arts, "approve_motion_sample")
+        _apply_previews(job_id, arts, "approve_motion_sample")
         state.update(
             stage="assets", status="awaiting_human", gate="approve_motion_sample",
             question="Approve the MOTION on this one sample clip (camera, animation, how the panda "
@@ -685,7 +711,7 @@ class MockRunner(Runner):
 
         arts = {**state.get("artifacts", {}), "stills": stills, "clips": clips,
                 "asset_manifest": asset_manifest}
-        _write_text_previews(job_id, arts, "approve_assets")
+        _apply_previews(job_id, arts, "approve_assets")
         state.update(
             stage="assets", status="awaiting_human", gate="approve_assets",
             question="Approve the generated media (clips + audio), or request revision of "
@@ -699,7 +725,7 @@ class MockRunner(Runner):
         """Nothing was generated. Pause and require the human to raise the cap, revise, or cancel."""
         projected = spent + requested
         arts = dict(state.get("artifacts") or {})
-        _write_text_previews(state["job_id"], arts, "budget_exceeded")
+        _apply_previews(state["job_id"], arts, "budget_exceeded")
         state.update(
             stage="assets", status="awaiting_human", gate="budget_exceeded",
             question=(f"BUDGET HOLD — generating the requested clips would use ~{requested} more "
@@ -723,7 +749,7 @@ class MockRunner(Runner):
         self._render_clean(scene_paths, str(out))
 
         arts = {**state.get("artifacts", {}), "final": "final.mp4", "branded": False}
-        _write_text_previews(job_id, arts, "approve_final")
+        _apply_previews(job_id, arts, "approve_final")
         state.update(
             stage="compose", status="awaiting_human", gate="approve_final",
             question="Approve the finished (unbranded) video, or request a revision. "
@@ -750,7 +776,7 @@ class MockRunner(Runner):
             json.dumps(asset_manifest, indent=2), encoding="utf-8")
         arts = {**state.get("artifacts", {}), "stills": stills,
                 "asset_manifest": asset_manifest, "branded": False}
-        _write_text_previews(job_id, arts, None)
+        _apply_previews(job_id, arts, None)
         state.update(
             status="done", stage="assets", gate=None, question=None,
             artifacts=arts,
@@ -1022,7 +1048,7 @@ class ClaudeCodeRunner(Runner):
         arts = self._mirror_artifacts(job_id, latest.get("artifacts", {}))
         self._write_cost_report(job_id)     # refresh the report files (API-only; not attached to arts)
         if status == "failed":
-            _write_text_previews(job_id, arts, None)
+            _apply_previews(job_id, arts, None)
             state.update(status="failed", stage=stage, gate=None,
                          question=latest.get("error", "stage failed"), artifacts=arts)
         elif status == "awaiting_human":
@@ -1035,12 +1061,12 @@ class ClaudeCodeRunner(Runner):
                         "budget_hold": "budget_exceeded"}.get(phase, "approve_assets")
             else:
                 gate = _STAGE_GATE.get(stage, f"approve_{stage}")
-            _write_text_previews(job_id, arts, gate)
+            _apply_previews(job_id, arts, gate)
             state.update(status="awaiting_human", stage=stage, gate=gate,
                          question=f"Approve {stage}, or request a revision.", artifacts=arts)
         else:  # completed
             nxt = cp.get_next_stage(self._projects_dir, job_id, _pipeline_of(state))
-            _write_text_previews(job_id, arts, None)
+            _apply_previews(job_id, arts, None)
             if nxt is None:
                 state.update(status="done", stage=stage, gate=None, question=None, artifacts=arts)
             else:
@@ -1106,13 +1132,15 @@ class ClaudeCodeRunner(Runner):
         # live stills or get /brand stamped.
         imgs = [p for p in _scan(proj / "assets" / "images", (".png", ".jpg", ".jpeg"))
                 if "contact" not in p.name.lower() and "sheet" not in p.name.lower()
+                and not is_storyboard_name(p.name)
                 and not _is_superseded_still(p)]
         vids = _scan(proj / "assets" / "video", (".mp4", ".mov", ".webm"))
         renders = _scan(proj / "renders", (".mp4", ".mov"))
 
         for p in _paths_in(artifacts):
             ext = p.suffix.lower()
-            if ext in (".png", ".jpg", ".jpeg") and p not in imgs and not _is_superseded_still(p):
+            if (ext in (".png", ".jpg", ".jpeg") and p not in imgs and not _is_superseded_still(p)
+                    and not is_storyboard_name(p.name)):
                 imgs.append(p)
             elif ext in (".mp4", ".mov", ".webm"):
                 if p.parent.name == "renders" or "final" in p.name.lower():
@@ -1121,7 +1149,7 @@ class ClaudeCodeRunner(Runner):
                 elif p not in vids:
                     vids.append(p)
 
-        stills = [n for n in (_copy(p) for p in imgs) if n]
+        stills = [n for n in (_copy(p) for p in imgs) if n and not is_storyboard_name(n)]
         clips = [n for n in (_copy(p) for p in vids) if n]
         final = None
         if renders:
@@ -1144,7 +1172,17 @@ class ClaudeCodeRunner(Runner):
                     val = None
             if isinstance(val, dict):
                 out[aname] = val
-        # Fallback ONLY when there is no structured script (e.g. a script written as a markdown
+        # stills checkpoint often omits scene_plan; keep it for the storyboard join
+        if "scene_plan" not in out:
+            sp_cp = proj / "checkpoint_scene_plan.json"
+            try:
+                data = json.loads(sp_cp.read_text(encoding="utf-8")) if sp_cp.is_file() else {}
+                val = (data.get("artifacts") or {}).get("scene_plan")
+                if isinstance(val, dict) and val.get("scenes"):
+                    out["scene_plan"] = val
+            except (OSError, ValueError):
+                pass
+        # Fallback ONLY when there is no structured script (e.g. a script written as a markdown)
         # file): surface it as a downloadable link so it's still reviewable. Match ONLY a file
         # literally named script.* — never another stray .md (e.g. cost_report.md), which would
         # otherwise be mislabeled as the script at gates whose checkpoint carries no script
