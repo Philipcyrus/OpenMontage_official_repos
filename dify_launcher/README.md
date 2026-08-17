@@ -39,7 +39,9 @@ skipped when off. Branding is **not** a gate — `POST /jobs/{id}/brand` after `
 At `approve_script` and `approve_scene_plan`, the `script` and `scene_plan` come back **inline as
 structured JSON** inside the `/jobs/{id}` response (`artifacts.script` / `artifacts.scene_plan`) —
 display them directly, no fetch. **Dify must show `artifacts.script` at `approve_script`** (dialogue
-lives in `script.sections[].text`). Only media (stills, clips, `final.mp4`) are download links via
+lives in `script.sections[].text`). At `approve_stills`, `artifacts.preview` is
+`[ /jobs/{id}/artifacts/storyboard.png ]` (shot grid + descriptions). Only media
+(stills, clips, `final.mp4`) plus that storyboard PNG are download links via
 `/artifacts/{name}`. The `approve_scene_plan` plan is text only — no media yet.
 
 At `approve_stills` / `approve_assets`, Dify may pass user-supplied media instead of generated:

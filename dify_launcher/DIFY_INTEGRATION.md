@@ -299,6 +299,8 @@ Returned under `artifacts` in every state; grouped by kind:
 | `script` | **inline JSON object** (`title`, `sections[]` with `text` + `speaker_directions`/`delivery_cues` — the actual dialogue; show it, don't fetch) | at the **script** gate |
 | `scene_plan` | **inline JSON object** (the text plan — show it, don't fetch) | at the scene_plan gate |
 | `stills` | list of image paths | at the **stills** gate (UGC originals; kept after `/brand`) |
+| `preview` | list of **one** relative URL | at **`approve_stills`** → `storyboard.png` (shot grid + descriptions). Absent at later gates. Bind Dify’s file-preview slot here. After a per-shot revise, poll again — the PNG is rebuilt. |
+| `storyboard_html` | relative URL to `storyboard.html` | same grid as HTML (sibling still filenames). |
 | `branded_stills` | list of image paths | after `POST /jobs/{id}/brand` (BGC wordmark copies) |
 | `clips` | list of video paths | at the **assets** gate (video pipeline) |
 | `asset_manifest` | **inline JSON object** (all generated media: `path`+`scene_id` per asset) | at the **assets** / carousel-done gate |
@@ -306,7 +308,7 @@ Returned under `artifacts` in every state; grouped by kind:
 | `branded` | bool | `false` until `/brand`; then `true` |
 | `_checkpoint_artifacts` | raw structured data (render report, decision log) | context/debug |
 
-Structured artifacts (`script`, `scene_plan`, `asset_manifest`) come as **inline JSON objects** — display them directly for review, no fetch needed. **You MUST show `script` at the `approve_script` gate** so the reviewer reads the actual dialogue before approving — do not just show the gate label. (If a pipeline ever emits the script only as a markdown file instead of structured JSON, `script` falls back to a **relative URL** to fetch — but the panda-video script-director emits structured JSON.) File artifacts (`stills`, `clips`, `final`) come as **relative URLs** — fetch with `GET /jobs/{id}/artifacts/{basename}` (prepend the base URL). Show `stills`/`clips` at the assets gate; show `final` at the final gate.
+Structured artifacts (`script`, `scene_plan`, `asset_manifest`) come as **inline JSON objects** — display them directly for review, no fetch needed. **You MUST show `script` at the `approve_script` gate** so the reviewer reads the actual dialogue before approving — do not just show the gate label. (If a pipeline ever emits the script only as a markdown file instead of structured JSON, `script` falls back to a **relative URL** to fetch — but the panda-video script-director emits structured JSON.) File artifacts (`stills`, `clips`, `final`) come as **relative URLs** — fetch with `GET /jobs/{id}/artifacts/{basename}` (prepend the base URL). At **`approve_stills`**, bind the file-preview slot to `artifacts.preview` (`storyboard.png` — shot grid with descriptions). After `{decision:"revise","shots":[n]}`, poll again; the PNG is rebuilt. `preview` is dropped at later gates. Show `stills`/`clips` at the assets gate; show `final` at the final gate.
 
 ---
 

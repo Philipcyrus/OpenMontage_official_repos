@@ -190,6 +190,35 @@ st = run._sync({"job_id": "jX"})
 assert st["status"] == "failed" and st["question"] == "boom"
 print("[ok] _sync status mapping: awaiting_human / done / failed")
 
+# 3b) _sync at stills writes storyboard.png into preview, not into stills
+from PIL import Image as _Image
+JOBSB = "jPreviewStills"
+projsb = run._projects_dir / JOBSB
+(projsb / "assets" / "images").mkdir(parents=True, exist_ok=True)
+(projsb / "artifacts").mkdir(parents=True, exist_ok=True)
+_Image.new("RGB", (80, 120), (11, 11, 11)).save(projsb / "assets" / "images" / "still_0.png")
+_Image.new("RGB", (80, 120), (253, 197, 13)).save(projsb / "assets" / "images" / "still_1.png")
+(projsb / "assets" / "images" / "storyboard.png").write_bytes(b"\x89PNG\r\nNOTBOARD")
+_sp = {"version": "1.0", "scenes": [
+    {"id": "sc1", "description": "Wave", "start_seconds": 0, "end_seconds": 3,
+     "framing": "medium", "movement": "static"},
+    {"id": "sc2", "description": "CTA", "start_seconds": 3, "end_seconds": 6,
+     "framing": "close", "movement": "static"},
+]}
+_fake_latest.cp = {"stage": "assets", "status": "awaiting_human",
+                   "partial_progress": {"phase": "stills"},
+                   "artifacts": {"scene_plan": _sp}}
+st = run._sync({"job_id": JOBSB})
+assert st["gate"] == "approve_stills"
+assert st["artifacts"].get("preview") == ["storyboard.png"]
+assert "storyboard.png" not in (st["artifacts"].get("stills") or [])
+assert store.artifact_path(JOBSB, "storyboard.png").is_file()
+assert store.artifact_path(JOBSB, "storyboard.html").is_file()
+html_sb = store.artifact_path(JOBSB, "storyboard.html").read_text(encoding="utf-8")
+assert "SC 01" in html_sb and "Wave" in html_sb
+print("[ok] _sync stills dual-surface: storyboard.png preview, not listed as a still")
+
+
 # 4) _approve_stage writes completed + human_approved ----------------------
 captured = {}
 cp.read_checkpoint = lambda _pd, _jid, stage: {"artifacts": {"asset_manifest": {}}}

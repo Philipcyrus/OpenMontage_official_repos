@@ -94,11 +94,12 @@ Branch on the `gate` field:
 |---|---|---|
 | `approve_script` | **`artifacts.script`** (inline JSON) | One section per slide. Slide copy is in `artifacts.script.sections[].text`. Render the sections — **do not** call `/artifacts/…`. |
 | `approve_scene_plan` | **`artifacts.scene_plan`** (inline JSON) | TEXT plan, no media yet. Carries **per-slide bilingual captions (zh + en)** and `metadata.aspect_ratio`. |
-| `approve_stills` | the still images | These are **media**: `artifacts.stills` is a list of filenames — fetch each via `GET /jobs/{id}/artifacts/{name}` and show inline. |
+| `approve_stills` | **`artifacts.preview`** (storyboard PNG) and/or **`artifacts.stills`** | `preview` is `[…/storyboard.png]` — a Backlot-style grid (still + shot description). Fetch that for the file-preview slot. `stills` remains the per-shot PNG list for revise-by-shot. After `{decision:"revise", mode:"edit", shots:[n]}`, poll again — the storyboard PNG is rebuilt. `preview` is **absent** after stills are approved (`done` on carousel). |
 | `budget_exceeded` | `question` (the credit warning) | Conditional — see §5. |
 
 **Rule of thumb:** at `approve_script` and `approve_scene_plan` the content is **inline JSON in the
-poll response**. Only at `approve_stills` do you fetch files via `/artifacts/{name}`.
+poll response**. At `approve_stills` fetch `artifacts.preview` (`storyboard.png`) and/or each
+`artifacts.stills` file. After a shot revise, poll and show the new storyboard PNG.
 
 ---
 
