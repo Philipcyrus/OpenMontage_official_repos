@@ -16,5 +16,5 @@ HTTP walks: isolated launcher on **:8600** — see [`CAROUSEL.md`](CAROUSEL.md) 
 ## Do not
 
 - Bind the test launcher to **8501** (live Dify).
-- Commit `data/carousel-*` or `projects-carousel-claude/` (local artifacts).
+- Commit `data/carousel-*`, `data/storyboard-*`, or `projects-*-claude/` (local artifacts).
 - Expect mock stills to look like Higgsfield panda art.

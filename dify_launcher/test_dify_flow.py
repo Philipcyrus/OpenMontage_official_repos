@@ -109,7 +109,14 @@ b = _step("respond approve (scene_plan)", c.post(f"/jobs/{job}/respond", json={"
           want_gate="approve_stills", want_status="awaiting_human")
 stills = b["artifacts"].get("stills")
 assert stills and len(stills) == 3, f"expected 3 stills at the stills gate, got {stills}"
-assert "preview" not in b["artifacts"], "stills gate must not keep the text-gate preview list"
+assert all("storyboard" not in Path(s).name.lower() for s in stills)
+assert b["artifacts"].get("preview") == [f"/jobs/{job}/artifacts/storyboard.png"]
+assert b["artifacts"].get("storyboard_html") == f"/jobs/{job}/artifacts/storyboard.html"
+sb0 = _digest(job, "storyboard.png")
+html0 = c.get(b["artifacts"]["storyboard_html"])
+assert html0.status_code == 200 and "Storyboard" in html0.text and "SC 01" in html0.text
+png0 = c.get(b["artifacts"]["preview"][0])
+assert png0.status_code == 200 and png0.content[:8] == b"\x89PNG\r\n\x1a\n"
 # COST GATE: no clips, no manifest, and NO video files exist on disk yet
 assert "clips" not in b["artifacts"], "stills gate must NOT carry clips"
 assert "asset_manifest" not in b["artifacts"], "stills gate must NOT carry an asset_manifest"
@@ -130,6 +137,8 @@ assert stills_e and len(stills_e) == 3, "edit must not drop other stills"
 assert [_digest(job, s) for s in stills_e[:2]] == [d0, d1], "unflagged stills must be unchanged"
 assert _digest(job, stills_e[2]) != d2, "flagged still must be rewritten"
 assert all(_size(job, s) == (1080, 1920) for s in stills_e), "edit must keep 9:16"
+assert b["artifacts"].get("preview") == [f"/jobs/{job}/artifacts/storyboard.png"]
+assert _digest(job, "storyboard.png") != sb0, "storyboard must rebuild after a shot edit"
 print("   stills edit shot 3: 1080x1920 kept, other stills untouched")
 
 # revise the stills (still no video generated)
@@ -142,6 +151,7 @@ assert not list(store.artifacts_dir(job).glob("*.mp4")), "revising stills must n
 b = _step("respond approve (stills)", c.post(f"/jobs/{job}/respond", json={"decision": "approve"}),
           want_gate="approve_motion_sample", want_status="awaiting_human")
 assert b["artifacts"].get("motion_sample"), "motion-sample gate must carry a sample clip"
+assert "preview" not in b["artifacts"], "motion-sample gate must not keep the stills storyboard as preview"
 assert "clips" not in b["artifacts"], "motion-sample gate must NOT carry the full clip batch"
 assert "asset_manifest" not in b["artifacts"], "motion-sample gate must NOT carry a manifest"
 vids = list(store.artifacts_dir(job).glob("*.mp4"))
@@ -268,6 +278,8 @@ c.post(f"/jobs/{job4}/respond", json={"decision": "approve"})            # -> st
 b4 = _step("carousel stills", c.get(f"/jobs/{job4}"),
            want_gate="approve_stills", want_status="awaiting_human")
 assert b4["artifacts"].get("stills") and len(b4["artifacts"]["stills"]) == 3
+assert b4["artifacts"].get("preview") == [f"/jobs/{job4}/artifacts/storyboard.png"]
+csb0 = _digest(job4, "storyboard.png")
 assert "clips" not in b4["artifacts"] and "final" not in b4["artifacts"]
 assert not list(store.artifacts_dir(job4).glob("*.mp4")), "carousel must not generate video"
 cstills = b4["artifacts"]["stills"]
@@ -282,12 +294,15 @@ assert cstills2 and len(cstills2) == 3, "carousel edit must not drop other still
 assert [_digest(job4, s) for s in cstills2[:2]] == [cd0, cd1]
 assert _digest(job4, cstills2[2]) != cd2
 assert all(_size(job4, s) == (1080, 1350) for s in cstills2), "carousel edit must keep 4:5"
+assert b4["artifacts"].get("preview") == [f"/jobs/{job4}/artifacts/storyboard.png"]
+assert _digest(job4, "storyboard.png") != csb0
 print("   carousel stills edit shot 3: 1080x1350 kept, other stills untouched")
 # approve stills -> DONE (terminal)
 b4 = _step("carousel approve stills -> done",
            c.post(f"/jobs/{job4}/respond", json={"decision": "approve"}),
            want_status="done")
 assert b4.get("gate") is None
+assert "preview" not in b4["artifacts"], "done carousel must not keep stills preview"
 assert b4["artifacts"].get("stills")
 assert isinstance(b4["artifacts"].get("asset_manifest"), dict)
 validate_artifact("asset_manifest", b4["artifacts"]["asset_manifest"])
@@ -358,6 +373,8 @@ b7 = _step("image stills", c.get(f"/jobs/{job7}"),
 istills = b7["artifacts"].get("stills") or []
 assert len(istills) == 1, istills
 assert _size(job7, istills[0]) == (1080, 1080), "image default is 1:1"
+assert b7["artifacts"].get("preview") == [f"/jobs/{job7}/artifacts/storyboard.png"]
+isb0 = _digest(job7, "storyboard.png")
 assert not list(store.artifacts_dir(job7).glob("*.mp4")), "image must not generate video"
 id0 = _digest(job7, istills[0])
 b7 = _step("image stills revise mode=edit", c.post(f"/jobs/{job7}/respond", json={
@@ -368,6 +385,8 @@ istills_e = b7["artifacts"].get("stills") or []
 assert len(istills_e) == 1
 assert _digest(job7, istills_e[0]) != id0
 assert _size(job7, istills_e[0]) == (1080, 1080)
+assert b7["artifacts"].get("preview") == [f"/jobs/{job7}/artifacts/storyboard.png"]
+assert _digest(job7, "storyboard.png") != isb0
 id1 = _digest(job7, istills_e[0])
 b7 = _step("image stills revise mode=fresh", c.post(f"/jobs/{job7}/respond", json={
     "decision": "revise", "mode": "fresh", "shots": [1],
