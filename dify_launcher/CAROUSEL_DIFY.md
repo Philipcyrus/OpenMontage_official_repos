@@ -86,19 +86,18 @@ See §6 for the full `options` reference.
 
 ## 4. Per-gate display — bind to these exact fields ⚠️
 
-This is the fix for the **"the engine sent no preview"** message. The launcher already sends the
-content **inline** in the `GET /jobs/{id}` response — the Display node just has to read it out.
+This is the fix for the **"the engine sent no preview"** message. The launcher sends the
+content **inline as JSON** *and* as a fetchable markdown file. Bind **either** (or both).
 Branch on the `gate` field:
 
 | `gate` | Show this from the GET response | Notes |
 |---|---|---|
-| `approve_script` | **`artifacts.script`** (inline JSON) | One section per slide. Slide copy is in `artifacts.script.sections[].text`. Render the sections — **do not** call `/artifacts/…`. |
-| `approve_scene_plan` | **`artifacts.scene_plan`** (inline JSON) | TEXT plan, no media yet. Carries **per-slide bilingual captions (zh + en)** and `metadata.aspect_ratio`. |
-| `approve_stills` | the still images | These are **media**: `artifacts.stills` is a list of filenames — fetch each via `GET /jobs/{id}/artifacts/{name}` and show inline. |
+| `approve_script` | **`artifacts.script`** (inline JSON) **and/or** **`artifacts.preview`** | Slide/dialogue copy is `artifacts.script.sections[].text`. `preview` is `[…/script.md]` — fetch that file for the file-preview slot. |
+| `approve_scene_plan` | **`artifacts.scene_plan`** (inline JSON) **and/or** **`artifacts.preview`** | TEXT plan, no media yet. Carries **per-slide bilingual captions (zh + en)** and `metadata.aspect_ratio`. `preview` is `[…/scene_plan.md]` (this gate only — not leftover script.md). |
+| `approve_stills` | the still images | These are **media**: `artifacts.stills` is a list of filenames — fetch each via `GET /jobs/{id}/artifacts/{name}` and show inline. `preview` is **absent**. |
 | `budget_exceeded` | `question` (the credit warning) | Conditional — see §5. |
 
-**Rule of thumb:** at `approve_script` and `approve_scene_plan` the content is **inline JSON in the
-poll response**. Only at `approve_stills` do you fetch files via `/artifacts/{name}`.
+**Rule of thumb:** at `approve_script` and `approve_scene_plan` render the JSON **or** fetch `artifacts.preview`. Only at `approve_stills` (and later video gates) do you fetch stills/clips/final.
 
 ---
 

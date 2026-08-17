@@ -88,6 +88,8 @@ assert isinstance(arts.get("scene_plan"), dict) and arts["scene_plan"]["scenes"]
 assert isinstance(arts.get("asset_manifest"), dict) and arts["asset_manifest"]["assets"][0]["id"] == "a1"
 assert store.artifact_path(JOB, "final.mp4").is_file()       # actually copied into the store
 assert store.artifact_path(JOB, "clip_2.mp4").is_file()
+assert arts.get("scene_plan_md") == "scene_plan.md"
+assert store.artifact_path(JOB, "scene_plan.md").is_file()
 print("[ok] artifact mirroring: files (stills/clips/final/script) + inline scene_plan/asset_manifest")
 
 # 2b) SCRIPT-GATE FIX (regression guard): the real script-director writes a STRUCTURED script
@@ -103,9 +105,13 @@ _script_obj = {"version": "1.0", "title": "Panda tip", "total_duration_seconds":
                              "start_seconds": 0, "end_seconds": 3}]}
 a = run._mirror_artifacts(JOB2, {"script": _script_obj})                 # (a) inline in checkpoint
 assert isinstance(a.get("script"), dict) and a["script"]["sections"][0]["text"] == "Meet Panda.", a.get("script")
+assert a.get("script_md") == "script.md"
+assert "Meet Panda" in store.artifact_path(JOB2, "script.md").read_text(encoding="utf-8")
+assert "preview" not in a, "preview is gate-specific; mirroring does not know the gate"
 (proj2 / "artifacts" / "script.json").write_text(_json.dumps(_script_obj), encoding="utf-8")
 b = run._mirror_artifacts(JOB2, {})                                      # (b) on-disk script.json
 assert isinstance(b.get("script"), dict) and b["script"]["title"] == "Panda tip", b.get("script")
+assert b.get("script_md") == "script.md"
 (proj2 / "artifacts" / "notes.md").write_text("# not the script", encoding="utf-8")
 c = run._mirror_artifacts(JOB2, {"script": _script_obj})                 # (c) structured wins over .md
 assert isinstance(c.get("script"), dict), c.get("script")
@@ -123,6 +129,8 @@ sp = {"version": "1.0", "scenes": [{"id": "s1"}]}
 d = run._mirror_artifacts(JOB3, {"scene_plan": sp})
 assert "script" not in d, f"cost_report.md must NOT be surfaced as script: {d.get('script')!r}"
 assert isinstance(d.get("scene_plan"), dict), d.get("scene_plan")
+assert d.get("scene_plan_md") == "scene_plan.md"
+assert store.artifact_path(JOB3, "scene_plan.md").is_file()
 print("[ok] stray cost_report.md not mislabeled as script at a scriptless gate")
 
 # 2d) superseded revise leftovers must NOT surface as live stills (history/ or *.pre-*)
@@ -189,6 +197,24 @@ _fake_latest.cp = {"stage": "assets", "status": "failed", "artifacts": {}, "erro
 st = run._sync({"job_id": "jX"})
 assert st["status"] == "failed" and st["question"] == "boom"
 print("[ok] _sync status mapping: awaiting_human / done / failed")
+
+# 3b) _sync sets gate-specific preview URLs without replacing inline JSON
+_fake_latest.cp = {"stage": "script", "status": "awaiting_human",
+                   "artifacts": {"script": _script_obj}}
+st = run._sync({"job_id": "jPreviewScript"})
+assert st["gate"] == "approve_script"
+assert isinstance(st["artifacts"].get("script"), dict)
+assert st["artifacts"].get("script_md") == "script.md"
+assert st["artifacts"].get("preview") == ["script.md"]
+_fake_latest.cp = {"stage": "scene_plan", "status": "awaiting_human",
+                   "artifacts": {"scene_plan": {"version": "1.0",
+                                                "scenes": [{"id": "s1", "description": "Airport"}]}}}
+st = run._sync({"job_id": "jPreviewPlan"})
+assert st["gate"] == "approve_scene_plan"
+assert isinstance(st["artifacts"].get("scene_plan"), dict)
+assert st["artifacts"].get("preview") == ["scene_plan.md"]
+assert st["artifacts"]["preview"] != ["script.md"]
+print("[ok] _sync dual-surface: inline JSON + gate-specific preview .md")
 
 # 4) _approve_stage writes completed + human_approved ----------------------
 captured = {}

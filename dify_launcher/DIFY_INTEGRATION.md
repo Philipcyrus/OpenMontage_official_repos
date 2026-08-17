@@ -297,7 +297,10 @@ Returned under `artifacts` in every state; grouped by kind:
 | key | type | when |
 |---|---|---|
 | `script` | **inline JSON object** (`title`, `sections[]` with `text` + `speaker_directions`/`delivery_cues` — the actual dialogue; show it, don't fetch) | at the **script** gate |
+| `script_md` | relative URL to `script.md` (same content as markdown) | at the script gate (and later, if the script is still on the job) |
 | `scene_plan` | **inline JSON object** (the text plan — show it, don't fetch) | at the scene_plan gate |
+| `scene_plan_md` | relative URL to `scene_plan.md` | at the scene_plan gate (and later, if the plan is still on the job) |
+| `preview` | list of **one** relative URL — the current text gate’s `.md` | **`approve_script`** → `script.md`; **`approve_scene_plan`** → `scene_plan.md`. Absent at stills/clips/final. Bind this for Dify’s file-preview slot. |
 | `stills` | list of image paths | at the **stills** gate (UGC originals; kept after `/brand`) |
 | `branded_stills` | list of image paths | after `POST /jobs/{id}/brand` (BGC wordmark copies) |
 | `clips` | list of video paths | at the **assets** gate (video pipeline) |
@@ -306,7 +309,11 @@ Returned under `artifacts` in every state; grouped by kind:
 | `branded` | bool | `false` until `/brand`; then `true` |
 | `_checkpoint_artifacts` | raw structured data (render report, decision log) | context/debug |
 
-Structured artifacts (`script`, `scene_plan`, `asset_manifest`) come as **inline JSON objects** — display them directly for review, no fetch needed. **You MUST show `script` at the `approve_script` gate** so the reviewer reads the actual dialogue before approving — do not just show the gate label. (If a pipeline ever emits the script only as a markdown file instead of structured JSON, `script` falls back to a **relative URL** to fetch — but the panda-video script-director emits structured JSON.) File artifacts (`stills`, `clips`, `final`) come as **relative URLs** — fetch with `GET /jobs/{id}/artifacts/{basename}` (prepend the base URL). Show `stills`/`clips` at the assets gate; show `final` at the final gate.
+Structured artifacts (`script`, `scene_plan`, `asset_manifest`) come as **inline JSON objects** — display them directly for review, no fetch needed. **You MUST show `script` at the `approve_script` gate** so the reviewer reads the actual dialogue before approving — do not just show the gate label. (If a pipeline ever emits the script only as a markdown file instead of structured JSON, `script` falls back to a **relative URL** to fetch — but the panda-video script-director emits structured JSON.)
+
+**Dual-surface at text gates:** the same content is also written as `script.md` / `scene_plan.md`. `artifacts.preview` is a one-item list of that file’s URL for the **current** gate (`approve_script` → script.md, `approve_scene_plan` → scene_plan.md). Bind Dify’s file-preview node to `artifacts.preview` (or `script_md` / `scene_plan_md`) so the chat does not show “the engine sent no preview.” Do **not** put these `.md` files in `stills`.
+
+File artifacts (`stills`, `clips`, `final`) come as **relative URLs** — fetch with `GET /jobs/{id}/artifacts/{basename}` (prepend the base URL). Show `stills`/`clips` at the assets gate; show `final` at the final gate.
 
 ---
 
@@ -343,7 +350,7 @@ Build a **chatflow** (mirrors the existing Mochi v6e pattern with conversation v
 
 1. **Start** — HTTP `POST /jobs` with the user's brief + options → store `job_id`, `status` in conversation variables.
 2. **Poll loop** — HTTP `GET /jobs/{job_id}`; if `status == running`, wait ~20s and loop; if `awaiting_human`, exit loop.
-3. **Present gate** — show `question` and render `artifacts` (display the scene plan text / stills / clips / final to the user).
+3. **Present gate** — show `question` and render `artifacts` (inline `script` / `scene_plan` JSON, or `artifacts.preview` `.md` files at those gates; stills / clips / final at later gates).
 4. **Collect reply** — user says approve or describes an edit.
 5. **Respond** — HTTP `POST /respond` with `{"decision":"approve"}` or `{"decision":"revise","answer":"<user text>"}`.
 6. **Repeat** 2–5 until `status == done`, then present `final.mp4`.
