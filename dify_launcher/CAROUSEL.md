@@ -17,11 +17,13 @@ POST /jobs  { "pipeline": "panda-carousel", "brief": "…", "options": { … } }
    → approve_script          (skip with options.gates: ["scene_plan","stills"])
    → approve_scene_plan      TEXT plan + bilingual captions; no media yet
    → approve_stills          one PNG per slide (UGC)
+   → approve_brand           approve stamps BGC copies; skip keeps UGC; revise stays
    → done
-POST /jobs/{id}/brand  { "profile": "bgc" }   # optional wordmark copies
 ```
 
-Stills stay UGC. Branding is the later `/brand` pass, not baked into generation.
+Stills stay UGC. Branding is a launcher overlay at `approve_brand` (not baked into
+generation, does not flow through animation). `POST /jobs/{id}/brand` remains for
+skip-then-brand-later (job already `done`).
 
 ---
 
@@ -115,8 +117,9 @@ Do not commit `data/carousel-*`, `data/storyboard-*`, or `projects-*-claude/` (l
 | Branded | `still_00.bgc.png` … — same size, wordmark top-right |
 | Video | none |
 
-Proves pipeline selector, bilingual captions, terminal stills, `/brand` idempotent.
-Does **not** prove Higgsfield look.
+Proves pipeline selector, bilingual captions, terminal stills, brand overlay idempotent.
+Does **not** prove Higgsfield look. That recorded run branded via `POST /brand` after `done`;
+current Dify flow collects the choice at `approve_brand`.
 
 ### 2. Claude 4-slide OnePool — `job_722bb5dbeb4f`
 

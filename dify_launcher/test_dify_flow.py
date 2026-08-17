@@ -4,7 +4,7 @@ Runs the full gate handshake with the MockRunner and asserts each transition —
 best-of-both shape (upstream text plan + a Panda stills cost gate):
     start -> GATE 1 (script) -> GATE 2 (scene_plan, TEXT) -> GATE 3 (stills, NO video)
           -> GATE 3.5 (motion sample, ONE clip) -> GATE 4 (assets, all media)
-          -> GATE 5 (final) -> done
+          -> GATE 5 (final) -> GATE 6 (approve_brand) -> done
 Also proves the motion_sample=false toggle skips the motion gate (stills -> assets directly).
 
 Proves the Dify-facing contract, local storage, checkpoint/resume, that scene_plan produces
@@ -193,9 +193,29 @@ fv = c.get(f"/jobs/{job}/artifacts/final.mp4")
 assert fv.status_code == 200 and len(fv.content) > 1000, "final.mp4 not served / empty"
 print("   final.mp4 bytes:", store.artifact_path(job, "final.mp4").stat().st_size)
 
-# 4) approve final -> done
-_step("respond approve (final)", c.post(f"/jobs/{job}/respond", json={"decision": "approve"}),
-      want_status="done")
+# 4) approve final -> approve_brand (not done); approve branding stamps copies
+b = _step("respond approve (final)", c.post(f"/jobs/{job}/respond", json={"decision": "approve"}),
+          want_gate="approve_brand", want_status="awaiting_human")
+assert b["artifacts"].get("final") == f"/jobs/{job}/artifacts/final.mp4"
+assert b["artifacts"].get("branded") is False
+br_too_early = c.post(f"/jobs/{job}/brand", json={"profile": "bgc"})
+assert br_too_early.status_code == 409, br_too_early.text
+d_final = _digest(job, "final.mp4")
+b = _step("respond approve (brand)", c.post(f"/jobs/{job}/respond", json={"decision": "approve"}),
+          want_status="done")
+assert b["artifacts"].get("branded") is True
+assert b["artifacts"].get("branded_final") == f"/jobs/{job}/artifacts/final.bgc.mp4"
+assert _digest(job, "final.mp4") == d_final, "UGC master must be left untouched"
+bfv = c.get(f"/jobs/{job}/artifacts/final.bgc.mp4")
+assert bfv.status_code == 200 and len(bfv.content) > 1000, "final.bgc.mp4 not served / empty"
+assert _digest(job, "final.bgc.mp4") != d_final, "branded master must differ from UGC"
+vstills = b["artifacts"].get("branded_stills")
+assert vstills and len(vstills) == 3, vstills
+assert all(u.endswith(".bgc.png") for u in vstills)
+brv2 = c.post(f"/jobs/{job}/brand", json={"profile": "bgc"})
+assert brv2.status_code == 200
+assert brv2.json()["artifacts"].get("branded_final") == b["artifacts"]["branded_final"]
+print("   video brand gate: approve stamps final.bgc.mp4, UGC final.mp4 kept, stills stamped")
 
 # 4d) motion_sample=false toggle: approving stills goes STRAIGHT to approve_assets ---------
 b2 = _step("POST /jobs (motion_sample off)", c.post("/jobs", json={
@@ -297,19 +317,31 @@ assert all(_size(job4, s) == (1080, 1350) for s in cstills2), "carousel edit mus
 assert b4["artifacts"].get("preview") == [f"/jobs/{job4}/artifacts/storyboard.png"]
 assert _digest(job4, "storyboard.png") != csb0
 print("   carousel stills edit shot 3: 1080x1350 kept, other stills untouched")
-# approve stills -> DONE (terminal)
-b4 = _step("carousel approve stills -> done",
+# skip is only valid at approve_brand
+bad_skip = c.post(f"/jobs/{job4}/respond", json={"decision": "skip"})
+assert bad_skip.status_code == 400, bad_skip.text
+print("   skip at approve_stills -> 400")
+# approve stills -> approve_brand (not done)
+b4 = _step("carousel approve stills -> brand",
            c.post(f"/jobs/{job4}/respond", json={"decision": "approve"}),
-           want_status="done")
-assert b4.get("gate") is None
-assert "preview" not in b4["artifacts"], "done carousel must not keep stills preview"
+           want_gate="approve_brand", want_status="awaiting_human")
 assert b4["artifacts"].get("stills")
 assert isinstance(b4["artifacts"].get("asset_manifest"), dict)
 validate_artifact("asset_manifest", b4["artifacts"]["asset_manifest"])
 assert "clips" not in b4["artifacts"] and "final" not in b4["artifacts"]
-print("   carousel: script → scene_plan → stills → done (no clips/final)")
+assert b4["artifacts"].get("branded") is False
+print("   carousel: script → scene_plan → stills → approve_brand (no clips/final)")
 
-# brand pass on done carousel stills
+# skip branding -> done UGC, no branded_stills
+b4 = _step("carousel skip brand -> done",
+           c.post(f"/jobs/{job4}/respond", json={"decision": "skip"}),
+           want_status="done")
+assert b4.get("gate") is None
+assert not b4["artifacts"].get("branded_stills")
+assert b4["artifacts"].get("branded") is False
+print("   carousel skip brand: done UGC, no branded_stills")
+
+# POST /brand still works after skip (done job)
 br = c.post(f"/jobs/{job4}/brand", json={"profile": "bgc"})
 assert br.status_code == 200, br.text
 bb = br.json()
@@ -318,12 +350,10 @@ assert bb["artifacts"].get("branded") is True
 bstills = bb["artifacts"].get("branded_stills")
 assert bstills and len(bstills) == 3, bstills
 assert all(u.endswith(".bgc.png") for u in bstills)
-# UGC originals still listed
 assert bb["artifacts"].get("stills")
-# idempotent
 br2 = c.post(f"/jobs/{job4}/brand", json={"profile": "bgc"})
 assert br2.status_code == 200 and br2.json()["artifacts"].get("branded_stills") == bstills
-print("   carousel brand pass: BGC wordmark stamped, UGC originals kept, idempotent")
+print("   carousel /brand after skip: BGC copies, UGC originals kept, idempotent")
 
 # brand before done -> 409
 early = c.post("/jobs", json={"brief": "too early", "pipeline": "panda-carousel"}).json()["job_id"]
@@ -396,26 +426,30 @@ istills_f = b7["artifacts"].get("stills") or []
 assert len(istills_f) == 1
 assert _digest(job7, istills_f[0]) != id1
 assert _size(job7, istills_f[0]) == (1080, 1080)
-b7 = _step("image approve stills -> done",
+b7 = _step("image approve stills -> brand",
            c.post(f"/jobs/{job7}/respond", json={"decision": "approve"}),
-           want_status="done")
-assert b7.get("gate") is None
+           want_gate="approve_brand", want_status="awaiting_human")
 assert len(b7["artifacts"].get("stills") or []) == 1
 validate_artifact("asset_manifest", b7["artifacts"]["asset_manifest"])
 assert "clips" not in b7["artifacts"] and "final" not in b7["artifacts"]
-print("   image: scene_plan → 1 still (1080x1080) → edit → fresh → done")
-
-ibr = c.post(f"/jobs/{job7}/brand", json={"profile": "bgc"})
-assert ibr.status_code == 200, ibr.text
-ibb = ibr.json()
-assert ibb["status"] == "done" and ibb["artifacts"].get("branded") is True
-ibstills = ibb["artifacts"].get("branded_stills")
+b7 = _step("image revise brand stays",
+           c.post(f"/jobs/{job7}/respond", json={"decision": "revise", "answer": "not yet"}),
+           want_gate="approve_brand", want_status="awaiting_human")
+assert b7["artifacts"].get("branded") is False
+id_ugc = _digest(job7, Path(b7["artifacts"]["stills"][0]).name)
+b7 = _step("image approve brand -> done",
+           c.post(f"/jobs/{job7}/respond", json={"decision": "approve"}),
+           want_status="done")
+assert b7.get("gate") is None
+assert b7["artifacts"].get("branded") is True
+ibstills = b7["artifacts"].get("branded_stills")
 assert ibstills and len(ibstills) == 1 and ibstills[0].endswith(".bgc.png")
-assert ibb["artifacts"].get("stills")
-print("   image brand pass: one BGC copy, UGC original kept")
+assert b7["artifacts"].get("stills")
+assert _digest(job7, Path(b7["artifacts"]["stills"][0]).name) == id_ugc
+print("   image: scene_plan → 1 still → edit → fresh → approve_brand (revise stays, approve stamps)")
 
 print("\n[PASS] FULL DIFY GATE FLOW: start -> script -> scene_plan(text) -> stills(no video) -> "
-      "motion_sample(1 clip) -> assets(media) -> final -> done  (+ motion_sample=false toggle)")
-print("   + panda-carousel: script → scene_plan → stills → done + /brand")
-print("   + panda-image: scene_plan → one still → edit → fresh → done + /brand")
+      "motion_sample(1 clip) -> assets(media) -> final -> approve_brand -> done  (+ motion_sample=false toggle)")
+print("   + panda-carousel: script → scene_plan → stills → approve_brand (skip) → done")
+print("   + panda-image: scene_plan → one still → edit → fresh → approve_brand (revise, approve) → done")
 print("   job dir:", store.job_dir(job))

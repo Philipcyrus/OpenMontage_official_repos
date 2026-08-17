@@ -7,8 +7,8 @@ Endpoints:
   GET  /health
   POST /jobs                      {brief, pipeline?, profile?, options?}  -> start a run
   GET  /jobs/{id}                                                  -> current state + gate + artifacts
-  POST /jobs/{id}/respond         {decision: approve|revise, ...}  -> resume to next gate
-  POST /jobs/{id}/brand           {profile: bgc}                   -> stamp BGC wordmark on done stills
+  POST /jobs/{id}/respond         {decision: approve|revise|skip|cancel, ...}  -> resume to next gate
+  POST /jobs/{id}/brand           {profile: bgc}                   -> stamp BGC wordmark on done stills / video master
   GET  /jobs/{id}/artifacts/{name}                                 -> download a still/script/final.mp4
 
 Sync vs async:
@@ -130,7 +130,7 @@ class StartJob(BaseModel):
 
 
 class Respond(BaseModel):
-    decision: str = "approve"          # "approve" | "revise" | "cancel" (cancel: only at budget gate)
+    decision: str = "approve"          # "approve" | "revise" | "skip" (brand gate) | "cancel" (budget)
     answer: Optional[str] = None
     stills: list[str] = []             # optional user-supplied storyboard stills (paths)
     shots: list[int] = []              # optional 1-based indices: stills (GATE 3) or clips (GATE 4)
@@ -139,7 +139,7 @@ class Respond(BaseModel):
 
 
 class BrandBody(BaseModel):
-    profile: str = "bgc"               # only bgc is implemented (wordmark stamp on stills)
+    profile: str = "bgc"               # only bgc is implemented (wordmark on stills + video master)
 
 
 def _resolve_pipeline(name: Optional[str]) -> str:
@@ -203,13 +203,18 @@ def respond(job_id: str, body: Respond, x_dify_token: Optional[str] = Header(Non
         raise HTTPException(status_code=409, detail="job is still processing; poll GET /jobs/{id}")
     if state.get("status") != "awaiting_human":
         raise HTTPException(status_code=409, detail=f"job is {state.get('status')}, not awaiting_human")
+    if body.decision == "skip" and state.get("gate") != "approve_brand":
+        raise HTTPException(status_code=400, detail="skip is only valid at the approve_brand gate")
     if _ASYNC:
         running = {**state, "status": "running",
                    "question": "processing — poll GET /jobs/{id} until status changes"}
         store.save_state(running)
         _spawn(job_id, _RUNNER.resume, state, body.model_dump())
         return _public(running)
-    state = _RUNNER.resume(state, body.model_dump())
+    try:
+        state = _RUNNER.resume(state, body.model_dump())
+    except _runner.BrandError as e:
+        raise HTTPException(status_code=e.status_code, detail=str(e)) from e
     store.save_state(state)
     return _public(state)
 
@@ -217,7 +222,7 @@ def respond(job_id: str, body: Respond, x_dify_token: Optional[str] = Header(Non
 @app.post("/jobs/{job_id}/brand")
 def brand_job(job_id: str, body: BrandBody = BrandBody(),
               x_dify_token: Optional[str] = Header(None)) -> dict[str, Any]:
-    """Stamp the BGC wordmark onto approved stills. Job must be `done`. Idempotent."""
+    """Stamp the BGC wordmark onto approved stills and/or the video master. Job must be `done`."""
     _auth(x_dify_token)
     state = store.load_state(job_id)
     if not state:
