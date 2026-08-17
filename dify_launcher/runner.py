@@ -13,14 +13,16 @@ Two runners:
 
 Gate sequence (matches pipeline_defs/panda-video.yaml — upstream shape + Panda cost gates):
     start ─▶ GATE 1 approve_script ─▶ GATE 2 approve_scene_plan (TEXT) ─▶ GATE 3 approve_stills
-          ─▶ [GATE 3.5 approve_motion_sample] ─▶ GATE 4 approve_assets ─▶ GATE 5 approve_final ─▶ done
+          ─▶ [GATE 3.5 approve_motion_sample] ─▶ GATE 4 approve_assets ─▶ GATE 5 approve_final
+          ─▶ GATE 6 approve_brand ─▶ done
 scene_plan produces a TEXT plan only (no media). The assets stage runs in up to THREE human-
 reviewed phases (all stage="assets"): first STILLS ONLY (cheap — approve the look before any
 video); then, when the job option motion_sample is on (default), ONE hero still is animated into
 a MOTION SAMPLE (approve the motion/animation before batching all clips — the biggest cost/time
 gate); then the full media (all clips + voice + music) recorded in asset_manifest. The pauses are
 distinguished by the checkpoint's partial_progress.phase ("stills" | "motion_sample" | full).
-Branding is NOT a gate — it's a separate on-demand step after approve_final.
+approve_brand is a launcher-only gate after the last content gate: approve stamps BGC copies,
+skip keeps UGC, revise stays. Branding does not flow through animation.
 """
 
 from __future__ import annotations
@@ -29,6 +31,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Optional
 
@@ -41,7 +44,7 @@ _ENGINE_ROOT = Path(__file__).resolve().parents[1]
 # — see _sync/_do_stills/_do_motion_sample. approve_motion_sample only occurs when the job option
 # motion_sample is on (default true).
 GATES = ["approve_script", "approve_scene_plan", "approve_stills",
-         "approve_motion_sample", "approve_assets", "approve_final"]
+         "approve_motion_sample", "approve_assets", "approve_final", "approve_brand"]
 # gates from the previous storyboard-stills flow — resuming one is refused with a migration note
 _LEGACY_GATES = {"approve_storyboard", "approve_clips"}
 
@@ -229,26 +232,79 @@ def _is_superseded_still(path: Any) -> bool:
     return ".pre-" in p.name.lower()
 
 
-def brand_job(state: dict[str, Any], profile: str = "bgc") -> dict[str, Any]:
-    """Stamp the BGC wordmark onto approved stills. Job must be `done`. Idempotent.
+def _artifact_files_ready(job_id: str, names: list[str]) -> bool:
+    return bool(names) and all(store.artifact_path(job_id, n).is_file() for n in names)
 
-    UGC originals in artifacts.stills are left untouched. Branded copies are written
-    as `<stem>.bgc.png` and listed under artifacts.branded_stills.
-    """
-    if state.get("status") != "done":
-        raise BrandError(f"job is {state.get('status')!r}, not done — approve stills first", 409)
+
+def _brand_video_master(src: Path, dest: Path, prof: dict[str, Any]) -> None:
+    """Overlay the BGC wordmark on a copy of the UGC master. Keeps audio."""
+    from montage_svc.render import ffmpeg_ops as ff  # noqa: WPS433
+    from montage_svc.render.overlays import scene_overlay  # noqa: WPS433
+
+    w, h = ff.probe_size(src)
+    dur = ff.probe_duration(src)
+    with tempfile.TemporaryDirectory(prefix="dify-brand-") as td:
+        png = Path(td) / "logo.png"
+        drawn = scene_overlay(prof, w, h, None, [], png, with_logo=True)
+        if not drawn or not png.is_file():
+            raise BrandError("BGC logo overlay produced no image", 500)
+        # Cover the whole cut (duration + slack) so the last frames keep the mark.
+        try:
+            ff.overlay_timed(src, [(png, 0.0, max(dur + 1.0, 0.05))], dest)
+        except ff.RenderError as e:
+            raise BrandError(f"video brand overlay failed: {e}", 500) from e
+
+
+def _open_brand_gate(state: dict[str, Any]) -> dict[str, Any]:
+    """Pause for BGC overlay choice. UGC artifacts are already on the job."""
+    arts = dict(state.get("artifacts") or {})
+    arts.setdefault("branded", False)
+    state.update(
+        status="awaiting_human", stage="brand", gate="approve_brand",
+        question="Apply the BGC wordmark to copies of the approved stills/final? "
+                 "Approve to brand, skip to keep UGC, or revise to decide later. "
+                 "Branding does not flow through animation.",
+        artifacts=arts,
+    )
+    return state
+
+
+def _mark_brand_done(state: dict[str, Any], resolved: str) -> dict[str, Any]:
+    state["brand_resolved"] = resolved
+    state.update(status="done", gate=None, question=None)
+    return state
+
+
+def _apply_brand(state: dict[str, Any], profile: str = "bgc") -> dict[str, Any]:
+    """Stamp BGC copies of stills and/or the video master. Does not change status."""
     profile = (profile or "bgc").strip().lower()
     if profile != "bgc":
         raise BrandError("only profile 'bgc' is supported for the brand pass", 400)
 
-    stills = [_still_basename(n) for n in (state.get("artifacts", {}).get("stills") or [])
+    arts = dict(state.get("artifacts") or {})
+    job_id = state["job_id"]
+    stills = [_still_basename(n) for n in (arts.get("stills") or [])
               if not _is_superseded_still(n)]
-    if not stills:
-        raise BrandError("no stills to brand (video-master brand pass is not in this slice)", 409)
+    final_name = _still_basename(arts.get("final") or "")
+    final_src = store.artifact_path(job_id, final_name) if final_name.endswith(".mp4") else None
+    has_final = bool(final_src and final_src.is_file())
+    branded_final_name = "final.bgc.mp4"
+    branded_final_path = store.artifact_path(job_id, branded_final_name)
 
-    existing = list(state.get("artifacts", {}).get("branded_stills") or [])
-    if existing and all(store.artifact_path(state["job_id"], n).is_file() for n in existing):
-        state.setdefault("artifacts", {})["branded"] = True
+    if not stills and not has_final:
+        raise BrandError("no stills or final to brand", 409)
+
+    existing_stills = [_still_basename(n) for n in (arts.get("branded_stills") or [])]
+    stills_ready = _artifact_files_ready(job_id, existing_stills)
+    video_ready = has_final and branded_final_path.is_file()
+
+    if (not stills or stills_ready) and (not has_final or video_ready):
+        if stills_ready:
+            arts["branded_stills"] = existing_stills
+        if video_ready:
+            arts["branded_final"] = branded_final_name
+        arts["branded"] = True
+        state["artifacts"] = arts
         return state
 
     _VENDOR = _ENGINE_ROOT / "vendor"
@@ -262,24 +318,61 @@ def brand_job(state: dict[str, Any], profile: str = "bgc") -> dict[str, Any]:
 
     ensure_profiles()
     prof = load_profile("bgc")
-    job_id = state["job_id"]
-    branded: list[str] = []
-    for name in stills:
-        src = store.artifact_path(job_id, name)
-        if not src.is_file():
-            raise BrandError(f"still {name!r} is missing from the job store", 409)
-        stem = Path(name).stem
-        out_name = f"{stem}.bgc.png"
-        img = Image.open(src).convert("RGBA")
-        draw_logo(img, prof)
-        img.save(store.artifact_path(job_id, out_name))
-        branded.append(out_name)
 
-    arts = dict(state.get("artifacts") or {})
-    arts["branded_stills"] = branded
+    if stills and not stills_ready:
+        branded: list[str] = []
+        for name in stills:
+            src = store.artifact_path(job_id, name)
+            if not src.is_file():
+                raise BrandError(f"still {name!r} is missing from the job store", 409)
+            out_name = f"{Path(name).stem}.bgc.png"
+            img = Image.open(src).convert("RGBA")
+            draw_logo(img, prof)
+            img.save(store.artifact_path(job_id, out_name))
+            branded.append(out_name)
+        arts["branded_stills"] = branded
+    elif stills_ready:
+        arts["branded_stills"] = existing_stills
+
+    if has_final and not video_ready:
+        assert final_src is not None
+        _brand_video_master(final_src, branded_final_path, prof)
+        arts["branded_final"] = branded_final_name
+    elif video_ready:
+        arts["branded_final"] = branded_final_name
+
     arts["branded"] = True
     state["artifacts"] = arts
     return state
+
+
+def _resolve_brand_gate(state: dict[str, Any], decision: str) -> dict[str, Any]:
+    """approve = stamp then done; skip = UGC done; revise = stay at approve_brand."""
+    decision = (decision or "approve").strip().lower()
+    if decision == "revise":
+        return _open_brand_gate(state)
+    if decision == "skip":
+        arts = dict(state.get("artifacts") or {})
+        arts["branded"] = False
+        state["artifacts"] = arts
+        return _mark_brand_done(state, "skipped")
+    if decision == "approve":
+        _apply_brand(state)
+        return _mark_brand_done(state, "applied")
+    raise ValueError(f"approve_brand expects approve|skip|revise, got {decision!r}")
+
+
+def brand_job(state: dict[str, Any], profile: str = "bgc") -> dict[str, Any]:
+    """Stamp the BGC wordmark onto approved stills and/or the video master.
+
+    Job must be `done` (after skip, or a second pass). At `approve_brand` use
+    POST /respond instead. Idempotent per output. UGC originals stay.
+    """
+    if state.get("gate") == "approve_brand":
+        raise BrandError("at approve_brand use POST /respond (approve|skip|revise), not /brand", 409)
+    if state.get("status") != "done":
+        raise BrandError(f"job is {state.get('status')!r}, not done — finish the brand gate first", 409)
+    return _apply_brand(state, profile)
 
 
 # Placeholder per-asset Higgsfield credits the MockRunner uses to exercise budget enforcement
@@ -345,6 +438,9 @@ class MockRunner(Runner):
                          question="Job cancelled at the budget gate — no further Higgsfield credits spent.")
             return state
 
+        if gate == "approve_brand":
+            return _resolve_brand_gate(state, decision)
+
         # revise: regenerate the CURRENT gate's artifact, stay at the same gate
         if decision == "revise":
             regen = {
@@ -379,8 +475,7 @@ class MockRunner(Runner):
         if gate == "approve_assets":
             return self._do_production(state, response)
         if gate == "approve_final":
-            state.update(status="done", gate=None, question=None)
-            return state
+            return _open_brand_gate(state)
         raise ValueError(f"cannot resume from gate {gate!r}")
 
     # --- GATE 1: script ----------------------------------------------------
@@ -606,14 +701,14 @@ class MockRunner(Runner):
         state.update(
             stage="compose", status="awaiting_human", gate="approve_final",
             question="Approve the finished (unbranded) video, or request a revision. "
-                     "Branding can be added on request after approval.",
+                     "Branding is the next gate and does not flow through animation.",
             artifacts={**state.get("artifacts", {}), "final": "final.mp4", "branded": False},
         )
         return state
 
     # --- helpers -----------------------------------------------------------
     def _finish_stills_job(self, state: dict[str, Any]) -> dict[str, Any]:
-        """Approve stills on carousel/image: write image-only asset_manifest and mark done."""
+        """Approve stills on carousel/image: write image-only asset_manifest, then brand gate."""
         job_id = state["job_id"]
         stills = list(state.get("artifacts", {}).get("stills") or [])
         scene_plan = state.get("artifacts", {}).get("scene_plan") or {}
@@ -628,11 +723,10 @@ class MockRunner(Runner):
         store.artifact_path(job_id, "asset_manifest.json").write_text(
             json.dumps(asset_manifest, indent=2), encoding="utf-8")
         state.update(
-            status="done", stage="assets", gate=None, question=None,
             artifacts={**state.get("artifacts", {}), "stills": stills,
                        "asset_manifest": asset_manifest, "branded": False},
         )
-        return state
+        return _open_brand_gate(state)
 
     def _placeholder_stills(self, job_id: str, n: int,
                             state: Optional[dict[str, Any]] = None,
@@ -770,6 +864,10 @@ class ClaudeCodeRunner(Runner):
         from lib import checkpoint as cp
         gate = state.get("gate")
         decision = (response or {}).get("decision", "approve")
+
+        if gate == "approve_brand":
+            return _resolve_brand_gate(state, decision)
+
         stage = self._gate_stage(gate)
 
         # BUDGET HOLD — the agent blocked a generation that would exceed max_higgsfield_credits.
@@ -916,7 +1014,11 @@ class ClaudeCodeRunner(Runner):
         else:  # completed
             nxt = cp.get_next_stage(self._projects_dir, job_id, _pipeline_of(state))
             if nxt is None:
-                state.update(status="done", stage=stage, gate=None, question=None, artifacts=arts)
+                state["artifacts"] = arts
+                if state.get("brand_resolved"):
+                    state.update(status="done", stage=stage, gate=None, question=None)
+                    return state
+                return _open_brand_gate(state)
             else:
                 state.update(status="running", stage=stage, gate=None,
                              question=f"stage {stage} completed; next: {nxt}", artifacts=arts)
@@ -1064,6 +1166,8 @@ class ClaudeCodeRunner(Runner):
     def _gate_stage(self, gate: Optional[str]) -> Optional[str]:
         if gate in ("approve_stills", "approve_motion_sample", "budget_exceeded", "approve_assets"):
             return "assets"                 # all are pauses of the single assets stage
+        if gate == "approve_brand":
+            return "brand"
         for s, g in _STAGE_GATE.items():
             if g == gate:
                 return s

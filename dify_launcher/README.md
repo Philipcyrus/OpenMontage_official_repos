@@ -1,7 +1,7 @@
 # Dify Launcher
 
 The **HTTP service Dify talks to.** The OpenMontage engine is not a service — it's an agent
-that runs per job. This launcher starts/resumes agent runs and surfaces the five approval
+that runs per job. This launcher starts/resumes agent runs and surfaces the approval
 gates so Dify can show them to the user and collect responses. Storage is **local** (a folder
 per job); S3/Postgres backends can be swapped in later without touching the API.
 
@@ -17,24 +17,26 @@ Dify ──HTTP──▶ Dify Launcher ──▶ runner ──▶ agent/pipeline
 | GET  | `/health` | liveness + which runner is active |
 | POST | `/jobs` | start a run from `{brief, pipeline?, profile?, options?}` → first gate |
 | GET  | `/jobs/{id}` | current `{status, stage, gate, question, artifacts}` |
-| POST | `/jobs/{id}/respond` | `{decision: approve\|revise, answer?, stills?}` → resume to next gate |
-| POST | `/jobs/{id}/brand` | `{profile: bgc}` — stamp BGC wordmark on approved stills (job must be `done`) |
+| POST | `/jobs/{id}/respond` | `{decision: approve\|revise\|skip, answer?, stills?}` → resume to next gate (`skip` only at `approve_brand`) |
+| POST | `/jobs/{id}/brand` | `{profile: bgc}` — stamp BGC wordmark on approved stills and (video) the finished master (job must already be `done`; at `approve_brand` use `/respond`) |
 | GET  | `/jobs/{id}/artifacts/{name}` | download a **media** file — still / clip / final.mp4 — or `cost_report.md` (the `script`/`scene_plan`/`asset_manifest` come inline, see below) |
 | GET  | `/jobs/{id}/cost` | per-project cost & time report — Higgsfield credits, ElevenLabs usage, generation time (native units) |
 
-**Gate sequence** (matches `pipeline_defs/panda-video.yaml`):
-`start → approve_script → approve_scene_plan → approve_stills → approve_motion_sample → approve_assets → approve_final → done`.
+**Gate sequence** (matches `pipeline_defs/panda-video.yaml` plus the launcher brand gate):
+`start → approve_script → approve_scene_plan → approve_stills → approve_motion_sample → approve_assets → approve_final → approve_brand → done`.
 `approve_stills`, `approve_motion_sample`, and `approve_assets` are pauses of the **same** `assets`
 stage (tell them apart by the `gate` field). `approve_motion_sample` (one hero clip, approve the
 motion before batching) appears only when the `motion_sample` option is on (**default**); it's
-skipped when off. Branding is **not** a gate — `POST /jobs/{id}/brand` after `done`.
+skipped when off. `approve_brand` is launcher-only (no engine stage, no Higgsfield): **approve**
+stamps BGC copies then `done`; **skip** finishes UGC; **revise** stays. Branding does not flow
+through animation. `POST /jobs/{id}/brand` remains for skip-then-brand-later.
 
 **`panda-carousel`:** `POST /jobs` with `"pipeline": "panda-carousel"`.
-`start → approve_script → approve_scene_plan → approve_stills → done`. Optional
-`options.gates: ["scene_plan", "stills"]` skips GATE 1. Then `/brand` for BGC stills.
+`start → approve_script → approve_scene_plan → approve_stills → approve_brand → done`. Optional
+`options.gates: ["scene_plan", "stills"]` skips GATE 1.
 
 **`panda-image`:** `POST /jobs` with `"pipeline": "panda-image"`.
-`start → approve_scene_plan → approve_stills → done` (no script). One PNG. Then `/brand`.
+`start → approve_scene_plan → approve_stills → approve_brand → done` (no script). One PNG.
 
 At `approve_script` and `approve_scene_plan`, the `script` and `scene_plan` come back **inline as
 structured JSON** inside the `/jobs/{id}` response (`artifacts.script` / `artifacts.scene_plan`) —
@@ -61,7 +63,7 @@ At the **assets** gate, every generated shot is reviewed together; revise specif
   artifact key/paths the panda-video skills emit (see `_mirror_artifacts`).
 
 ## Tests
-- `python dify_launcher/test_dify_flow.py` — full 5-gate handshake on the mock runner (real render)
+- `python dify_launcher/test_dify_flow.py` — full gate handshake on the mock runner (real render, including `approve_brand`)
 - `python dify_launcher/test_claude_adapter.py` — the claude runner's checkpoint adapter
   (gate mapping, artifact mirroring, sync, approval) against the real `lib/checkpoint`
 - [`CAROUSEL_DIFY.md`](CAROUSEL_DIFY.md) — **Dify team wiring guide** for the carousel (gate loop, field bindings, revise modes)
@@ -104,10 +106,10 @@ or `"panda-image"`.
 ## Connecting Dify
 Point Dify's HTTP/tool nodes at this service's base URL:
 1. **Start** → `POST /jobs` with the brief; show `question` + the inline `artifacts.script` (structured JSON — the dialogue is in `script.sections[].text`).
-2. On user approve/revise → `POST /jobs/{id}/respond`; repeat through `scene_plan → stills → motion_sample → assets → final` (`motion_sample` gate is on by default; set option `motion_sample:false` to skip it).
-3. Render the `final` artifact inline; on approve the job is `done`.
+2. On user approve/revise → `POST /jobs/{id}/respond`; repeat through `scene_plan → stills → motion_sample → assets → final → approve_brand` (`motion_sample` gate is on by default; set option `motion_sample:false` to skip it).
+3. At `approve_brand`, collect approve (stamp BGC copies), skip (UGC only), or revise (ask again). Do not treat the job as finished until then. Render `final` (and `branded_final` if approved).
 4. Fetch `GET /jobs/{id}/cost` (or the `cost_report.md` artifact) for the per-project credits/time report.
-5. Panda branding is a separate, on-demand `panda_brand` step applied only after final approval.
+5. After skip, optional `POST /jobs/{id}/brand` `{profile: bgc}` can still stamp later. UGC originals stay. Branding does not flow through animation.
 
 ## Raw render door (`/montage/*`)
 A second, independent entrance to the same vendored render core (compose / overlay / mix-audio),

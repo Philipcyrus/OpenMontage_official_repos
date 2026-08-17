@@ -37,6 +37,8 @@ assert run._gate_stage("budget_exceeded") == "assets"
 assert run._gate_stage("approve_assets") == "assets"
 assert run._gate_stage("approve_scene_plan") == "scene_plan"
 assert run._gate_stage("approve_script") == "script"
+assert run._gate_stage("approve_brand") == "brand"
+assert "approve_brand" in R.GATES
 assert R._STAGE_GATE["compose"] == "approve_final"
 assert R._STAGE_GATE["scene_plan"] == "approve_scene_plan"
 assert "assets" not in R._STAGE_GATE          # assets is phase-resolved, not a 1:1 map entry
@@ -183,12 +185,20 @@ assert st["status"] == "awaiting_human" and st["gate"] == "approve_scene_plan"
 _fake_latest.cp = {"stage": "compose", "status": "completed", "artifacts": {}}
 _fake_next.val = None
 st = run._sync({"job_id": "jX"})
-assert st["status"] == "done" and st["gate"] is None
+assert st["status"] == "awaiting_human" and st["gate"] == "approve_brand", st
+
+_fake_latest.cp = {"stage": "assets", "status": "completed", "artifacts": {}}
+st = run._sync({"job_id": "jC", "pipeline": "panda-carousel"})
+assert st["status"] == "awaiting_human" and st["gate"] == "approve_brand", st
+
+_fake_latest.cp = {"stage": "compose", "status": "completed", "artifacts": {}}
+st = run._sync({"job_id": "jX", "brand_resolved": "applied"})
+assert st["status"] == "done" and st["gate"] is None, st
 
 _fake_latest.cp = {"stage": "assets", "status": "failed", "artifacts": {}, "error": "boom"}
 st = run._sync({"job_id": "jX"})
 assert st["status"] == "failed" and st["question"] == "boom"
-print("[ok] _sync status mapping: awaiting_human / done / failed")
+print("[ok] _sync status mapping: awaiting_human / approve_brand / done / failed")
 
 # 4) _approve_stage writes completed + human_approved ----------------------
 captured = {}
@@ -205,6 +215,21 @@ mig = run.resume({"job_id": "jLegacy", "gate": "approve_storyboard", "artifacts"
                  {"decision": "approve"})
 assert mig["status"] == "failed" and "start a new job" in mig["question"].lower()
 print("[ok] legacy-gate resume returns migration message")
+
+# 5b) approve_brand is launcher-only — resume must not start Claude
+_agent_calls = []
+run._run_agent = lambda *a, **k: _agent_calls.append((a, k))  # type: ignore[method-assign]
+st_rev = run.resume(
+    {"job_id": "jB", "gate": "approve_brand", "status": "awaiting_human", "artifacts": {}},
+    {"decision": "revise", "answer": "not yet"})
+assert st_rev["gate"] == "approve_brand" and st_rev["status"] == "awaiting_human"
+st_skip = run.resume(
+    {"job_id": "jB", "gate": "approve_brand", "status": "awaiting_human", "artifacts": {}},
+    {"decision": "skip"})
+assert st_skip["status"] == "done" and st_skip.get("brand_resolved") == "skipped"
+assert st_skip["artifacts"].get("branded") is False
+assert not _agent_calls, _agent_calls
+print("[ok] approve_brand resume: no agent; revise stays; skip → done")
 
 # 6) carousel/image start prompts are stills-only; video prompt is unchanged --
 cv = run._start_prompt("jC", "6-slide carousel", {"aspect_ratio": "4:5"}, "panda-carousel")
