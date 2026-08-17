@@ -47,8 +47,8 @@ Related docs: [`DIFY_INTEGRATION.md`](DIFY_INTEGRATION.md) (full API), [`CAROUSE
 | `status` | Meaning | What the workflow does |
 |---|---|---|
 | `running` | engine is working | keep polling |
-| `awaiting_human` | a gate is open — read `gate` | display the artifact, collect approve/revise |
-| `done` | finished | show final stills; optionally offer branding (§7) |
+| `awaiting_human` | a gate is open — read `gate` | display the artifact, collect approve/revise (or skip at `approve_brand`) |
+| `done` | finished | show UGC stills and, if `branded`, the BGC copies |
 | `failed` | stopped with an error in `question` | surface the error |
 
 Every gate response has this shape:
@@ -77,7 +77,7 @@ POST /jobs
 - Carousel gate sequence (shorter than video — no motion/clips/audio):
 
   ```
-  approve_script → approve_scene_plan → approve_stills → done
+  approve_script → approve_scene_plan → approve_stills → approve_brand → done
   ```
 
 See §6 for the full `options` reference.
@@ -94,10 +94,11 @@ Branch on the `gate` field:
 |---|---|---|
 | `approve_script` | **`artifacts.script`** (inline JSON) **and/or** **`artifacts.preview`** | Slide/dialogue copy is `artifacts.script.sections[].text`. `preview` is `[…/script.md]` — fetch that file for the file-preview slot. |
 | `approve_scene_plan` | **`artifacts.scene_plan`** (inline JSON) **and/or** **`artifacts.preview`** | TEXT plan, no media yet. Carries **per-slide bilingual captions (zh + en)** and `metadata.aspect_ratio`. `preview` is `[…/scene_plan.md]` (this gate only). |
-| `approve_stills` | **`artifacts.preview`** (storyboard PNG) **and/or** **`artifacts.stills`** | `preview` is `[…/storyboard.png]` — a Backlot-style grid (still + shot description); fetch it for the file-preview slot. `stills` remains the per-shot PNG list for revise-by-shot. After `{decision:"revise", mode:"edit", shots:[n]}`, poll again — the storyboard PNG is rebuilt. `preview` is absent once stills are approved (`done` on carousel). |
+| `approve_stills` | **`artifacts.preview`** (storyboard PNG) **and/or** **`artifacts.stills`** | `preview` is `[…/storyboard.png]` — a Backlot-style grid (still + shot description); fetch it for the file-preview slot. `stills` remains the per-shot PNG list for revise-by-shot. After `{decision:"revise", mode:"edit", shots:[n]}`, poll again — the storyboard PNG is rebuilt. |
+| `approve_brand` | UGC stills again | Collect **approve** (stamp BGC copies), **skip** (keep UGC), or **revise** (ask again). Branding does not flow through animation. |
 | `budget_exceeded` | `question` (the credit warning) | Conditional — see §5. |
 
-**Rule of thumb:** at `approve_script` / `approve_scene_plan` render the inline JSON **or** fetch `artifacts.preview` (`script.md` / `scene_plan.md`). At `approve_stills` fetch `artifacts.preview` (`storyboard.png`) and/or each `artifacts.stills` file; after a shot revise, poll and show the rebuilt storyboard PNG. Only at the stills/later video gates do you fetch media files.
+**Rule of thumb:** at `approve_script` / `approve_scene_plan` render the inline JSON **or** fetch `artifacts.preview` (`script.md` / `scene_plan.md`). At `approve_stills` fetch `artifacts.preview` (`storyboard.png`) and/or each `artifacts.stills` file; after a shot revise, poll and show the rebuilt storyboard PNG. At `approve_brand` collect approve/skip/revise. Only at stills/brand/later video gates do you fetch media files.
 
 ---
 
@@ -109,7 +110,16 @@ Endpoint: `POST /jobs/{id}/respond`. Then go back to polling.
 ```json
 { "decision": "approve" }
 ```
-Approving `approve_stills` **finishes the carousel** (`status` becomes `done`).
+Approving `approve_stills` opens **`approve_brand`** (not `done`). At that gate:
+
+```json
+{ "decision": "approve" }   // stamp BGC copies, then done
+{ "decision": "skip" }      // done with UGC only
+{ "decision": "revise" }    // stay at approve_brand; UGC unchanged
+```
+
+`skip` is **only** valid at `approve_brand` — other gates return `400`. Dify must collect this
+choice before treating the carousel as finished.
 
 ### Revise TEXT (script or scene_plan)
 ```json
@@ -160,18 +170,21 @@ Aspect-ratio placeholder sizes and the full option semantics are in [`CAROUSEL.m
 
 ---
 
-## 7. After `done` — optional branding
+## 7. Branding — `approve_brand`, then optional `/brand`
 
-Branding is **not** a gate. Once `status == "done"`, if the user wants the branded (BGC) version
-with the Panda wordmark stamped onto the slides:
+Branding is a **launcher gate** after stills (not an engine stage, not Higgsfield). Show the UGC
+stills and collect approve / skip / revise as in §5.
+
+`POST /jobs/{id}/brand` remains for jobs already `done` (skip-then-brand-later):
 ```json
 POST /jobs/{id}/brand
 { "profile": "bgc" }
 ```
-- Only `bgc` is implemented.
+- Only `bgc` is implemented. `409` if `gate` is still `approve_brand` — use `/respond` instead.
 - The original UGC stills in `artifacts.stills` are left untouched; branded copies are written and
   listed under **`artifacts.branded_stills`** (fetch via `/artifacts/{name}`).
 - Idempotent — safe to call more than once.
+- Branding does not flow through animation.
 
 ---
 
@@ -181,8 +194,8 @@ POST /jobs/{id}/brand
 |---|---|---|
 | `POST` | `/jobs` | start a carousel job (`pipeline: "panda-carousel"`) → first gate |
 | `GET`  | `/jobs/{id}` | poll: `{ status, stage, gate, question, artifacts }` |
-| `POST` | `/jobs/{id}/respond` | `{ decision: approve\|revise, … }` → resume to next gate |
-| `POST` | `/jobs/{id}/brand` | `{ profile: "bgc" }` — brand approved stills (job must be `done`) |
+| `POST` | `/jobs/{id}/respond` | `{ decision: approve\|revise\|skip, … }` → resume (`skip` only at `approve_brand`) |
+| `POST` | `/jobs/{id}/brand` | `{ profile: "bgc" }` — brand approved stills (job must already be `done`) |
 | `GET`  | `/jobs/{id}/artifacts/{name}` | download a **media** file (a still / branded still) |
 | `GET`  | `/jobs/{id}/cost` | per-job Higgsfield credits + time report |
 
@@ -193,8 +206,8 @@ POST /jobs/{id}/brand
 Both are fine — (a) is simpler to reason about:
 
 - **(a) A second workflow** cloned from the video one, with `pipeline` hardcoded to
-  `panda-carousel` and the motion/audio gates removed (carousel only has 3 gates + the conditional
-  `budget_exceeded`).
+  `panda-carousel` and the motion/audio gates removed (carousel has script / scene_plan / stills /
+  `approve_brand`, plus the conditional `budget_exceeded`).
 - **(b) A toggle** in the existing workflow that sets the `pipeline` field and collapses the gate
   loop to the carousel gates.
 
@@ -216,9 +229,9 @@ curl -s localhost:8501/jobs/$CID | python -m json.tool     # look for gate + art
 curl -s -X POST localhost:8501/jobs/$CID/respond -H 'Content-Type: application/json' \
   -d '{"decision":"approve"}'
 
-# …repeat poll+respond for approve_scene_plan, then approve_stills → done
+# …repeat poll+respond for approve_scene_plan, then approve_stills → approve_brand
 
-# 4. (optional) brand the approved stills
-curl -s -X POST localhost:8501/jobs/$CID/brand -H 'Content-Type: application/json' \
-  -d '{"profile":"bgc"}'
+# 4. branding choice (approve stamps, skip keeps UGC, revise stays)
+curl -s -X POST localhost:8501/jobs/$CID/respond -H 'Content-Type: application/json' \
+  -d '{"decision":"skip"}'
 ```

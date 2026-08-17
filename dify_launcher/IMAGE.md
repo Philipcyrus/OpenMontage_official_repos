@@ -15,11 +15,13 @@ Full API: [`DIFY_INTEGRATION.md`](DIFY_INTEGRATION.md). Carousel sibling: [`CARO
 POST /jobs  { "pipeline": "panda-image", "brief": "…", "options": { … } }
    → approve_scene_plan      TEXT plan: exactly 1 scene; no media yet
    → approve_stills          one PNG (UGC)
+   → approve_brand           approve stamps a BGC copy; skip keeps UGC; revise stays
    → done
-POST /jobs/{id}/brand  { "profile": "bgc" }   # optional wordmark copy
 ```
 
-The still stays UGC. Branding is the later `/brand` pass, not baked into generation.
+The still stays UGC. Branding is a launcher overlay at `approve_brand` (not baked into
+generation, does not flow through animation). `POST /jobs/{id}/brand` remains for
+skip-then-brand-later (job already `done`).
 
 ---
 
@@ -106,7 +108,9 @@ Isolated Claude launcher on **:8600** (`DIFY_DATA_DIR=data/image-claude`,
 `pipeline: panda-image`, `aspect_ratio: 1:1`, `language: zh`, `max_higgsfield_credits: 20`.
 
 Gates: `approve_scene_plan` (exactly 1 scene, bilingual captions, no media) → generate one
-still → `mode=edit` `shots:[1]` → `mode=fresh` `shots:[1]` → approve → `done` → `POST /brand`.
+still → `mode=edit` `shots:[1]` → `mode=fresh` `shots:[1]` → approve → `approve_brand` →
+`done` (this recorded run used `POST /brand` after `done`; current Dify flow collects the
+branding choice at `approve_brand`).
 
 | | |
 |---|---|
