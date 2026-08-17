@@ -94,11 +94,11 @@ Branch on the `gate` field:
 |---|---|---|
 | `approve_script` | **`artifacts.script`** (inline JSON) **and/or** **`artifacts.preview`** | Slide/dialogue copy is `artifacts.script.sections[].text`. `preview` is `[…/script.md]` — fetch that file for the file-preview slot. |
 | `approve_scene_plan` | **`artifacts.scene_plan`** (inline JSON) **and/or** **`artifacts.preview`** | TEXT plan, no media yet. Carries **per-slide bilingual captions (zh + en)** and `metadata.aspect_ratio`. `preview` is `[…/scene_plan.md]` (this gate only). |
-| `approve_stills` | **`artifacts.preview`** (storyboard PNG) **and/or** **`artifacts.stills`** | `preview` is `[…/storyboard.png]` — a Backlot-style grid (still + shot description); fetch it for the file-preview slot. `stills` remains the per-shot PNG list for revise-by-shot. After `{decision:"revise", mode:"edit", shots:[n]}`, poll again — the storyboard PNG is rebuilt. |
+| `approve_stills` | **`artifacts.stills`** (the individual images) | Fetch each via `GET /jobs/{id}/artifacts/{name}` and show them. `stills` is the per-shot PNG list — revise a shot with `{decision:"revise", mode:"edit", shots:[n]}`, then poll again. No combined contact sheet. |
 | `approve_brand` | UGC stills again | Collect **approve** (stamp BGC copies), **skip** (keep UGC), or **revise** (ask again). Branding does not flow through animation. |
 | `budget_exceeded` | `question` (the credit warning) | Conditional — see §5. |
 
-**Rule of thumb:** at `approve_script` / `approve_scene_plan` render the inline JSON **or** fetch `artifacts.preview` (`script.md` / `scene_plan.md`). At `approve_stills` fetch `artifacts.preview` (`storyboard.png`) and/or each `artifacts.stills` file; after a shot revise, poll and show the rebuilt storyboard PNG. At `approve_brand` collect approve/skip/revise. Only at stills/brand/later video gates do you fetch media files.
+**Rule of thumb:** at `approve_script` / `approve_scene_plan` render the inline JSON **or** fetch `artifacts.preview` (`script.md` / `scene_plan.md`). At `approve_stills` fetch each `artifacts.stills` file (individual images — there is no combined preview). At `approve_brand` collect approve/skip/revise.
 
 ---
 

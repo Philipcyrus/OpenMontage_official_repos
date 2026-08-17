@@ -83,7 +83,7 @@ def _public(state: dict[str, Any]) -> dict[str, Any]:
     arts = state.get("artifacts", {})
     links: dict[str, Any] = {}
     for key, val in arts.items():
-        if isinstance(val, str) and val.endswith((".md", ".html", ".png", ".jpg", ".mp4")):
+        if isinstance(val, str) and val.endswith((".md", ".png", ".jpg", ".mp4")):
             links[key] = f"/jobs/{job_id}/artifacts/{val}"
         elif isinstance(val, list):
             links[key] = [f"/jobs/{job_id}/artifacts/{v}" for v in val]

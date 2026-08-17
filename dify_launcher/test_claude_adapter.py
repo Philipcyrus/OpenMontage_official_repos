@@ -225,7 +225,7 @@ assert isinstance(st["artifacts"].get("scene_plan"), dict)
 assert st["artifacts"].get("preview") == ["scene_plan.md"]
 assert st["artifacts"]["preview"] != ["script.md"]
 print("[ok] _sync dual-surface: inline JSON + gate-specific preview .md")
-# 3b) _sync at stills writes storyboard.png into preview, not into stills
+# 3b) _sync at stills surfaces individual stills, NO contact sheet (storyboard removed)
 from PIL import Image as _Image
 JOBSB = "jPreviewStills"
 projsb = run._projects_dir / JOBSB
@@ -233,6 +233,7 @@ projsb = run._projects_dir / JOBSB
 (projsb / "artifacts").mkdir(parents=True, exist_ok=True)
 _Image.new("RGB", (80, 120), (11, 11, 11)).save(projsb / "assets" / "images" / "still_0.png")
 _Image.new("RGB", (80, 120), (253, 197, 13)).save(projsb / "assets" / "images" / "still_1.png")
+# a stray storyboard.png (e.g. from an older job) must be filtered out of stills, not surfaced
 (projsb / "assets" / "images" / "storyboard.png").write_bytes(b"\x89PNG\r\nNOTBOARD")
 _sp = {"version": "1.0", "scenes": [
     {"id": "sc1", "description": "Wave", "start_seconds": 0, "end_seconds": 3,
@@ -245,13 +246,12 @@ _fake_latest.cp = {"stage": "assets", "status": "awaiting_human",
                    "artifacts": {"scene_plan": _sp}}
 st = run._sync({"job_id": JOBSB})
 assert st["gate"] == "approve_stills"
-assert st["artifacts"].get("preview") == ["storyboard.png"]
-assert "storyboard.png" not in (st["artifacts"].get("stills") or [])
-assert store.artifact_path(JOBSB, "storyboard.png").is_file()
-assert store.artifact_path(JOBSB, "storyboard.html").is_file()
-html_sb = store.artifact_path(JOBSB, "storyboard.html").read_text(encoding="utf-8")
-assert "SC 01" in html_sb and "Wave" in html_sb
-print("[ok] _sync stills dual-surface: storyboard.png preview, not listed as a still")
+assert "preview" not in st["artifacts"], "stills gate must not carry a contact sheet preview"
+_sb_stills = st["artifacts"].get("stills") or []
+assert "still_0.png" in _sb_stills and "still_1.png" in _sb_stills, _sb_stills
+assert "storyboard.png" not in _sb_stills, "stray storyboard.png must be filtered out of stills"
+assert not store.artifact_path(JOBSB, "storyboard.html").is_file(), "no storyboard.html should be written"
+print("[ok] _sync stills: individual stills surfaced, no contact sheet, stray storyboard filtered")
 
 
 # 4) _approve_stage writes completed + human_approved ----------------------
