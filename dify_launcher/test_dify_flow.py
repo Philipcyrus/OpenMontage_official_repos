@@ -67,9 +67,15 @@ b = _step("POST /jobs", c.post("/jobs", json={
 }), want_gate="approve_script", want_status="awaiting_human")
 job = b["job_id"]
 
-# script artifact is fetchable (as Dify would show it)
-sc = c.get(b["artifacts"]["script"])
-assert sc.status_code == 200 and "Brief" in sc.text, "script artifact not served"
+# script is inline JSON; markdown preview is a fetchable file URL
+sc_obj = b["artifacts"].get("script")
+assert isinstance(sc_obj, dict) and sc_obj.get("sections"), "script gate must return inline JSON"
+validate_artifact("script", sc_obj)
+assert sc_obj["sections"][0]["text"]
+assert b["artifacts"].get("script_md") == f"/jobs/{job}/artifacts/script.md"
+assert b["artifacts"].get("preview") == [f"/jobs/{job}/artifacts/script.md"]
+sc = c.get(b["artifacts"]["script_md"])
+assert sc.status_code == 200 and "Open on the Panda mascot." in sc.text, "script.md not served"
 print("   script preview:", sc.text.splitlines()[0])
 
 # 2) approve script -> GATE 2 (approve_scene_plan): a TEXT plan, NO media -----------------
@@ -79,6 +85,11 @@ sp = b["artifacts"].get("scene_plan")
 # (e) Dify receives TEXT at the scene_plan gate: an inline structured plan
 assert isinstance(sp, dict) and sp.get("scenes"), "scene_plan gate must return a text scene list"
 validate_artifact("scene_plan", sp)                            # (a/d) schema-valid scene_plan
+assert b["artifacts"].get("scene_plan_md") == f"/jobs/{job}/artifacts/scene_plan.md"
+assert b["artifacts"].get("preview") == [f"/jobs/{job}/artifacts/scene_plan.md"], \
+    "scene_plan preview must be THIS gate's .md only"
+sp_md = c.get(b["artifacts"]["scene_plan_md"])
+assert sp_md.status_code == 200 and sp["scenes"][0]["id"] in sp_md.text
 # (b) the scene_plan gate is reached & approvable WITHOUT stills
 assert "stills" not in b["artifacts"], "scene_plan gate must not carry stills"
 assert "clips" not in b["artifacts"], "scene_plan gate must not carry clips"
@@ -98,6 +109,7 @@ b = _step("respond approve (scene_plan)", c.post(f"/jobs/{job}/respond", json={"
           want_gate="approve_stills", want_status="awaiting_human")
 stills = b["artifacts"].get("stills")
 assert stills and len(stills) == 3, f"expected 3 stills at the stills gate, got {stills}"
+assert "preview" not in b["artifacts"], "stills gate must not keep the text-gate preview list"
 # COST GATE: no clips, no manifest, and NO video files exist on disk yet
 assert "clips" not in b["artifacts"], "stills gate must NOT carry clips"
 assert "asset_manifest" not in b["artifacts"], "stills gate must NOT carry an asset_manifest"
@@ -240,12 +252,15 @@ b4 = _step("POST /jobs (panda-carousel)", c.post("/jobs", json={
 }), want_gate="approve_script", want_status="awaiting_human")
 assert b4.get("pipeline") == "panda-carousel"
 job4 = b4["job_id"]
+assert isinstance(b4["artifacts"].get("script"), dict)
+assert b4["artifacts"].get("preview") == [f"/jobs/{job4}/artifacts/script.md"]
 c.post(f"/jobs/{job4}/respond", json={"decision": "approve"})            # -> scene_plan
 b4 = _step("carousel scene_plan", c.get(f"/jobs/{job4}"),
            want_gate="approve_scene_plan", want_status="awaiting_human")
 sp4 = b4["artifacts"].get("scene_plan")
 assert isinstance(sp4, dict) and sp4.get("scenes")
 validate_artifact("scene_plan", sp4)
+assert b4["artifacts"].get("preview") == [f"/jobs/{job4}/artifacts/scene_plan.md"]
 assert all(s.get("captions", {}).get("zh") and s.get("captions", {}).get("en")
            for s in sp4["scenes"]), "carousel scene_plan must carry bilingual captions"
 assert "stills" not in b4["artifacts"]
@@ -334,6 +349,7 @@ job7 = b7["job_id"]
 sp7 = b7["artifacts"].get("scene_plan")
 assert isinstance(sp7, dict) and len(sp7.get("scenes") or []) == 1, "image plan is exactly 1 scene"
 validate_artifact("scene_plan", sp7)
+assert b7["artifacts"].get("preview") == [f"/jobs/{job7}/artifacts/scene_plan.md"]
 assert "script" not in b7["artifacts"]
 assert "stills" not in b7["artifacts"]
 c.post(f"/jobs/{job7}/respond", json={"decision": "approve"})
