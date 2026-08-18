@@ -320,7 +320,8 @@ Returned under `artifacts` in every state; grouped by kind:
 | `scene_plan_md` | relative URL to `scene_plan.md` | at the scene_plan gate (and later, if the plan is still on the job) |
 | `preview` | list of **one** relative URL — the current text gate’s `.md` | **`approve_script`** → `script.md`; **`approve_scene_plan`** → `scene_plan.md`. Absent at stills/clips/final. Bind this for Dify’s file-preview slot. |
 | `stills` | list of image paths | at the **stills** gate (UGC originals; kept after `/brand`) |
-| `preview` | list of **one** relative URL | at text gates → `script.md` (approve_script) / `scene_plan.md` (approve_scene_plan). Absent at media/brand gates. Bind Dify’s file-preview slot here. |
+| `preview` | list of **one** relative URL | at **`approve_stills`** → `storyboard.png` (shot grid + descriptions). Absent at later gates. Bind Dify’s file-preview slot here. After a per-shot revise, poll again — the PNG is rebuilt. |
+| `storyboard_html` | relative URL to `storyboard.html` | same grid as HTML (sibling still filenames). |
 | `branded_stills` | list of image paths | after `approve_brand` approve, or later `POST /jobs/{id}/brand` (BGC wordmark copies) |
 | `clips` | list of video paths | at the **assets** gate (video pipeline) |
 | `asset_manifest` | **inline JSON object** (all generated media: `path`+`scene_id` per asset) | at the **assets** / carousel stills-terminal gate |
@@ -333,7 +334,7 @@ Structured artifacts (`script`, `scene_plan`, `asset_manifest`) come as **inline
 
 **Dual-surface at text gates:** the same content is also written as `script.md` / `scene_plan.md`. `artifacts.preview` is a one-item list of that file’s URL for the **current** gate (`approve_script` → script.md, `approve_scene_plan` → scene_plan.md). Bind Dify’s file-preview node to `artifacts.preview` (or `script_md` / `scene_plan_md`) so the chat does not show “the engine sent no preview.” Do **not** put these `.md` files in `stills`.
 
-File artifacts (`stills`, `clips`, `final`) come as **relative URLs** — fetch with `GET /jobs/{id}/artifacts/{basename}` (prepend the base URL). At **`approve_stills`** show the individual `stills` (revise a shot with `{decision:"revise","shots":[n]}`, then poll again) — there is no combined contact sheet. Show `stills`/`clips` at the assets gate; show `final` at the final gate.
+File artifacts (`stills`, `clips`, `final`) come as **relative URLs** — fetch with `GET /jobs/{id}/artifacts/{basename}` (prepend the base URL). At **`approve_stills`**, `artifacts.preview` is `[…/storyboard.png]` (a Backlot-style shot grid with descriptions) — bind the file-preview slot to it. After `{decision:"revise","shots":[n]}`, poll again; the PNG is rebuilt. `preview` is dropped at later gates. Show `stills`/`clips` at the assets gate; show `final` at the final gate.
 
 ---
 

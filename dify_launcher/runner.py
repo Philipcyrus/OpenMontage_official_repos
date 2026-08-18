@@ -36,13 +36,9 @@ from pathlib import Path
 from typing import Any, Optional
 
 from dify_launcher import store
+from dify_launcher.storyboard_preview import apply_storyboard_preview, is_storyboard_name
 
 _ENGINE_ROOT = Path(__file__).resolve().parents[1]
-
-
-def _is_storyboard_name(name: Any) -> bool:
-    """Defensive: treat any 'storyboard' artifact (e.g. left over from an old job) as not a scene still."""
-    return "storyboard" in Path(str(name)).name.lower()
 
 # ordered human-approval gates. Note: approve_stills + approve_motion_sample + approve_assets are
 # pauses of the SINGLE `assets` stage (stills cost gate, motion-sample cost gate, then full media)
@@ -318,21 +314,25 @@ def _write_text_previews(job_id: str, arts: dict[str, Any],
 
 def _apply_previews(job_id: str, arts: dict[str, Any],
                     gate: Optional[str] = None) -> dict[str, Any]:
-    """Resolve the single Dify `preview` slot for the current gate.
+    """Unified preview resolver for the single Dify `preview` slot.
 
-    Dual-surfaces the text .md copies (script.md / scene_plan.md) and picks ONE preview:
-    script.md at approve_script, scene_plan.md at approve_scene_plan, and nothing at any
-    other gate. The stills gate surfaces the individual images via artifacts.stills (no
-    combined contact sheet). Inline JSON on artifacts.script / artifacts.scene_plan is left
-    untouched (a structured dict still wins over a stray .md).
+    Dual-surfaces the text .md copies (script.md / scene_plan.md) and, at the stills
+    gate, the storyboard composite — then picks ONE preview for the current gate:
+    script.md at approve_script, scene_plan.md at approve_scene_plan, the storyboard
+    at approve_stills, and nothing at any other gate. Inline JSON on artifacts.script /
+    artifacts.scene_plan is left untouched (a structured dict still wins over a stray .md).
     """
     # Always write the .md copies (so downloads exist); no preview set here.
     _write_text_previews(job_id, arts, None)
+    # Storyboard writes its files + preview only at approve_stills; drops preview otherwise.
+    apply_storyboard_preview(job_id, arts,
+                             "approve_stills" if gate == "approve_stills" else None)
+    # Text gates own the preview slot over the (now-cleared) storyboard default.
     if gate == "approve_script" and arts.get("script_md"):
         arts["preview"] = ["script.md"]
     elif gate == "approve_scene_plan" and arts.get("scene_plan_md"):
         arts["preview"] = ["scene_plan.md"]
-    else:
+    elif gate != "approve_stills":
         arts.pop("preview", None)
     return arts
 
@@ -1229,12 +1229,12 @@ class ClaudeCodeRunner(Runner):
                     found += _paths_in(vv)
             return found
 
-        # Defensive: a stray contact-sheet / storyboard image (e.g. from an older job) is not a
-        # scene still — keep it out of stills. Archived revise leftovers (history/superseded-stills,
-        # *.pre-*) must not surface as live stills or get /brand stamped.
+        # a storyboard contact sheet is a review aid, not a scene still — keep it out of stills.
+        # Archived revise leftovers (history/superseded-stills, *.pre-*) must not surface as
+        # live stills or get /brand stamped.
         imgs = [p for p in _scan(proj / "assets" / "images", (".png", ".jpg", ".jpeg"))
                 if "contact" not in p.name.lower() and "sheet" not in p.name.lower()
-                and not _is_storyboard_name(p.name)
+                and not is_storyboard_name(p.name)
                 and not _is_superseded_still(p)]
         vids = _scan(proj / "assets" / "video", (".mp4", ".mov", ".webm"))
         renders = _scan(proj / "renders", (".mp4", ".mov"))
@@ -1242,7 +1242,7 @@ class ClaudeCodeRunner(Runner):
         for p in _paths_in(artifacts):
             ext = p.suffix.lower()
             if (ext in (".png", ".jpg", ".jpeg") and p not in imgs and not _is_superseded_still(p)
-                    and not _is_storyboard_name(p.name)):
+                    and not is_storyboard_name(p.name)):
                 imgs.append(p)
             elif ext in (".mp4", ".mov", ".webm"):
                 if p.parent.name == "renders" or "final" in p.name.lower():
@@ -1251,7 +1251,7 @@ class ClaudeCodeRunner(Runner):
                 elif p not in vids:
                     vids.append(p)
 
-        stills = [n for n in (_copy(p) for p in imgs) if n and not _is_storyboard_name(n)]
+        stills = [n for n in (_copy(p) for p in imgs) if n and not is_storyboard_name(n)]
         clips = [n for n in (_copy(p) for p in vids) if n]
         final = None
         if renders:
@@ -1274,7 +1274,7 @@ class ClaudeCodeRunner(Runner):
                     val = None
             if isinstance(val, dict):
                 out[aname] = val
-        # stills checkpoint often omits scene_plan; reload it so it stays available for context
+        # stills checkpoint often omits scene_plan; keep it for the storyboard join
         if "scene_plan" not in out:
             sp_cp = proj / "checkpoint_scene_plan.json"
             try:
