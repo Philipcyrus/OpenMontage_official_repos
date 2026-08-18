@@ -1106,6 +1106,7 @@ class ClaudeCodeRunner(Runner):
                     [self._bin, "-p", prompt, *self._extra],
                     cwd=str(_ENGINE_ROOT), capture_output=True, text=True, timeout=self._timeout,
                 )
+                self._write_agent_log(job_id, label, i, proc)
                 if proc.returncode == 0:
                     return
                 last = (proc.stderr or proc.stdout or "").strip()
@@ -1118,6 +1119,30 @@ class ClaudeCodeRunner(Runner):
             raise RuntimeError("claude failed: " + " | ".join(tail))
         finally:
             self._record_timing(job_id, label, round(time.monotonic() - started, 2))
+
+    def _write_agent_log(self, job_id: str, label: str, attempt: int, proc: Any) -> None:
+        """Persist an agent leg's stdout/stderr to projects/{job}/artifacts/agent_{label}.log.
+
+        The agent's output is otherwise discarded on a clean (rc=0) exit, so a leg that runs but
+        writes no checkpoint ("agent produced no checkpoint") leaves no trace of WHY. This keeps
+        the full transcript per stage for post-hoc debugging. Behaviour-neutral; never raises.
+        """
+        if not job_id:
+            return
+        try:
+            adir = self._projects_dir / job_id / "artifacts"
+            adir.mkdir(parents=True, exist_ok=True)
+            with open(adir / f"agent_{label or 'leg'}.log", "a", encoding="utf-8") as f:
+                f.write(f"\n===== attempt {attempt} rc={getattr(proc, 'returncode', '?')} =====\n")
+                out = getattr(proc, "stdout", "") or ""
+                err = getattr(proc, "stderr", "") or ""
+                if out:
+                    f.write("--- stdout ---\n" + out)
+                if err:
+                    f.write("\n--- stderr ---\n" + err)
+                f.write("\n")
+        except OSError:
+            pass
 
     def _record_timing(self, job_id: str, label: str, seconds: float) -> None:
         """Append one leg's wall-time to projects/{job}/artifacts/timing.jsonl. Never raises."""
