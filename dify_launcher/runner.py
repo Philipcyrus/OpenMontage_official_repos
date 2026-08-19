@@ -982,6 +982,12 @@ class ClaudeCodeRunner(Runner):
         self._bin = os.environ.get("CLAUDE_BIN", "claude")
         self._extra = os.environ.get("CLAUDE_EXTRA_ARGS", "").split()
         self._timeout = int(os.environ.get("CLAUDE_TIMEOUT_S", "3600"))
+        # OPTIONAL (default off): reuse ONE Claude Code session across a job's legs via
+        # `--resume <session_id>` so later legs keep the first leg's context (guide/skills/config
+        # already read) instead of cold-starting each time. Information-preserving — the agent
+        # still reads everything once; it just doesn't re-read it every leg. A/B with the flag.
+        self._session_reuse = os.environ.get("CLAUDE_SESSION_REUSE", "").lower() \
+            in ("1", "true", "yes", "on")
 
     # -- lifecycle ----------------------------------------------------------
     def start(self, state: dict[str, Any]) -> dict[str, Any]:
@@ -1102,12 +1108,15 @@ class ClaudeCodeRunner(Runner):
         started = time.monotonic()
         try:
             for i in range(attempts):
+                cmd = self._build_cmd(prompt, job_id)
                 proc = subprocess.run(
-                    [self._bin, "-p", prompt, *self._extra],
+                    cmd,
                     cwd=str(_ENGINE_ROOT), capture_output=True, text=True, timeout=self._timeout,
                 )
                 self._write_agent_log(job_id, label, i, proc)
                 if proc.returncode == 0:
+                    if self._session_reuse:
+                        self._capture_session(job_id, proc.stdout)
                     return
                 last = (proc.stderr or proc.stdout or "").strip()
                 low = last.lower()
@@ -1119,6 +1128,43 @@ class ClaudeCodeRunner(Runner):
             raise RuntimeError("claude failed: " + " | ".join(tail))
         finally:
             self._record_timing(job_id, label, round(time.monotonic() - started, 2))
+
+    # -- session reuse (opt-in) --------------------------------------------
+    def _session_file(self, job_id: str) -> Path:
+        return self._projects_dir / job_id / ".claude_session_id"
+
+    def _read_session(self, job_id: str) -> Optional[str]:
+        try:
+            sid = self._session_file(job_id).read_text(encoding="utf-8").strip()
+            return sid or None
+        except OSError:
+            return None
+
+    def _capture_session(self, job_id: str, stdout: str) -> None:
+        """Parse the session_id from a `--output-format json` run and persist it. Never raises."""
+        if not job_id or not stdout:
+            return
+        try:
+            sid = (json.loads(stdout) or {}).get("session_id")
+            if sid:
+                f = self._session_file(job_id)
+                f.parent.mkdir(parents=True, exist_ok=True)
+                f.write_text(str(sid), encoding="utf-8")
+        except (ValueError, OSError):
+            pass  # not fatal — next leg just cold-starts
+
+    def _build_cmd(self, prompt: str, job_id: str) -> list[str]:
+        """The `claude` argv for one leg. Default: cold `claude -p <prompt> <extra>` (unchanged).
+        With CLAUDE_SESSION_REUSE on: add `--output-format json` (to capture the session id) and,
+        once a session exists for this job, `--resume <id>` so the leg keeps prior-leg context.
+        """
+        if not self._session_reuse:
+            return [self._bin, "-p", prompt, *self._extra]
+        cmd = [self._bin, "-p", prompt, "--output-format", "json", *self._extra]
+        sid = self._read_session(job_id) if job_id else None
+        if sid:
+            cmd += ["--resume", sid]
+        return cmd
 
     def _write_agent_log(self, job_id: str, label: str, attempt: int, proc: Any) -> None:
         """Persist an agent leg's stdout/stderr to projects/{job}/artifacts/agent_{label}.log.
