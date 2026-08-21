@@ -1449,6 +1449,14 @@ class ClaudeCodeRunner(Runner):
             "order. At every stage whose manifest sets human_approval_default: true, write the "
             "checkpoint with status='awaiting_human' and STOP (end your turn) — do NOT "
             "self-approve.\n"
+            "STAGES & SKILLS (read each stage's director skill when you reach it): idea -> "
+            "skills/pipelines/panda-video/idea-director.md (internal, no gate); script -> "
+            "skills/pipelines/hybrid/script-director.md (GATE 1); scene_plan -> "
+            "skills/pipelines/panda-video/scene-plan-director.md (GATE 2); assets -> "
+            "skills/pipelines/panda-video/asset-director.md (GATES 3/3.5/4); edit -> "
+            "skills/pipelines/hybrid/edit-director.md (no gate); compose -> "
+            "skills/pipelines/panda-video/compose-director.md (GATE 5). This start leg runs idea "
+            "then script and STOPS at GATE 1.\n"
             "PIPELINE SHAPE: the `scene_plan` stage produces ONLY a structured TEXT plan — NO "
             "media, NO generation tools. The `assets` stage then runs in human-reviewed phases "
             "(cost gates):\n"
@@ -1487,10 +1495,13 @@ class ClaudeCodeRunner(Runner):
             "Element IDs — the panda Element for every panda slide, the customer Element for the "
             "customer. Never invent a new panda. Look: styles/panda.yaml.\n"
             f"{budget_line}\n{script_line}\n\n"
-            "Follow AGENT_GUIDE.md, pipeline_defs/panda-carousel.yaml, and "
-            "skills/pipelines/panda-carousel/*-director.md. Execute stages in order.\n"
-            "PIPELINE SHAPE: idea (internal, no gate) → script (GATE 1) → scene_plan TEXT "
-            "(GATE 2) → assets STILLS ONLY (GATE 3) → DONE.\n"
+            "Follow AGENT_GUIDE.md and pipeline_defs/panda-carousel.yaml. Execute stages in "
+            "order; read each stage's director skill when you reach it.\n"
+            "PIPELINE SHAPE: idea → skills/pipelines/panda-carousel/idea-director.md (internal, "
+            "no gate) → script → skills/pipelines/panda-carousel/script-director.md (GATE 1) → "
+            "scene_plan TEXT → skills/pipelines/panda-carousel/scene-plan-director.md (GATE 2) → "
+            "assets STILLS ONLY → skills/pipelines/panda-carousel/asset-director.md (GATE 3, "
+            "TERMINAL) → DONE.\n"
             "  - scene_plan: one scene per slide, bilingual captions.zh/en, required_assets are "
             "images only. Set metadata.aspect_ratio to the job option "
             f"'{ratio}' (caller-set; default 4:5). Pass that same ratio to generate_image.\n"
@@ -1525,10 +1536,12 @@ class ClaudeCodeRunner(Runner):
             "Element IDs — the panda Element for every panda shot, the customer Element for the "
             "customer. Never invent a new panda. Look: styles/panda.yaml.\n"
             f"{budget_line}\n\n"
-            "Follow AGENT_GUIDE.md, pipeline_defs/panda-image.yaml, and "
-            "skills/pipelines/panda-image/*-director.md. Execute stages in order.\n"
-            "PIPELINE SHAPE: idea (internal, no gate) → scene_plan TEXT (GATE 1) → "
-            "assets ONE STILL (GATE 2) → DONE. There is NO script stage.\n"
+            "Follow AGENT_GUIDE.md and pipeline_defs/panda-image.yaml. Execute stages in order; "
+            "read each stage's director skill when you reach it.\n"
+            "PIPELINE SHAPE: idea → skills/pipelines/panda-image/idea-director.md (internal, no "
+            "gate) → scene_plan TEXT → skills/pipelines/panda-image/scene-plan-director.md "
+            "(GATE 1) → assets ONE STILL → skills/pipelines/panda-image/asset-director.md "
+            "(GATE 2, TERMINAL) → DONE. There is NO script stage.\n"
             "  - scene_plan: exactly ONE scene, bilingual captions.zh/en, required_assets is "
             "one image only. Set metadata.aspect_ratio to the job option "
             f"'{ratio}' (caller-set; default 1:1). Pass that same ratio to generate_image.\n"
@@ -1544,7 +1557,8 @@ class ClaudeCodeRunner(Runner):
     def _assets_phases_text(self, motion_sample: bool) -> str:
         stills = (
             "  PHASE 1 (stills): generate ONLY the stills — one per scene — via the Higgsfield "
-            "MCP bridge (skills/meta/higgsfield-mcp-bridge.md), then write the assets checkpoint "
+            "MCP bridge (skills/meta/higgsfield-mcp-bridge.md), following "
+            "skills/pipelines/panda-video/asset-director.md, then write the assets checkpoint "
             "with status='awaiting_human' AND partial_progress={\"phase\":\"stills\"} and STOP. "
             "Do NOT generate any video yet.\n")
         if motion_sample:
@@ -1571,20 +1585,37 @@ class ClaudeCodeRunner(Runner):
         if p == "panda-carousel":
             extra = (" This is a stills-only carousel — do NOT generate video, TTS, music, or "
                      "compose. After stills the pipeline is complete.")
+            skills_line = ("Read the director skill for the stage you resume: scene_plan -> "
+                           "skills/pipelines/panda-carousel/scene-plan-director.md (GATE 2); "
+                           "assets -> skills/pipelines/panda-carousel/asset-director.md "
+                           "(GATE 3 stills, TERMINAL).")
         elif p == "panda-image":
             extra = (" This is a SINGLE still — do NOT generate video, TTS, music, or compose. "
                      "There is no script stage. After the one still the pipeline is complete.")
+            skills_line = ("Read the director skill for the stage you resume: scene_plan -> "
+                           "skills/pipelines/panda-image/scene-plan-director.md (GATE 1); "
+                           "assets -> skills/pipelines/panda-image/asset-director.md "
+                           "(GATE 2 one still, TERMINAL).")
+        else:
+            skills_line = ("Read the director skill for the stage you resume: script -> "
+                           "skills/pipelines/hybrid/script-director.md (GATE 1); scene_plan -> "
+                           "skills/pipelines/panda-video/scene-plan-director.md (GATE 2); assets "
+                           "-> skills/pipelines/panda-video/asset-director.md (GATES 3/3.5/4); "
+                           "edit -> skills/pipelines/hybrid/edit-director.md (no gate); compose "
+                           "-> skills/pipelines/panda-video/compose-director.md (GATE 5).")
         return (
             f"Continue the `{p}` pipeline for project_id: {job_id}. Read the latest "
             "checkpoint, proceed from the next stage, and STOP at the next human_approval gate "
-            f"(status='awaiting_human', end your turn). If the pipeline is complete, finish.{extra}"
+            f"(status='awaiting_human', end your turn). If the pipeline is complete, finish.{extra}\n"
+            f"{skills_line}"
         )
 
     def _stills_approved_prompt(self, job_id: str) -> str:
         return (
-            f"For project_id: {job_id}, the STILLS phase of the `assets` stage is APPROVED. Do NOT "
-            "mark the assets stage completed yet. Animate the approved stills into motion clips "
-            "(image_to_video via the Higgsfield MCP bridge) and generate narration/music "
+            f"For project_id: {job_id}, the STILLS phase of the `assets` stage is APPROVED "
+            "(panda-video). Do NOT mark the assets stage completed yet. Following "
+            "skills/pipelines/panda-video/asset-director.md, animate the approved stills into "
+            "motion clips (image_to_video via the Higgsfield MCP bridge) and generate narration/music "
             "(ElevenLabs), record every file in asset_manifest, then rewrite the assets checkpoint "
             "with status='awaiting_human' (WITHOUT the 'stills' phase marker) and STOP for the "
             "full media approval."
@@ -1594,16 +1625,19 @@ class ClaudeCodeRunner(Runner):
         cap_txt = f" The approved cap is now {new_cap} Higgsfield credits." if new_cap is not None else ""
         return (
             f"For project_id: {job_id}, the BUDGET HOLD is cleared — the human authorized continuing."
-            f"{cap_txt} Resume the Higgsfield generation that was blocked, RE-CHECKING the budget "
-            "hard-rule (spent + get_cost vs the cap) before generating. If it now fits, generate the "
+            f"{cap_txt} Resume the blocked Higgsfield generation in the assets stage (its "
+            "asset-director skill), RE-CHECKING the budget hard-rule in "
+            "skills/meta/higgsfield-mcp-bridge.md (spent + get_cost vs the cap) before "
+            "generating. If it now fits, generate the "
             "batch, record each asset's credits in asset_manifest, and stop at the next assets gate. "
             "If it STILL exceeds the cap, do NOT generate — write the budget_hold checkpoint again."
         )
 
     def _motion_sample_prompt(self, job_id: str) -> str:
         return (
-            f"For project_id: {job_id}, the STILLS phase of the `assets` stage is APPROVED. Do NOT "
-            "mark the assets stage completed yet, and do NOT batch-generate all clips. Animate ONE "
+            f"For project_id: {job_id}, the STILLS phase of the `assets` stage is APPROVED "
+            "(panda-video). Do NOT mark the assets stage completed yet, and do NOT batch-generate "
+            "all clips. Following skills/pipelines/panda-video/asset-director.md, animate ONE "
             "representative HERO still (the most important scene, else scene 1) into a single MOTION "
             "SAMPLE clip (image_to_video via the Higgsfield MCP bridge) so the reviewer can approve "
             "the motion/animation feel before committing to the full batch. Record the sample's "
@@ -1614,8 +1648,10 @@ class ClaudeCodeRunner(Runner):
 
     def _motion_approved_prompt(self, job_id: str) -> str:
         return (
-            f"For project_id: {job_id}, the MOTION SAMPLE is APPROVED. Do NOT mark the assets stage "
-            "completed yet. Animate the REMAINING approved stills into motion clips using the SAME "
+            f"For project_id: {job_id}, the MOTION SAMPLE is APPROVED (panda-video). Do NOT mark "
+            "the assets stage completed yet. Following "
+            "skills/pipelines/panda-video/asset-director.md, animate the REMAINING approved stills "
+            "into motion clips using the SAME "
             "motion approach (model + motion params) as the approved sample, then generate "
             "narration/music (ElevenLabs). Record every file (incl. the already-approved sample) in "
             "asset_manifest with per-asset Higgsfield credits, then rewrite the assets checkpoint "
