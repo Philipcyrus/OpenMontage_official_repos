@@ -392,6 +392,32 @@ assert "produce a video" in vid
 assert "STILLS-ONLY" not in vid
 print("[ok] start prompts: carousel/image stills-only vs video")
 
+# 6b) per-leg CONTEXT.md: facts only, and a failed write must not change behaviour ----
+_ctx = run._write_leg_context("jCtx", "script", "panda-video")
+assert _ctx is not None and _ctx.is_file()
+_body = _ctx.read_text(encoding="utf-8")
+# the three things the agent cannot infer: project dir, its stage, that stage's real skill file
+assert str(run._projects_dir / "jCtx") in _body
+assert "stage this leg runs: script" in _body
+assert "skills/pipelines/hybrid/script-director.md" in _body
+# every director path named must actually exist — this is what dd33314 got wrong
+for _pipe, _stages in R.ClaudeCodeRunner._DIRECTOR_SKILLS.items():
+    for _stage, _rel in _stages.items():
+        assert (R._ENGINE_ROOT / _rel).is_file(), f"{_pipe}/{_stage} -> missing {_rel}"
+        assert not _rel.endswith(f"{_stage}-director.md") or "-" not in _stage, _rel
+# FACTS ONLY: never restate gate numbers or phase markers — that is what made the agent
+# follow the prompt over its director skill last time.
+for _forbidden in ("GATE 1", "GATE 2", "GATES", "partial_progress", "awaiting_human"):
+    assert _forbidden not in _body, f"CONTEXT.md must not assert policy: {_forbidden!r}"
+# prompt references it when written...
+_with = run._start_prompt("jCtx", "a video", {}, "panda-video", context_path=_ctx)
+assert "ORIENTATION" in _with and str(_ctx) in _with
+# ...and degrades silently to today's prompt when the write failed (returns None)
+_without = run._start_prompt("jCtx", "a video", {}, "panda-video", context_path=None)
+assert "ORIENTATION" not in _without
+assert "produce a video" in _without and "BRAND" in _without
+print("[ok] leg CONTEXT.md: facts only, real skill paths, degrades to old prompt on failure")
+
 # 7) _pipeline_of / gate-collapse helpers -----------------------------------
 assert R._pipeline_of({}) == "panda-video"
 assert R._pipeline_of({"pipeline": "panda-carousel"}) == "panda-carousel"
