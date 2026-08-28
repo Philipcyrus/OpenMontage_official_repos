@@ -7,6 +7,8 @@
 
 This is the single source of truth for project architecture and conventions. All platform-specific agent files (CLAUDE.md, CODEX.md, CURSOR.md, COPILOT.md) should point here instead of duplicating this content.
 
+One deliberate exception: `CLAUDE.md` and `AGENTS.md` also carry a short **headless pipeline leg** section. A leg is a non-interactive `claude -p` started by `dify_launcher/runner.py` for one stage, and it must be told *not* to read `AGENT_GUIDE.md` — which is the upstream engine contract, and says so itself. That routing has to live in the auto-loaded file to carry the same weight as the mandate it exempts; delivering it any other way was measured and ignored.
+
 ## Identity
 
 OpenMontage is an open-source, AI-orchestrated video production platform.
