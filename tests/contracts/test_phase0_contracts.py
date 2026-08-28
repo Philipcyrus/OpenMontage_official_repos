@@ -579,6 +579,43 @@ class TestAgentContextFiles:
             contents = (PROJECT_ROOT / path).read_text(encoding="utf-8")
             assert "AGENT_GUIDE.md" in contents
 
+    def test_leg_carveout_present_in_autoloaded_files(self):
+        """CLAUDE.md and AGENTS.md are BOTH auto-loaded, and both carried the same
+        "MANDATORY: read AGENT_GUIDE.md" order. Exempting only one leaves the order standing
+        from the other — measured 2026-08-29. Keep the carve-out in both."""
+        for path in ("CLAUDE.md", "AGENTS.md"):
+            contents = (PROJECT_ROOT / path).read_text(encoding="utf-8")
+            assert "Do NOT read AGENT_GUIDE.md" in contents, f"{path} lost the leg carve-out"
+            assert "MANDATORY" in contents, f"{path} lost the interactive mandate"
+
+
+class TestCheckpointProtocolDoc:
+    """`skills/meta/checkpoint-protocol.md` must carry the REAL signatures.
+
+    Every leg reads this doc. When its examples were incomplete the agent went and read
+    `lib/checkpoint.py` to verify — measured 2026-08-29 as ~2-3 extra model turns per leg, on
+    every stage, plus outright wrong calls (`get_next_stage("job_x")`, one positional arg).
+    If a signature changes and this doc is not updated, that cost silently returns.
+    """
+
+    DOC = PROJECT_ROOT / "skills" / "meta" / "checkpoint-protocol.md"
+
+    @pytest.mark.parametrize("fn", [write_checkpoint, read_checkpoint, get_next_stage])
+    def test_doc_lists_every_parameter(self, fn):
+        import inspect
+        doc = self.DOC.read_text(encoding="utf-8")
+        assert f"{fn.__name__}(" in doc, f"{fn.__name__} not documented"
+        for name in inspect.signature(fn).parameters:
+            assert name in doc, (
+                f"{fn.__name__}: parameter {name!r} is missing from checkpoint-protocol.md — "
+                "a leg will go read lib/checkpoint.py to find it")
+
+    def test_doc_gives_the_import(self):
+        doc = self.DOC.read_text(encoding="utf-8")
+        assert "from lib.checkpoint import" in doc
+        for name in ("PROJECTS_DIR", "write_checkpoint", "read_checkpoint", "get_next_stage"):
+            assert name in doc, f"{name} missing from the doc's import block"
+
 
 # ---- Media Profiles ----
 

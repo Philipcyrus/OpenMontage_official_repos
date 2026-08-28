@@ -39,13 +39,20 @@ Call the checkpoint utility:
 
 ```python
 write_checkpoint(
-    pipeline_dir,      # Project working directory
-    project_name,      # Project identifier
-    stage_name,        # e.g., "idea"
-    status,            # "completed" or "awaiting_human"
-    artifacts,         # {"brief": {...}} — the stage's output
+    PROJECTS_DIR,                  # pipeline_dir — the repo's projects/ directory
+    project_id,                    # e.g. "job_1a2b3c4d"
+    "idea",                        # stage
+    "completed",                   # or "awaiting_human" / "in_progress"
+    {"brief": {...}},              # artifacts — the stage's output
+    pipeline_type="panda-video",   # REQUIRED in practice: gate enforcement reads the
+                                   # manifest through it (see the note below)
 )
 ```
+
+At a gated stage, the same call also carries the gate state — `human_approval_required=True`
+with `status="awaiting_human"` when you pause, and `human_approved=True` when writing
+`completed` after the human approves. A gated stage **cannot** be written `completed`
+without `human_approved=True`.
 
 The checkpoint utility will:
 - Validate the artifact against its schema
@@ -70,6 +77,39 @@ This creates the canonical directory layout and writes `project.json` — the
 marker the Backlot board needs to show the project before its first
 checkpoint. Then launch the board: `python -m backlot open my-project`
 (non-fatal if unavailable — the board is an observer, never a blocker).
+
+### The whole API — do not go read `lib/checkpoint.py`
+
+Everything comes from one module. `pipeline_dir` is the repo's `projects/` directory;
+`PROJECTS_DIR` already *is* that value, so pass it rather than rebuilding a path.
+
+```python
+from lib.checkpoint import (
+    PROJECTS_DIR, init_project, write_checkpoint, read_checkpoint, get_next_stage,
+)
+```
+
+Everything after the `*` is keyword-only:
+
+```python
+init_project(project_id, *, title, pipeline_type,
+             pipeline_dir=None, style_playbook=None) -> Path
+
+write_checkpoint(pipeline_dir, project_id, stage, status, artifacts, *,
+                 pipeline_type=None, style_playbook=None,
+                 checkpoint_policy="guided",
+                 human_approval_required=False, human_approved=False,
+                 review=None, cost_snapshot=None, error=None,
+                 metadata=None) -> Path
+
+read_checkpoint(pipeline_dir, project_id, stage) -> dict | None
+
+get_next_stage(pipeline_dir, project_id, pipeline_type=None) -> str | None
+```
+
+**The one asymmetry worth memorising:** `pipeline_dir` is the FIRST argument of every
+function except `init_project`, whose first argument is the project id. Calling
+`get_next_stage("job_x")` or `write_checkpoint("job_x", ...)` is the usual wrong guess.
 
 ### Step 4: Intra-Stage Checkpointing (Resume Support + Liveness)
 
