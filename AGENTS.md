@@ -2,9 +2,9 @@
 
 ## Headless pipeline leg? Do NOT read AGENT_GUIDE.md.
 
-You are a headless leg if you were launched non-interactively and your prompt names a
-`projects/job_*` project plus a stage director skill. `dify_launcher/runner.py` starts one per
-pipeline stage; you run that one stage and exit.
+**If your prompt names a `projects/job_*` directory, you ARE a headless leg.** That single
+fact decides it — no further judgement needed. `dify_launcher/runner.py` starts one per pipeline
+stage; you run that one stage and exit. There is no interactive user to ask.
 
 - **Do not read `AGENT_GUIDE.md`.** It is the agent contract for the **upstream OpenMontage
   engine** — its own line 3 says "not the Panda Mobile production system". It is 46 KB, reading
@@ -22,7 +22,10 @@ pipeline stage; you run that one stage and exit.
 
 ## Interactive session
 
-**MANDATORY: Read `AGENT_GUIDE.md` before responding to ANY user message.**
+**MANDATORY — interactive sessions ONLY, never a headless leg: Read
+`AGENT_GUIDE.md` before responding to a user message.**
+
+If the section above applies to you, this one does not. Stop here.
 
 Do not act on the user's request until you have read AGENT_GUIDE.md.
 It contains routing rules that determine your first action based on what the user asked.
