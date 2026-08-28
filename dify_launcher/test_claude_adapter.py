@@ -155,6 +155,96 @@ arts_s = run._mirror_artifacts(JOBS, {
 assert arts_s.get("stills") == ["slide-1.png"], arts_s.get("stills")
 print("[ok] superseded stills stay out of artifacts.stills")
 
+# 2e) rejected takes archived beside the kept still must NOT surface as live stills
+JOBR = "job_no_rejected_stills"
+projr = run._projects_dir / JOBR
+(projr / "assets" / "images").mkdir(parents=True, exist_ok=True)
+for _n in ("sc-01.png", "sc-02.png"):
+    (projr / "assets" / "images" / _n).write_bytes(b"\x89PNG\r\nLIVE")
+for _n in ("rejected_sc-01_take1.png", "rejected_sc-02_take4.png"):
+    (projr / "assets" / "images" / _n).write_bytes(b"\x89PNG\r\nTAKE")
+arts_r = run._mirror_artifacts(JOBR, {
+    "asset_manifest": {
+        "version": "1.0",
+        "assets": [{"id": "sc-01-still", "path": "assets/images/sc-01.png"},
+                   {"id": "sc-02-still", "path": "assets/images/sc-02.png"}],
+    },
+})
+assert arts_r.get("stills") == ["sc-01.png", "sc-02.png"], arts_r.get("stills")
+print("[ok] rejected takes stay out of artifacts.stills")
+
+# 2f) storyboard builder drops rejected takes; two scenes zip to two live cards
+from dify_launcher.storyboard_preview import cards_from_arts, is_superseded_still, still_basenames
+arts_sb = {
+    "stills": [
+        "rejected_sc1_take1.png",
+        "rejected_sc2_take1.png",
+        "still_sc1.png",
+        "still_sc2.png",
+    ],
+    "scene_plan": {"version": "1.0", "scenes": [
+        {"id": "sc1", "captions": {"zh": "SFO", "en": "SFO"},
+         "start_seconds": 0, "end_seconds": 4},
+        {"id": "sc2", "captions": {"zh": "SHA", "en": "SHA"},
+         "start_seconds": 4, "end_seconds": 8, "hero_moment": True},
+    ]},
+}
+assert still_basenames(arts_sb) == ["still_sc1.png", "still_sc2.png"], still_basenames(arts_sb)
+cards = cards_from_arts(arts_sb)
+assert len(cards) == 2, [c.get("still") for c in cards]
+assert cards[0]["still"] == "still_sc1.png" and cards[0]["label"] == "SC 01"
+assert cards[1]["still"] == "still_sc2.png" and cards[1]["label"] == "SC 02"
+assert is_superseded_still("rejected_sc1_take1.png")
+assert is_superseded_still("assets/images/superseded-stills/rejected_sc2_take1.png")
+print("[ok] storyboard drops rejected takes; two scenes zip to two cards")
+
+# 2h) long scene-plan framing essays must not become unwrapped shot chips
+essay = "Vertical 9:16. Percentages below are of the FINAL 1080x1920 master frame. " * 8
+arts_chip = {
+    "stills": ["sc-01.png", "sc-02.png"],
+    "scene_plan": {"version": "1.0", "scenes": [
+        {"id": "sc-01", "framing": essay, "movement": essay,
+         "shot_language": {"shot_size": "wide", "camera_movement": "static"},
+         "captions": {"en": "Land in Canada, stay connected on both sides."}},
+        {"id": "sc-02", "framing": "medium", "movement": "static",
+         "captions": {"en": "CTA"}},
+    ]},
+}
+chips = cards_from_arts(arts_chip)
+assert chips[0]["framing"] == "wide" and chips[0]["movement"] == "static", chips[0]
+assert chips[1]["framing"] == "medium" and chips[1]["movement"] == "static", chips[1]
+assert "Percentages" not in (chips[0]["framing"] or "")
+print("[ok] storyboard chips prefer short shot_language over framing essays")
+
+# 2g) GET /jobs stills list and revise-shot paths skip discarded takes
+from dify_launcher.app import _public
+pub = _public({
+    "job_id": "job_f5df699fb729",
+    "artifacts": {
+        "stills": [
+            "rejected_sc1_take1.png",
+            "rejected_sc2_take1.png",
+            "still_sc1.png",
+            "still_sc2.png",
+        ],
+        "preview": ["storyboard.png"],
+    },
+})
+assert pub["artifacts"]["stills"] == [
+    "/jobs/job_f5df699fb729/artifacts/still_sc1.png",
+    "/jobs/job_f5df699fb729/artifacts/still_sc2.png",
+], pub["artifacts"]["stills"]
+assert pub["artifacts"]["preview"] == ["/jobs/job_f5df699fb729/artifacts/storyboard.png"]
+rev_paths = R._still_abs_paths(
+    "job_f5df699fb729",
+    {"artifacts": {"stills": [
+        "rejected_sc1_take1.png", "still_sc1.png", "still_sc2.png",
+    ]}},
+    shots=[1],
+)
+assert rev_paths and Path(rev_paths[0]).name == "still_sc1.png", rev_paths
+print("[ok] GET stills + revise shots skip rejected takes")
+
 # 3) _sync: checkpoint status -> launcher state (stub the reads) -----------
 def _fake_latest(_pd, _jid):
     return _fake_latest.cp

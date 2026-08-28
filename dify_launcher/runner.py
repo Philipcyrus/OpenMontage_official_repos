@@ -36,7 +36,11 @@ from pathlib import Path
 from typing import Any, Optional
 
 from dify_launcher import store
-from dify_launcher.storyboard_preview import apply_storyboard_preview, is_storyboard_name
+from dify_launcher.storyboard_preview import (
+    apply_storyboard_preview,
+    is_storyboard_name,
+    is_superseded_still,
+)
 
 _ENGINE_ROOT = Path(__file__).resolve().parents[1]
 
@@ -150,7 +154,8 @@ def _still_basename(name: Any) -> str:
 def _still_abs_paths(job_id: str, state: Optional[dict[str, Any]], shots: list[Any],
                      projects_dir: Optional[Path] = None) -> list[str]:
     """Absolute paths of current stills (flagged shots if set, else all)."""
-    names = [_still_basename(n) for n in (state or {}).get("artifacts", {}).get("stills") or []]
+    names = [_still_basename(n) for n in (state or {}).get("artifacts", {}).get("stills") or []
+             if not is_superseded_still(n)]
     if not names:
         return []
     indices = _revise_shot_indices({"shots": shots}, len(names))
@@ -345,15 +350,6 @@ class BrandError(ValueError):
         self.status_code = status_code
 
 
-def _is_superseded_still(path: Any) -> bool:
-    """True for archived revise leftovers (history/ or `*.pre-*` backups), not live stills."""
-    p = Path(str(path))
-    parts = {x.lower() for x in p.parts}
-    if "history" in parts or "superseded-stills" in parts:
-        return True
-    return ".pre-" in p.name.lower()
-
-
 def _artifact_files_ready(job_id: str, names: list[str]) -> bool:
     return bool(names) and all(store.artifact_path(job_id, n).is_file() for n in names)
 
@@ -406,7 +402,7 @@ def _apply_brand(state: dict[str, Any], profile: str = "bgc") -> dict[str, Any]:
     arts = dict(state.get("artifacts") or {})
     job_id = state["job_id"]
     stills = [_still_basename(n) for n in (arts.get("stills") or [])
-              if not _is_superseded_still(n)]
+              if not is_superseded_still(n)]
     final_name = _still_basename(arts.get("final") or "")
     final_src = store.artifact_path(job_id, final_name) if final_name.endswith(".mp4") else None
     has_final = bool(final_src and final_src.is_file())
@@ -1260,13 +1256,13 @@ class ClaudeCodeRunner(Runner):
         imgs = [p for p in _scan(proj / "assets" / "images", (".png", ".jpg", ".jpeg"))
                 if "contact" not in p.name.lower() and "sheet" not in p.name.lower()
                 and not is_storyboard_name(p.name)
-                and not _is_superseded_still(p)]
+                and not is_superseded_still(p)]
         vids = _scan(proj / "assets" / "video", (".mp4", ".mov", ".webm"))
         renders = _scan(proj / "renders", (".mp4", ".mov"))
 
         for p in _paths_in(artifacts):
             ext = p.suffix.lower()
-            if (ext in (".png", ".jpg", ".jpeg") and p not in imgs and not _is_superseded_still(p)
+            if (ext in (".png", ".jpg", ".jpeg") and p not in imgs and not is_superseded_still(p)
                     and not is_storyboard_name(p.name)):
                 imgs.append(p)
             elif ext in (".mp4", ".mov", ".webm"):

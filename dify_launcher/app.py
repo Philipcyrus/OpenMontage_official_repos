@@ -35,6 +35,7 @@ from pydantic import BaseModel
 
 from dify_launcher import runner as _runner
 from dify_launcher import store
+from dify_launcher.storyboard_preview import is_superseded_still
 
 app = FastAPI(title="Panda AI — Dify Launcher", version="0.2.0")
 
@@ -86,7 +87,10 @@ def _public(state: dict[str, Any]) -> dict[str, Any]:
         if isinstance(val, str) and val.endswith((".md", ".html", ".png", ".jpg", ".mp4")):
             links[key] = f"/jobs/{job_id}/artifacts/{val}"
         elif isinstance(val, list):
-            links[key] = [f"/jobs/{job_id}/artifacts/{v}" for v in val]
+            items = val
+            if key == "stills":
+                items = [v for v in val if not is_superseded_still(v)]
+            links[key] = [f"/jobs/{job_id}/artifacts/{v}" for v in items]
         else:
             links[key] = val
     return {
