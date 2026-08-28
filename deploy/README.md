@@ -145,6 +145,31 @@ Point Dify at the base URL and follow `dify_launcher/DIFY_INTEGRATION.md`:
 2. **Storage:** local under `DIFY_DATA_DIR` (default `./data`). Artifacts + job state live
    there; `data/jobs/` is gitignored. Swap for S3 later with no API change.
 
+## Troubleshooting
+
+**Dify gets 502 / artifact links fail, but everything looks healthy on the box.**
+Check the bind address first:
+
+```bash
+sudo ss -lntp | grep 8501     # MUST be 0.0.0.0:8501, NOT 127.0.0.1:8501
+```
+
+The proxy runs in a different namespace, so a loopback bind is unreachable from it even though
+the launcher is running perfectly. Every check *from the box* still passes — `/health` is `ok`,
+`POST /jobs` returns 200, artifacts fetch 200 over `127.0.0.1` — because those never leave the
+host. Only an external request shows it:
+
+```bash
+curl -s -o /dev/null -w "%{http_code}\n" https://dev.om.mvnoc.ai/jobs/<job_id>/artifacts/<name>
+```
+
+Fix by restarting with the start block above (`--host 0.0.0.0`). **Do not copy the flags out of
+`ps` output** — that is how a wrong bind survives a restart. Copy them from this file.
+
+Same trap, other flags: a restart that skips `source .venv/bin/activate` or the Node 22 lines
+also leaves `/health` green while the Remotion/HyperFrames lanes and the `claude` binary resolve
+wrongly. Use the whole start block, not part of it.
+
 ## Cost & time report (per project)
 Every job writes a consumption report — **Higgsfield credits**, **ElevenLabs** characters/seconds,
 and **generation time** per stage + total (native units, no USD roll-up). Read it on the box with:
