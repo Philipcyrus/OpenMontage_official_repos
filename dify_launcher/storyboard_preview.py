@@ -32,6 +32,8 @@ _LINE_H = 18
 _CAPTION_PAD = 8
 _MAX_ROW_W = 1400
 _MAX_CAPTION_LINES = 8
+_MAX_CHIP_LINES = 2
+_CHIP_MAX_CHARS = 48
 
 
 def is_storyboard_name(name: Any) -> bool:
@@ -39,11 +41,30 @@ def is_storyboard_name(name: Any) -> bool:
     return "storyboard" in n
 
 
+def is_superseded_still(path: Any) -> bool:
+    """True for archived takes, not live stills.
+
+    Covers revise leftovers (history/ or `*.pre-*` backups) AND the `rejected_<scene>_takeN.png`
+    files the assets stage archives beside the kept still in assets/images/. Without the
+    `rejected_` case every discarded take surfaces as a live still, so an 8s two-shot shows extra
+    storyboard cards at approve_stills and /brand would stamp the discards too.
+    """
+    p = Path(str(path))
+    parts = {x.lower() for x in p.parts}
+    if "history" in parts or "superseded-stills" in parts:
+        return True
+    name = p.name.lower()
+    if name.startswith("rejected_") or name.startswith("rejected-"):
+        return True
+    return ".pre-" in name
+
+
 def still_basenames(arts: dict[str, Any]) -> list[str]:
     out: list[str] = []
     for s in arts.get("stills") or []:
         name = Path(str(s)).name
-        if name and not is_storyboard_name(name) and name not in out:
+        if (name and not is_storyboard_name(name) and not is_superseded_still(s)
+                and name not in out):
             out.append(name)
     return out
 
@@ -60,7 +81,7 @@ def cards_from_arts(arts: dict[str, Any]) -> list[dict[str, Any]]:
     stills = still_basenames(arts)
     plan = arts.get("scene_plan") if isinstance(arts.get("scene_plan"), dict) else {}
     scenes = list(plan.get("scenes") or []) if isinstance(plan, dict) else []
-    n = max(len(stills), len(scenes), 0)
+    n = len(scenes) if scenes else len(stills)
     cards: list[dict[str, Any]] = []
     for i in range(n):
         sc = scenes[i] if i < len(scenes) and isinstance(scenes[i], dict) else {}
@@ -87,12 +108,28 @@ def cards_from_arts(arts: dict[str, Any]) -> list[dict[str, Any]]:
             "label": _scene_label(sid, i),
             "still": still,
             "description": desc,
-            "framing": sc.get("framing") or shot.get("shot_size"),
-            "movement": sc.get("movement") or shot.get("camera_movement"),
+            "framing": _short_chip(sc.get("framing"), shot.get("shot_size")),
+            "movement": _short_chip(sc.get("movement"), shot.get("camera_movement")),
             "duration_seconds": dur,
             "hero_moment": bool(sc.get("hero_moment")),
         })
     return cards
+
+
+def _short_chip(value: Any, fallback: Any = None) -> str:
+    """Shot chips must stay compact. Scene-plan framing/movement can be a multi-hundred
+    char essay; prefer shot_language (shot_size / camera_movement) when the plan field
+    is too long to fit a 220px card as a single chip.
+    """
+    raw = str(value or "").strip()
+    fb = str(fallback or "").strip()
+    if fb and (len(raw) > _CHIP_MAX_CHARS or "\n" in raw):
+        return fb
+    if not raw:
+        return fb
+    if len(raw) > _CHIP_MAX_CHARS:
+        return raw[: _CHIP_MAX_CHARS - 1].rstrip() + "…"
+    return raw
 
 
 def _thumb_size(job_id: str, still: Optional[str]) -> tuple[int, int]:
@@ -138,7 +175,7 @@ def _text_width(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont)
 
 def _wrap_para(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont,
                max_w: int) -> list[str]:
-    """Wrap mixed zh/en by glyph so CJK isn't one unbreakable token."""
+    """Wrap mixed zh/en. CJK may break per glyph; Latin prefers the last space."""
     raw = (text or "").replace("\n", " ").strip()
     if not raw:
         return []
@@ -149,8 +186,14 @@ def _wrap_para(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont,
         if _text_width(draw, trial, font) <= max_w or not cur:
             cur = trial
             continue
-        lines.append(cur.rstrip())
-        cur = "" if ch == " " else ch
+        sp = cur.rfind(" ")
+        if sp > 0:
+            lines.append(cur[:sp].rstrip())
+            rest = cur[sp + 1:]
+            cur = ("" if ch == " " else rest + ch)
+        else:
+            lines.append(cur.rstrip())
+            cur = "" if ch == " " else ch
     if cur.strip():
         lines.append(cur.rstrip())
     return lines
@@ -170,18 +213,19 @@ def _wrap_lines(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont,
 
 
 def _caption_block(draw: ImageDraw.ImageDraw, card: dict[str, Any],
-                   font_c: ImageFont.ImageFont, inner_w: int) -> tuple[str, list[str]]:
+                   font_s: ImageFont.ImageFont, font_c: ImageFont.ImageFont,
+                   inner_w: int) -> tuple[list[str], list[str]]:
     chips = " · ".join(str(b) for b in (card.get("framing"), card.get("movement")) if b)
+    chip_lines = _wrap_lines(draw, chips, font_s, inner_w, _MAX_CHIP_LINES) if chips else []
     lines = _wrap_lines(draw, card.get("description") or "", font_c, inner_w)
-    return chips, lines
+    return chip_lines, lines
 
 
-def _caption_height(chips: str, lines: list[str]) -> int:
+def _caption_height(chip_lines: list[str], lines: list[str]) -> int:
     h = _CAPTION_PAD
-    if chips:
-        h += _LINE_H
+    h += _LINE_H * len(chip_lines)
     h += _LINE_H * len(lines)
-    h += _CAPTION_PAD + 12  # descent + bottom inset so the last line isn't clipped
+    h += _CAPTION_PAD + 20  # descent + bottom inset so the last line isn't clipped
     return max(h, _CAPTION_PAD * 2 + _LINE_H)
 
 
@@ -196,7 +240,8 @@ def write_storyboard_png(job_id: str, cards: list[dict[str, Any]]) -> None:
     probe = ImageDraw.Draw(Image.new("RGB", (1, 1), _BG))
     sizes = [_thumb_size(job_id, c.get("still")) for c in cards]
     card_ws = [max(tw, 240) for tw, _th in sizes]
-    blocks = [_caption_block(probe, cards[i], font_c, card_ws[i] - 12) for i in range(len(cards))]
+    blocks = [_caption_block(probe, cards[i], font_s, font_c, card_ws[i] - 12)
+              for i in range(len(cards))]
     card_hs = [_SLATE_H + sizes[i][1] + _caption_height(*blocks[i]) for i in range(len(cards))]
 
     rows: list[list[int]] = [[]]
@@ -230,7 +275,7 @@ def write_storyboard_png(job_id: str, cards: list[dict[str, Any]]) -> None:
             tw, th = sizes[i]
             cw = card_ws[i]
             card = cards[i]
-            chips, lines = blocks[i]
+            chip_lines, lines = blocks[i]
             draw.rounded_rectangle([x, y, x + cw, y + rh], radius=6, fill=_SURFACE,
                                    outline=_BORDER)
             slate = card["label"]
@@ -250,8 +295,8 @@ def write_storyboard_png(job_id: str, cards: list[dict[str, Any]]) -> None:
                 except OSError:
                     draw.rectangle([x + 4, ty, x + cw - 4, ty + th], outline=_BORDER)
             cap_y = ty + th + _CAPTION_PAD
-            if chips:
-                draw.text((x + 6, cap_y), chips, fill=_TEXT2, font=font_s)
+            for line in chip_lines:
+                draw.text((x + 6, cap_y), line, fill=_TEXT2, font=font_s)
                 cap_y += _LINE_H
             for line in lines:
                 draw.text((x + 6, cap_y), line, fill=_TEXT, font=font_c)
@@ -298,7 +343,7 @@ body {{ margin:0; background:var(--bg); color:var(--text);
   border:1px solid var(--border); }}
 .thumb img {{ width:100%; height:auto; display:block; object-fit:cover; }}
 .shotchips {{ font-family: ui-monospace, monospace; font-size:9px; color:#62626c;
-  padding:7px 2px 0; }}
+  padding:7px 2px 0; overflow-wrap:anywhere; word-break:break-word; }}
 .narr {{ padding:8px 3px 0; font-size:11px; color:var(--text-2); line-height:1.45;
   font-style:italic; }}
 </style></head>
