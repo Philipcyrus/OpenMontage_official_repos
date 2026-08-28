@@ -60,10 +60,34 @@ At the **assets** gate, every generated shot is reviewed together; revise specif
   headless (`claude -p`) against the engine repo; OpenMontage's checkpoint-based resume means
   every leg reads the latest checkpoint and continues to the next gate. The runner maps
   checkpoints → gates and mirrors artifacts into the job store. Needs `claude` + OpenRouter env
-  + the Higgsfield MCP on the box. Config: `CLAUDE_BIN`, `CLAUDE_EXTRA_ARGS`, `CLAUDE_TIMEOUT_S`,
-  `PANDA_PIPELINE_TYPE`, `OPENMONTAGE_PROJECTS_DIR` (see `.env.example`).
+  + the Higgsfield MCP on the box. Config: `CLAUDE_BIN`, `CLAUDE_EXTRA_ARGS`, `CLAUDE_LEG_PROMPT`,
+  `CLAUDE_TIMEOUT_S`, `PANDA_PIPELINE_TYPE`, `OPENMONTAGE_PROJECTS_DIR` (see `.env.example`).
   **Verify on the box:** exact `claude` flags, the agent's stop-at-gate behavior, and the
   artifact key/paths the panda-video skills emit (see `_mirror_artifacts`).
+
+### `CLAUDE_LEG_PROMPT` — per-leg orientation cost (default OFF)
+
+Every leg is a cold `claude -p`, so it re-derives the same environment facts each time.
+Measured 2026-08-28 on four transcripts of a real `script` leg: **~20 model turns at ~9 s each,
+of which 10–14 were rediscovery** — `AGENT_GUIDE.md` opened as the first call in every run
+(46 KB, and its own line 3 says it does not govern Panda), 3 turns guessing a `lib.checkpoint`
+signature before reading the doc that specifies it, 2–3 turns on `python` vs `python3` and a
+missing `PYTHONPATH=.`.
+
+Set `CLAUDE_LEG_PROMPT=1` to append [`leg_system_prompt.md`](leg_system_prompt.md) to the leg's
+**system** prompt via `claude --append-system-prompt`. It carries execution-environment FACTS
+only — never gates, phases or pipeline shape, which the director skills own.
+
+- **System prompt, not user prompt.** It costs zero extra turns. An earlier attempt that pointed
+  the agent at a per-job `CONTEXT.md` file cost one Read per leg and measured **21 s slower**.
+- **Off by default**, so the flag is the A/B: same build, flag on vs off, no branch confound.
+- **Revert = unset the variable and restart the launcher.** No redeploy, no git revert.
+
+To measure it, compare `num_turns` rather than wall-clock alone:
+
+```bash
+claude -p "<leg prompt>" --dangerously-skip-permissions --output-format json   # num_turns
+```
 
 ## Tests
 - `python dify_launcher/test_dify_flow.py` — full gate handshake on the mock runner (real render, including `approve_brand`)

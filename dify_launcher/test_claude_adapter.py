@@ -454,4 +454,43 @@ p_other = run._revise_prompt("jS", "script", {"answer": "shorter"},
 assert "MODE=" not in p_other
 print("[ok] stills revise prompt: EDIT vs FRESH + still path")
 
+# 22) CLAUDE_LEG_PROMPT: default OFF, opt-in appends FACTS to the system prompt.
+# Guards the two ways this can regress: silently turning itself on (which would change every
+# leg), and drifting into policy prose — restating gates/phases/pipeline shape is what broke
+# the earlier "Lever A" attempt, because it competed with the director skills.
+from dify_launcher.runner import _LEG_PROMPT_PATH, _leg_prompt_args  # noqa: E402
+
+_prev_flag = os.environ.pop("CLAUDE_LEG_PROMPT", None)
+assert _leg_prompt_args() == [], "must be OFF unless CLAUDE_LEG_PROMPT is set"
+for _off in ("", "0", "false", "no"):
+    os.environ["CLAUDE_LEG_PROMPT"] = _off
+    assert _leg_prompt_args() == [], f"{_off!r} must not enable it"
+
+os.environ["CLAUDE_LEG_PROMPT"] = "1"
+_args = _leg_prompt_args()
+assert _args[0] == "--append-system-prompt" and len(_args) == 2, _args
+_txt = _args[1]
+assert "<!--" not in _txt and "-->" not in _txt, "rationale comments must be stripped"
+assert "AGENT_GUIDE.md" in _txt and "PYTHONPATH=. python3" in _txt
+assert "checkpoint-protocol.md" in _txt
+# FACTS ONLY — no policy, no pipeline shape.
+for _banned in ("GATE 1", "GATES", "approve_script", "partial_progress", "awaiting_human"):
+    assert _banned not in _txt, f"leg_system_prompt.md must not restate policy: {_banned}"
+# Every path it names must exist, or the note quietly starts lying to the agent.
+for _rel in ("AGENT_GUIDE.md", "skills/meta/checkpoint-protocol.md"):
+    assert _rel in _txt and (_ENGINE_ROOT / _rel).is_file(), f"stale path in note: {_rel}"
+# It rides in argv, never in the user prompt (that cost a Read per leg and measured slower).
+_r = R.ClaudeCodeRunner()
+assert _r._leg_prompt == _args
+assert "leg_system_prompt" not in _r._start_prompt("jX", "b", {}, "panda-video")
+# Unreadable file degrades to today's behaviour instead of failing the leg.
+_saved, R._LEG_PROMPT_PATH = R._LEG_PROMPT_PATH, _LEG_PROMPT_PATH.parent / "nope.md"
+assert _leg_prompt_args() == [], "missing file must degrade, not raise"
+R._LEG_PROMPT_PATH = _saved
+
+os.environ.pop("CLAUDE_LEG_PROMPT", None)
+if _prev_flag is not None:
+    os.environ["CLAUDE_LEG_PROMPT"] = _prev_flag
+print("[ok] CLAUDE_LEG_PROMPT: off by default, facts-only, degrades safely")
+
 print("\n[PASS] ClaudeCodeRunner adapter: mapping, mirroring, sync, approval, migration")

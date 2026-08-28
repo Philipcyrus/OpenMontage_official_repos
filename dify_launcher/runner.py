@@ -44,6 +44,33 @@ from dify_launcher.storyboard_preview import (
 
 _ENGINE_ROOT = Path(__file__).resolve().parents[1]
 
+_LEG_PROMPT_PATH = Path(__file__).resolve().parent / "leg_system_prompt.md"
+_TRUTHY = ("1", "true", "yes", "on")
+
+
+def _leg_prompt_args() -> list[str]:
+    """`["--append-system-prompt", <facts>]`, or `[]` when disabled or unreadable.
+
+    OFF unless CLAUDE_LEG_PROMPT is truthy, so merging this changes no behaviour and the
+    A/B is flag-on vs flag-off on ONE build — no branch-vs-branch confound.
+
+    The text is execution-environment FACTS only (see leg_system_prompt.md). It rides in the
+    SYSTEM prompt, so it costs zero extra turns; an earlier attempt that pointed the agent at
+    a CONTEXT.md file instead cost one Read per leg and measured 21 s SLOWER.
+
+    Never raises: a missing or unreadable file degrades to today's behaviour rather than
+    failing a leg. HTML comments are stripped — they are rationale for humans, and would
+    otherwise sit in the context of every turn.
+    """
+    if os.environ.get("CLAUDE_LEG_PROMPT", "").strip().lower() not in _TRUTHY:
+        return []
+    try:
+        text = _LEG_PROMPT_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    text = re.sub(r"<!--.*?-->", "", text, flags=re.DOTALL).strip()
+    return ["--append-system-prompt", text] if text else []
+
 # ordered human-approval gates. Note: approve_stills + approve_motion_sample + approve_assets are
 # pauses of the SINGLE `assets` stage (stills cost gate, motion-sample cost gate, then full media)
 # — see _sync/_do_stills/_do_motion_sample. approve_motion_sample only occurs when the job option
@@ -960,6 +987,8 @@ class ClaudeCodeRunner(Runner):
     Config (env):
       CLAUDE_BIN          claude CLI path (default "claude")
       CLAUDE_EXTRA_ARGS   extra CLI args, space-split (e.g. "--dangerously-skip-permissions")
+      CLAUDE_LEG_PROMPT   "1" appends leg_system_prompt.md to the leg's SYSTEM prompt
+                          (default off; see _leg_prompt_args)
       CLAUDE_TIMEOUT_S    per-leg timeout seconds (default 3600)
       PANDA_PIPELINE_TYPE pipeline manifest name (default "panda-video")
       OPENMONTAGE_PROJECTS_DIR  checkpoints/projects root (default engine/projects)
@@ -977,6 +1006,7 @@ class ClaudeCodeRunner(Runner):
         self._projects_dir = PROJECTS_DIR
         self._bin = os.environ.get("CLAUDE_BIN", "claude")
         self._extra = os.environ.get("CLAUDE_EXTRA_ARGS", "").split()
+        self._leg_prompt = _leg_prompt_args()
         self._timeout = int(os.environ.get("CLAUDE_TIMEOUT_S", "3600"))
 
     # -- lifecycle ----------------------------------------------------------
@@ -1099,7 +1129,7 @@ class ClaudeCodeRunner(Runner):
         try:
             for i in range(attempts):
                 proc = subprocess.run(
-                    [self._bin, "-p", prompt, *self._extra],
+                    [self._bin, "-p", prompt, *self._extra, *self._leg_prompt],
                     cwd=str(_ENGINE_ROOT), capture_output=True, text=True, timeout=self._timeout,
                 )
                 self._write_agent_log(job_id, label, i, proc)
