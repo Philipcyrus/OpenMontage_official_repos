@@ -301,6 +301,8 @@ If `voice_id` is omitted, the engine picks the brand voice from config by `narra
 
 > Approving `approve_stills` on **panda-video** does **not** finish the assets stage — with `motion_sample` on (default) the next gate is `approve_motion_sample`; with it off, stills go to `approve_assets`. On **panda-carousel** and **panda-image**, approving stills opens **`approve_brand`** (not `done`). Dify must collect approve / skip / revise there before treating the job as finished.
 
+> **`approve_stills` can now arrive with a still the agent could not frame.** The agent takes **at most 2 takes per still**; if the second still puts content inside the burned-in caption band it stops rather than generating a third. The gate fires normally (`gate:"approve_stills"`, stills present), but `question` carries the measured head-top / ink-bottom for both takes and a ranked list of choices — shorten the caption, change the shot, accept a smaller figure, or move the band at compose. Surface `question` verbatim; a plain `{"decision":"approve"}` accepts the still as-is. This bounds a loop that previously ran to 7-8 paid takes on framing constraints no image could satisfy.
+
 Notes:
 - Edits are a **text instruction** the agent acts on (not a manual pixel editor). More specific = closer result.
 - `mode` (`fresh` | `edit`) applies only at `approve_stills`. Motion / clips / final revises stay regenerate-only. There is no image-to-image after `done`.

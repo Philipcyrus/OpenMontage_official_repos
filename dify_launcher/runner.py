@@ -1540,7 +1540,13 @@ class ClaudeCodeRunner(Runner):
     def _assets_phases_text(self, motion_sample: bool) -> str:
         stills = (
             "  PHASE 1 (stills): generate ONLY the stills — one per scene — via the Higgsfield "
-            "MCP bridge (skills/meta/higgsfield-mcp-bridge.md), then write the assets checkpoint "
+            "MCP bridge (skills/meta/higgsfield-mcp-bridge.md). Derive the caption-band envelope "
+            "PER SCENE from the scene's own locked caption before prompting (see 'Still framing' "
+            "in the asset director skill) — the band top MOVES with line count, so a remembered "
+            "constant head placement is wrong. AT MOST 2 TAKES PER STILL: if take 2 still fails "
+            "the band check, do NOT generate a third — record both takes' measured head-top and "
+            "ink-bottom and stop at the gate with the options that skill lists, in its order. "
+            "Then write the assets checkpoint "
             "with status='awaiting_human' AND partial_progress={\"phase\":\"stills\"} and STOP. "
             "Do NOT generate any video yet.\n")
         if motion_sample:
@@ -1656,6 +1662,10 @@ class ClaudeCodeRunner(Runner):
                     "the flagged files and their asset_manifest rows. Leave other slides untouched."
                 )
             extra += (
+                " AT MOST 2 TAKES per flagged still: if take 2 still fails the caption-band "
+                "check, do NOT generate a third — record both takes' measured head-top and "
+                "ink-bottom and stop at the gate with the options the asset director skill "
+                "lists under 'Still framing', in its order."
                 " Rewrite the assets checkpoint with status='awaiting_human' AND top-level "
                 "partial_progress={\"phase\":\"stills\"} (not nested under metadata) and STOP. "
                 "Do NOT generate video."
