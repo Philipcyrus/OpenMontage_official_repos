@@ -24,10 +24,11 @@
     "default_model_identity": "seedance_2_0"
   },
   "voices": {
-    "_note": "PRODUCTION narration = ElevenLabs. Requires ELEVENLABS_API_KEY (or an ElevenLabs MCP) on the box; without it the agent falls back to Higgsfield seed_audio (a generic preset — NOT the brand voice). Pick by narrator + language; the launcher passes narrator/language from the Dify job `options`.",
+    "_note": "PRODUCTION narration = ElevenLabs. Requires ELEVENLABS_API_KEY (or an ElevenLabs MCP) on the box; without it the agent falls back to Higgsfield seed_audio (a generic preset — NOT the brand voice). Look up `voices[narrator][language]`; the launcher passes narrator/language from the Dify job `options`. THREE speakers are defined — `panda` (the mascot), `customer` (the human), and `narrator` (the off-screen background voice-over) — each in `en` and `zh`. Note the naming overlap: the job option is called `narrator` and its VALUE names the speaker, so an off-screen voice-over job is `options.narrator = \"narrator\"`.",
     "provider": "elevenlabs",
     "panda": { "en": "hMSPJ6ja4HIrFHhCGCMl", "zh": "MI36FIkp9wRP7cpWKPTl" },
-    "customer": { "en": "cgSgspJ2msm6clMCkdW9", "zh": null },
+    "customer": { "en": "cgSgspJ2msm6clMCkdW9", "zh": "BqljjWyTnrioXPCNkCd4" },
+    "narrator": { "en": "8Ln42OXYupYsag45MAUy", "zh": "JZLpE3AGwpKYZI2X65hN" },
     "fallback": { "provider": "higgsfield", "model": "seed_audio" }
   },
   "montage_svc": {
