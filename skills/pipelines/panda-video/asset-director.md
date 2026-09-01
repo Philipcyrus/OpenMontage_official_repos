@@ -45,6 +45,89 @@ still, never in `scene_plan`).
 > Why stills-first: image generation is cheap; image→video is expensive. Approving the look
 > (on-model panda, composition) here prevents wasted video spend on a bad still.
 
+#### Still framing — derive the envelope per scene, never assume a constant
+
+The usable vertical envelope is **computed per scene**. Treating it as a fixed number is the
+single largest source of wasted takes.
+
+```
+band bottom = H - 300  ->  84.4%             FIXED (ugc profile)
+band top    = 84.4% - box_h                  MOVES with rendered LINE COUNT:
+                1 ZH + 1 EN  (2 lines)    -> 76.5%
+                2-line CJK                -> 75.7%
+                2 ZH + 2 EN  (4 lines)    -> 70.4%
+                ZH over ~18 glyphs wraps  -> 72.8%
+top callout pill, when present            -> 19.4%-24.6%
+```
+
+Source: `vendor/montage_svc/storage.py` ugc profile (`bottom_margin: 300`, `zh_size: 52`,
+`gap: 14`, `scrim.pad_y: 24`); `draw_caption` anchors the scrim at `H - bottom_margin` and
+grows it **upward**. The bgc profile differs (`bottom_margin` 180, `zh_size` 56).
+**Do not estimate — run the scene's locked caption through the real renderer.**
+
+Frame every shot in a video to the **tallest** band in that video. Two scenes can have bands
+6pp apart, and a per-scene envelope produces stills that disagree with each other.
+
+**Anchor points:**
+
+```
+envelope_top    = 24.6%  if this scene has a top callout pill, else 8%
+envelope_bottom = band_top - 2pp
+```
+
+| subject | head top | lowest drawn content |
+|---|---|---|
+| standing, single | `envelope_top` | `envelope_bottom` |
+| **seated** | **19-24%** | ≤ 72% |
+| two-shot | a separate head-top number **per character** | `envelope_bottom` |
+
+"Head top at 8-10%" is the **standing, 2-line-caption, no-pill case only**. It is
+*unreachable* for a seated subject — pushing the head to 8-10% scales the whole figure up and
+lands the feet at ~77%, inside the band. With a pill present, correct full-length framing is
+head 27% / soles 71% (subject = 44% of frame height). A single shared head-top clause in a
+two-shot silently cancels the height-ratio clause.
+
+**Prompt construction — all three are load-bearing:**
+
+1. **Framing clauses numbered and FIRST**, above the shot description. Any other clause tagged
+   "critical" placed above them takes the slot and framing fails (measured: head top drifted to
+   18.9% across 4 takes).
+2. **Digit-free prose only.** Percentage figures in a framing spec get typeset into the artwork
+   as dimension labels with a ruled ground line.
+3. **Scale expressed ONLY as head-top placement.** Both "fill the frame" and "she fills 65
+   percent of the image height" are read as fill clauses and drop the feet to 80-93%.
+
+Pair the head-top clause with an **empty-floor** clause. Empty floor alone parks the figure in
+the top half at ~31% of canvas (rejected by a reviewer); the head clause alone drops feet
+through the band. Asking for a **crop** does not work — the model draws the feet anyway at
+78-92%.
+
+**Verify numerically before `approve_stills`** — FIND_EDGES row density, not a flat-colour diff
+(a floor gradient reads as a false 100% band hit). Pad the band crop 3px and trim, or FIND_EDGES
+reports a false constant ~0.0137 on a bare crop. Targets: **band ink 0.00%** and lowest drawn
+content at or above `envelope_bottom`.
+
+**STOP RULE — at most 2 takes per still.**
+
+Take 1 uses the derived envelope. If it fails, take 2 may adjust the shot (occluding the legs
+behind furniture clears the band at any head placement) or lower the figure — subject to a floor
+of **44% of frame height**, below which it reads as the "small and high" failure a reviewer has
+already rejected.
+
+If take 2 also fails, **do NOT generate a third.** Record both takes' measured head-top and
+ink-bottom, write the assets checkpoint `status='awaiting_human'` with
+`partial_progress={"phase":"stills"}`, and STOP. Present these options to the human **in this
+order**:
+
+1. **Shorten the caption** — 4 rendered lines to 2 raises the envelope by ~6pp. Free: no
+   regeneration, no credits. It changes approved script copy, so it is the human's call.
+2. **Change the shot** — seated with the legs occluded measured 0.00% band ink at head 19%.
+   Costs one take.
+3. **Accept a smaller figure**, no lower than 44% of frame height.
+4. **Move the band at compose** (`bottom_margin` 300 -> ~150 puts it at 84%-92.7%).
+   **Human decision only, never automatic** — it changes every scene in the video and pushes the
+   caption into the zone the Red Note / 小红书 UI can cover.
+
 On "request revision" at this gate, honor `mode` (`fresh` | `edit`; infer if
 omitted — see `skills/meta/higgsfield-mcp-bridge.md`):
 
