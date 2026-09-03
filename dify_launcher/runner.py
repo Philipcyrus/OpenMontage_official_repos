@@ -1105,7 +1105,10 @@ class ClaudeCodeRunner(Runner):
                 self._write_agent_log(job_id, label, i, proc)
                 if proc.returncode == 0:
                     return
-                last = (proc.stderr or proc.stdout or "").strip()
+                # Search BOTH streams. `stderr or stdout` masked the real error: claude writes a
+                # harmless "no stdin data" warning to stderr, which matches no _TRANSIENT pattern,
+                # so a retryable failure (529 Overloaded) broke out on attempt 1 and the job died.
+                last = "\n".join(s for s in (proc.stdout, proc.stderr) if s).strip()
                 low = last.lower()
                 transient = any(s in low for s in self._TRANSIENT)
                 if not transient or i == attempts - 1:
