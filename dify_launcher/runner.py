@@ -72,6 +72,57 @@ def _budget_cap(state: dict[str, Any]) -> Optional[int]:
         return None
 
 
+def _resolve_voice_id(narrator: str, language: str) -> Optional[str]:
+    """The literal ElevenLabs voice id for narrator+language from config/panda-elements.json.
+
+    Resolved HERE, in the launcher, so a prompt can carry the id itself instead of an instruction
+    to go look it up — the same reason the Higgsfield Element UUIDs are interpolated (CHARACTER
+    LOCK). Returns None when the pair does not resolve; callers turn that into a gate blocker,
+    never a silent downgrade. Never raises: a missing or malformed config yields None like any
+    other unresolvable pair."""
+    try:
+        with open(_ENGINE_ROOT / "config" / "panda-elements.json", encoding="utf-8") as fh:
+            voices = (json.load(fh) or {}).get("voices") or {}
+    except (OSError, ValueError):
+        return None
+    entry = voices.get(str(narrator or "").strip().lower())
+    if not isinstance(entry, dict):
+        return None
+    vid = entry.get(str(language or "").strip().lower())
+    return vid.strip() if isinstance(vid, str) and vid.strip() else None
+
+
+def _voice_line(options: dict[str, Any]) -> str:
+    """VOICE LOCK — the narration counterpart of CHARACTER LOCK.
+
+    Carried by EVERY prompt whose leg can call ElevenLabs, not just the start prompt: a leg is a
+    cold `claude -p`, so a voice named once at job start is gone by the time the media leg runs."""
+    opts = options or {}
+    lang = str(opts.get("language", "en")).lower()
+    narrator = str(opts.get("narrator", "panda")).lower()
+    fallback = (" Only if ElevenLabs ITSELF is unavailable (an infrastructure failure — never a "
+                "missing id) may you fall back to Higgsfield audio, and you must record that "
+                "decision in decision_log.")
+
+    override = opts.get("voice_id")
+    if override:
+        return (f"VOICE LOCK — use ElevenLabs voice_id='{override}' (explicit override from the "
+                "job). Use this exact id; never substitute another voice." + fallback)
+
+    resolved = _resolve_voice_id(narrator, lang)
+    if resolved:
+        return (f"VOICE LOCK — use ElevenLabs voice_id='{resolved}', the brand voice for "
+                f"narrator='{narrator}' language='{lang}' (resolved by the launcher from "
+                "config/panda-elements.json `voices`). Use this exact id — narration generated "
+                "with any other voice is a defect; do not ship it." + fallback)
+
+    return (f"VOICE LOCK — BLOCKER: narrator='{narrator}' with language='{lang}' resolves to NO "
+            "voice id in config/panda-elements.json `voices`. Do NOT improvise a voice, do NOT "
+            "borrow a neighbouring language, and do NOT fall back to Higgsfield audio to get past "
+            "this. Generate everything else, then stop at the gate (status='awaiting_human') and "
+            "name the unconfigured narrator/language pair in the question.")
+
+
 _DEFAULT_PIPELINE = os.environ.get("PANDA_PIPELINE_TYPE", "panda-video")
 
 
@@ -1053,12 +1104,12 @@ class ClaudeCodeRunner(Runner):
                 self._run_agent(self._motion_sample_prompt(job_id), job_id, "motion_sample")
             else:
                 # motion sample disabled: animate all approved stills straight away
-                self._run_agent(self._stills_approved_prompt(job_id), job_id, "assets_media")
+                self._run_agent(self._stills_approved_prompt(job_id, state.get("options")), job_id, "assets_media")
             return self._sync(state)
 
         if gate == "approve_motion_sample":
             if decision == "approve":
-                self._run_agent(self._motion_approved_prompt(job_id), job_id, "assets_media")
+                self._run_agent(self._motion_approved_prompt(job_id, state.get("options")), job_id, "assets_media")
             else:
                 self._run_agent(self._revise_prompt(
                     job_id, "assets (MOTION SAMPLE phase — regenerate ONLY the sample clip per the "
@@ -1382,7 +1433,6 @@ class ClaudeCodeRunner(Runner):
             return self._image_start_prompt(job_id, brief, options)
         lang = str(options.get("language", "en")).lower()
         narrator = str(options.get("narrator", "panda")).lower()
-        voice_id = options.get("voice_id")            # explicit override from Dify
         music = options.get("music", True)            # BGM: mood string, True (default bed), or False
         runtime = str(options.get("render_runtime", "auto")).lower()  # auto|ffmpeg|remotion|hyperframes
         motion_sample = str(options.get("motion_sample", False)).lower() \
@@ -1417,14 +1467,7 @@ class ClaudeCodeRunner(Runner):
                 "React/HTML motion graphics. Record the choice in edit_decisions.render_runtime "
                 "and log a render_runtime_selection decision.")
 
-        if voice_id:
-            voice_line = (f"VOICE — use ElevenLabs voice_id='{voice_id}' (explicit override from "
-                          "the job). ")
-        else:
-            voice_line = ("VOICE — use ElevenLabs with the voice_id from config/panda-elements.json "
-                          f"`voices` matching narrator='{narrator}' and language='{lang}'. ")
-        voice_line += ("Only if ElevenLabs is truly unavailable, fall back to Higgsfield audio and "
-                       "record that decision.")
+        voice_line = _voice_line(options)
 
         if music is False or str(music).lower() in ("false", "none", "no", "off"):
             music_line = "MUSIC — do NOT add a background music bed for this job."
@@ -1600,14 +1643,15 @@ class ClaudeCodeRunner(Runner):
             f"(status='awaiting_human', end your turn). If the pipeline is complete, finish.{extra}"
         )
 
-    def _stills_approved_prompt(self, job_id: str) -> str:
+    def _stills_approved_prompt(self, job_id: str,
+                                options: Optional[dict[str, Any]] = None) -> str:
         return (
             f"For project_id: {job_id}, the STILLS phase of the `assets` stage is APPROVED. Do NOT "
             "mark the assets stage completed yet. Animate the approved stills into motion clips "
             "(image_to_video via the Higgsfield MCP bridge) and generate narration/music "
             "(ElevenLabs), record every file in asset_manifest, then rewrite the assets checkpoint "
             "with status='awaiting_human' (WITHOUT the 'stills' phase marker) and STOP for the "
-            "full media approval."
+            "full media approval.\n\n" + _voice_line(options or {})
         )
 
     def _budget_raised_prompt(self, job_id: str, new_cap: Any) -> str:
@@ -1632,7 +1676,8 @@ class ClaudeCodeRunner(Runner):
             "\"motion_sample\"} and STOP. Generate NO other clips and NO audio yet."
         )
 
-    def _motion_approved_prompt(self, job_id: str) -> str:
+    def _motion_approved_prompt(self, job_id: str,
+                                options: Optional[dict[str, Any]] = None) -> str:
         return (
             f"For project_id: {job_id}, the MOTION SAMPLE is APPROVED. Do NOT mark the assets stage "
             "completed yet. Animate the REMAINING approved stills into motion clips using the SAME "
@@ -1640,7 +1685,7 @@ class ClaudeCodeRunner(Runner):
             "narration/music (ElevenLabs). Record every file (incl. the already-approved sample) in "
             "asset_manifest with per-asset Higgsfield credits, then rewrite the assets checkpoint "
             "with status='awaiting_human' (WITHOUT any phase marker) and STOP for the full media "
-            "approval."
+            "approval.\n\n" + _voice_line(options or {})
         )
 
     def _revise_prompt(self, job_id: str, stage: Optional[str], response: dict[str, Any],

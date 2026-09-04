@@ -265,7 +265,7 @@ after the last content gate — a post-cut overlay, never in generation. `skip` 
 | key | values | meaning |
 |---|---|---|
 | `language` | `"en"` \| `"zh"` | narration language (video) / primary on-slide language (carousel) |
-| `narrator` | `"panda"` \| `"customer"` | which character narrates (video) |
+| `narrator` | `"panda"` \| `"customer"` \| `"narrator"` | who speaks (video). `panda` = the mascot, `customer` = the human, `narrator` = the off-screen background voice-over. Note the overlap: the option is named `narrator` and its *value* names the speaker, so a voice-over job is `"narrator": "narrator"` |
 | `voice_id` | ElevenLabs voice id (string) | **explicit override** — use this exact voice, ignore the default |
 | `music` | mood string, or `false` | background music via ElevenLabs (`"upbeat, light"`), or `false` to skip |
 | `render_runtime` | `"auto"` \| `"ffmpeg"` \| `"remotion"` \| `"hyperframes"` | which render engine composes the video. Default `"auto"` |
@@ -274,7 +274,22 @@ after the last content gate — a post-cut overlay, never in generation. `skip` 
 | `aspect_ratio` | string | stills canvas, passed through to `generate_image`. Carousel default `"4:5"`; **panda-image** default `"1:1"`. Also `9:16`, `WIDTHxHEIGHT`, … |
 | `gates` | e.g. `["scene_plan", "stills"]` | carousel only — omit `script` to auto-approve GATE 1 |
 
-If `voice_id` is omitted, the engine picks the brand voice from config by `narrator`+`language`.
+If `voice_id` is omitted, the engine picks the brand voice from config by `narrator`+`language` —
+`config/panda-elements.json` → `voices[narrator][language]`. All six combinations are populated
+(`panda` / `customer` / `narrator` × `en` / `zh`), so there is no longer a null to fall through.
+
+**The launcher resolves it, not the agent.** The literal id is interpolated into every prompt whose
+leg can call ElevenLabs — the same way the Higgsfield Element ids are (CHARACTER LOCK) — so the
+agent never looks it up and never chooses. If a `narrator`+`language` pair resolves to **no** id,
+the job does **not** silently downgrade to a generic preset: it generates everything else and stops
+at the assets gate with the unconfigured pair named in `question`. Fix it by passing an explicit
+`voice_id`, or by populating that slot in `config/panda-elements.json`. The only permitted fallback
+is ElevenLabs itself being unavailable — an infrastructure failure, never a missing id.
+
+> **One job carries one `narrator` and one `language`.** A script with two speakers, or with mixed
+> EN and ZH lines, cannot be expressed by these options alone — pass `voice_id` per run, or split
+> the job. Jobs have shipped with `language:"en", narrator:"panda"` over bilingual two-character
+> content; the voice that comes out is the option's, not the script's.
 
 **`render_runtime`** (upstream-style engine selection):
 - `"auto"` (default) — the engine picks per the decision matrix + what's installed on the box. For character-mascot ads this resolves to `ffmpeg`.
