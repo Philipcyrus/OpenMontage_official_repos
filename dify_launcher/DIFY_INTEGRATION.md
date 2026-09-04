@@ -278,6 +278,14 @@ If `voice_id` is omitted, the engine picks the brand voice from config by `narra
 `config/panda-elements.json` → `voices[narrator][language]`. All six combinations are populated
 (`panda` / `customer` / `narrator` × `en` / `zh`), so there is no longer a null to fall through.
 
+**The launcher resolves it, not the agent.** The literal id is interpolated into every prompt whose
+leg can call ElevenLabs — the same way the Higgsfield Element ids are (CHARACTER LOCK) — so the
+agent never looks it up and never chooses. If a `narrator`+`language` pair resolves to **no** id,
+the job does **not** silently downgrade to a generic preset: it generates everything else and stops
+at the assets gate with the unconfigured pair named in `question`. Fix it by passing an explicit
+`voice_id`, or by populating that slot in `config/panda-elements.json`. The only permitted fallback
+is ElevenLabs itself being unavailable — an infrastructure failure, never a missing id.
+
 > **One job carries one `narrator` and one `language`.** A script with two speakers, or with mixed
 > EN and ZH lines, cannot be expressed by these options alone — pass `voice_id` per run, or split
 > the job. Jobs have shipped with `language:"en", narrator:"panda"` over bilingual two-character

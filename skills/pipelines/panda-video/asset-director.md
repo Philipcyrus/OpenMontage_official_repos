@@ -103,17 +103,36 @@ After the motion sample is approved (or straight after the stills when `motion_s
   params) as the approved sample — see `skills/meta/higgsfield-mcp-bridge.md`. i2v from the
   on-Element still; hold 2D medium and the locked customer/panda — do not invent a new person
   or make the clip 3D / photoreal.
-- **Narration**: `elevenlabs_tts` per script section with the resolved voice id.
+- **Narration**: `elevenlabs_tts` per script section using the **exact `voice_id` named in
+  the VOICE LOCK line of this leg's prompt**. The launcher resolves it from
+  `config/panda-elements.json` `voices` by narrator+language and puts the literal id in the
+  prompt — you do not look it up, and you do not choose. Narration generated with any other
+  voice is a defect; do not ship it.
 - **Music** (if requested): `music_gen` (ElevenLabs Music), kept under the VO.
 Then write the assets checkpoint `status='awaiting_human'` **without** any phase marker and STOP.
 The launcher surfaces this as the **approve_assets** gate. On "request revision" here, regenerate
 only the flagged shots (`response.shots`).
 
-### 5. Character consistency
+### 5. Character and voice consistency
 The panda mascot must look identical across every still/clip. Always attach the panda master
 Element id from `config/panda-elements.json` in the **media slot**; use the customer Element
 for the customer. Never invent a new panda or human. See CHARACTER LOCK in
 `skills/meta/higgsfield-mcp-bridge.md`.
+
+**VOICE LOCK — the same rule for narration.** A voice is chosen exactly the way a face is: from
+`config/panda-elements.json`, never improvised. The launcher resolves `voices[narrator][language]`
+and interpolates the **literal `voice_id`** into every prompt whose leg can call ElevenLabs, so
+the id is in front of you at the moment you generate — you never look it up and never pick one.
+
+- Use that id verbatim. Narration in any other voice is a defect, exactly as a still without the
+  Element attached is a defect.
+- If the prompt says **VOICE LOCK — BLOCKER**, that narrator/language pair has no configured
+  voice. Do **not** improvise, do **not** borrow a neighbouring language, and do **not** fall back
+  to Higgsfield `seed_audio` to get past it — that swaps the brand voice for a generic preset and
+  nobody hears it until the assets gate. Generate everything else, then stop at the gate and name
+  the unconfigured pair in the question.
+- The one permitted fallback is ElevenLabs **itself** being unavailable — an infrastructure
+  failure, never a missing id — and it must be recorded in `decision_log`.
 
 ### 6. Build the asset_manifest (in PHASE 3)
 Record EVERY generated file canonically: per asset `id`, `type` (`image|video|audio|narration|

@@ -412,6 +412,35 @@ vid_ms = run._start_prompt("jV", "a video", {"motion_sample": True}, "panda-vide
 assert "PHASE 2 (motion sample)" in vid_ms
 print("[ok] start prompts: carousel/image stills-only vs video")
 
+# 6b) VOICE LOCK — the narration counterpart of CHARACTER LOCK. Parity is three things: the
+# LITERAL id sits in the prompt (not an instruction to go look it up), it is present on the legs
+# that actually call ElevenLabs (every leg is a cold `claude -p`, so naming it once at start does
+# not reach them), and an unresolvable narrator/language BLOCKS instead of silently downgrading
+# to a generic preset.
+assert R._resolve_voice_id("panda", "en") == "hMSPJ6ja4HIrFHhCGCMl"
+assert R._resolve_voice_id("customer", "zh") == "BqljjWyTnrioXPCNkCd4"
+assert R._resolve_voice_id("narrator", "zh") == "JZLpE3AGwpKYZI2X65hN"
+assert R._resolve_voice_id("robot", "en") is None
+assert R._resolve_voice_id("panda", "fr") is None
+
+_vopts = {"narrator": "panda", "language": "en"}
+vz = run._start_prompt("jV", "a video", _vopts, "panda-video")
+assert "VOICE LOCK" in vz and "hMSPJ6ja4HIrFHhCGCMl" in vz, "start prompt must carry the literal id"
+assert "`voices` matching narrator" not in vz, "must be the id itself, not a lookup instruction"
+
+for _p in (run._stills_approved_prompt("jV", _vopts), run._motion_approved_prompt("jV", _vopts)):
+    assert "VOICE LOCK" in _p and "hMSPJ6ja4HIrFHhCGCMl" in _p, "media leg must carry the voice id"
+assert "VOICE LOCK" in run._stills_approved_prompt("jV")        # no options must not crash
+assert "VOICE LOCK" in run._motion_approved_prompt("jV")
+
+blk = run._start_prompt("jV", "a video", {"narrator": "robot", "language": "en"}, "panda-video")
+assert "BLOCKER" in blk, "an unresolvable pair must block"
+assert "may you fall back to Higgsfield" not in blk, "a missing id must NOT offer the fallback"
+
+ovr = run._start_prompt("jV", "a video", {"voice_id": "OVERRIDE123"}, "panda-video")
+assert "OVERRIDE123" in ovr
+print("[ok] VOICE LOCK: literal id in start + media legs; unresolvable pair blocks")
+
 # 7) _pipeline_of / gate-collapse helpers -----------------------------------
 assert R._pipeline_of({}) == "panda-video"
 assert R._pipeline_of({"pipeline": "panda-carousel"}) == "panda-carousel"

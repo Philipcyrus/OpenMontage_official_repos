@@ -90,7 +90,10 @@ DIFY_RUNNER=mock uvicorn dify_launcher.app:app --host 0.0.0.0 --port 8600
 - `PANDA_TOKEN` — optional secret for the `/montage/*` raw-render door (`X-Panda-Token`), independent of `DIFY_TOKEN`
 
 ## Job options (`POST /jobs` `options`)
-- `language`, `narrator`, `voice_id`, `music`
+- `language`, `narrator`, `voice_id`, `music`. The launcher resolves `voices[narrator][language]`
+  from `config/panda-elements.json` and puts the **literal** voice id in every prompt that can call
+  ElevenLabs. An unresolvable pair stops at the assets gate naming the pair — it never falls back
+  to a generic preset. `voice_id` overrides the lookup.
 - `render_runtime` — `auto` (default) | `ffmpeg` | `remotion` | `hyperframes`. The `ffmpeg`
   lane (`panda_render`) needs no Node; `remotion`/`hyperframes` need **Node ≥ 22** on the box.
 - `motion_sample` — `false` (default) | `true`. When on, adds the `approve_motion_sample` gate
