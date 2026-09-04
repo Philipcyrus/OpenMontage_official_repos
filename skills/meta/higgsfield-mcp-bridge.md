@@ -89,6 +89,74 @@ Then rewrite the assets checkpoint `status='awaiting_human'` with **top-level**
 If the image model rejects a source still, surface a blocker and wait. Do **not**
 silently fall back to FRESH.
 
+## CHARACTER LOCK (binding — panda-video / panda-carousel / panda-image)
+
+Any mention of a human or the panda is the locked brand pair from
+`config/panda-elements.json`. Never invent a new face, body, mascot, or
+"similar traveller."
+
+| Role | Higgsfield Element | Local sheet (style only — do NOT bake the turnaround grid into the still) |
+|------|--------------------|----------------------------------------------------------------------------|
+| Human / customer | `089ddcec-c375-4299-8a65-6d8b757dd81a` (`customer_reference_element_id`) | `brand/panda-mobile/customer/Customer-V3-Hero-Turnaround-v1.png` |
+| Panda / mascot | `4c01c8f9-6cfb-4d8c-9eb9-74cb61462103` (`panda_reference_element_id`) | `brand/panda-mobile/mascot/Panda-Mobile-Smiling-Hero-Turnaround-v1.png` |
+
+Do **not** use `student_ugc_element_id` (still TODO).
+
+**Phrase aliases** that must resolve to those IDs (brief, idea, script, scene plan,
+`required_assets`, still prompts, i2v prompts, gate questions) — see also
+`phrase_aliases` under `higgsfield` in `config/panda-elements.json`:
+
+- **Human:** human, person, woman, man, girl, guy, traveller / traveler, customer,
+  UGC talent, user, character, the girl with the suitcase, "someone at the airport"
+- **Panda:** panda, mascot, brand mascot, bear, Panda Mobile character, "cute panda"
+
+**How to pass them (the only lock that works):**
+
+1. Idea rewrites the brief: those phrases become "the customer Element" / "the panda
+   Element" plus the IDs. Downstream never treats the English words as a character spec.
+2. Scene plan names the Element IDs on every scene that shows that role. Descriptions
+   say "the woman" / "the panda", not "a young traveller" / "a cute cartoon panda."
+3. Every `generate_image` / image-to-video that shows that role **attaches the Element
+   in the MCP media / `image_references` slot** (`models_explore` for the live role
+   name). Putting the UUID in the prompt sentence is **forbidden** (it draws the
+   six-view turnaround sheet).
+4. Prompt prose may describe pose, props, and setting only. Wardrobe fights the sheet
+   only on an explicit human revise — take 1 keeps the Element's canonical look.
+5. A still or clip of a human or panda **without** that Element in `medias` is a
+   defect; do not ship it. Log the IDs on the `asset_manifest` row.
+
+## STILLS 2-TAKE HARD RULE (binding)
+
+Per scene, per stills round (first GATE 3 pass, or a later human `revise` on that scene):
+
+1. **Take 1** — one `generate_image` of the *shipped* still (both characters in one
+   T2I if the scene needs both). Attach Element IDs in the MCP media slot; never put
+   UUIDs in the prompt.
+2. If take 1 is unusable: **take 2 is i2i of take 1** (one change). Never a fresh T2I.
+3. **Stop.** Ship take 2 if it exists, else take 1. Write `approve_stills` and end
+   the turn. Flag remaining defects in the gate `question` — do not generate again.
+4. A third paid `generate_image` for that scene in this round is a **defect**. Known
+   no-ops (slide / reposition) do not get a third try.
+5. Offline `still_frame_conform` / HSV color passes do not count. `get_cost:true`
+   does not count. Image-to-video is not this cap.
+6. Human `revise` on flagged shots starts a **new** 2-take budget for those shots only.
+
+Do **not** plan a "customer-alone base plate, then i2i-add panda" as two
+`required_assets` — that burns the whole budget with no room for a reject. One image
+`required_asset` per scene. Archive a rejected take 1 as `rejected_*` if take 2 ships.
+
+## 2D MEDIUM LOCK (binding)
+
+Default every panda still and clip to **2D flat illustration** matching the customer
+and panda turnaround sheets — same medium for people, mascot, props, and set. Use
+`styles/panda.yaml` `image_prompt_prefix` / `image_negative_prompt`.
+
+- No Pixar / CGI / photoreal hall composited with a vector sticker.
+- Mixed 3D-human + 2D-panda is a fail.
+- i2v prompts must hold the 2D still — do not ask Kling to make the clip 3D / photoreal.
+- Override only if the **user brief** explicitly asks for 3D / photoreal / live-action;
+  log that in `decision_log`.
+
 ## Per-clip generation loop
 
 For each scene/clip the `scene_plan` requires:

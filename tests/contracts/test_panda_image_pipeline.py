@@ -35,3 +35,23 @@ def test_image_idea_is_ungated():
     manifest = load_pipeline("panda-image")
     idea = next(s for s in manifest["stages"] if s["name"] == "idea")
     assert idea["human_approval_default"] is False
+
+
+def test_image_asset_director_locks_2take_2d_and_elements():
+    text = (ROOT / "skills/pipelines/panda-image/asset-director.md").read_text(encoding="utf-8")
+    assert "2 paid" in text or "2-TAKE" in text
+    assert "2D" in text or "2d" in text.lower()
+    assert "flat" in text.lower()
+    assert "i2i" in text.lower()
+    assert "CHARACTER LOCK" in text or "media" in text.lower()
+
+
+def test_panda_playbook_is_2d_and_valid():
+    from styles.playbook_loader import load_playbook
+
+    pb = load_playbook("panda")
+    prefix = pb["asset_generation"]["image_prompt_prefix"].lower()
+    neg = pb["asset_generation"]["image_negative_prompt"].lower()
+    assert "2d" in prefix or "flat" in prefix
+    assert "3d" in neg or "cgi" in neg or "pixar" in neg
+    assert "photoreal" in neg

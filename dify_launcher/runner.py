@@ -17,7 +17,7 @@ Gate sequence (matches pipeline_defs/panda-video.yaml — upstream shape + Panda
           ─▶ GATE 6 approve_brand ─▶ done
 scene_plan produces a TEXT plan only (no media). The assets stage runs in up to THREE human-
 reviewed phases (all stage="assets"): first STILLS ONLY (cheap — approve the look before any
-video); then, when the job option motion_sample is on (default), ONE hero still is animated into
+video); then, when the job option motion_sample is on (default off; opt in), ONE hero still is animated into
 a MOTION SAMPLE (approve the motion/animation before batching all clips — the biggest cost/time
 gate); then the full media (all clips + voice + music) recorded in asset_manifest. The pauses are
 distinguished by the checkpoint's partial_progress.phase ("stills" | "motion_sample" | full).
@@ -47,7 +47,7 @@ _ENGINE_ROOT = Path(__file__).resolve().parents[1]
 # ordered human-approval gates. Note: approve_stills + approve_motion_sample + approve_assets are
 # pauses of the SINGLE `assets` stage (stills cost gate, motion-sample cost gate, then full media)
 # — see _sync/_do_stills/_do_motion_sample. approve_motion_sample only occurs when the job option
-# motion_sample is on (default true).
+# motion_sample is on (default false; Dify/OpenWebUI may pass true to opt in).
 GATES = ["approve_script", "approve_scene_plan", "approve_stills",
          "approve_motion_sample", "approve_assets", "approve_final", "approve_brand"]
 # gates from the previous storyboard-stills flow — resuming one is refused with a migration note
@@ -55,8 +55,8 @@ _LEGACY_GATES = {"approve_storyboard", "approve_clips"}
 
 
 def _motion_sample_enabled(state: dict[str, Any]) -> bool:
-    """Whether to insert the one-clip motion-sample cost gate (job option, default ON)."""
-    v = (state.get("options") or {}).get("motion_sample", True)
+    """Whether to insert the one-clip motion-sample cost gate (job option, default OFF)."""
+    v = (state.get("options") or {}).get("motion_sample", False)
     return str(v).lower() not in ("false", "0", "no", "off", "")
 
 
@@ -1385,8 +1385,8 @@ class ClaudeCodeRunner(Runner):
         voice_id = options.get("voice_id")            # explicit override from Dify
         music = options.get("music", True)            # BGM: mood string, True (default bed), or False
         runtime = str(options.get("render_runtime", "auto")).lower()  # auto|ffmpeg|remotion|hyperframes
-        motion_sample = str(options.get("motion_sample", True)).lower() \
-            not in ("false", "0", "no", "off", "")    # one-clip motion cost gate (default on)
+        motion_sample = str(options.get("motion_sample", False)).lower() \
+            not in ("false", "0", "no", "off", "")    # one-clip motion cost gate (default off)
         cap = _budget_cap({"options": options})       # max_higgsfield_credits, or None (no cap)
 
         if cap is not None:
@@ -1438,8 +1438,16 @@ class ClaudeCodeRunner(Runner):
             f"project_id: {job_id}\nBrief: {brief}\n"
             f"language: {lang}    narrator: {narrator}\n\n"
             "BRAND — MANDATORY, do NOT improvise: read config/panda-elements.json and USE its "
-            "Higgsfield reference Element IDs for character consistency — the panda Element for "
-            "every panda shot, the customer Element for the customer. Never invent a new panda.\n"
+            "Higgsfield reference Element IDs — customer "
+            "`089ddcec-c375-4299-8a65-6d8b757dd81a`, panda "
+            "`4c01c8f9-6cfb-4d8c-9eb9-74cb61462103`. Any human/traveller/customer/person OR "
+            "panda/mascot mention maps to those IDs (see phrase_aliases). ATTACH Elements as "
+            "MCP media / image_references — never put UUIDs in the prompt sentence, never invent "
+            "a new character. Look: styles/panda.yaml — default medium is 2D flat illustration "
+            "(same medium for people, mascot, and set). Max 2 paid generate_image calls per "
+            "scene; take 2 = i2i of take 1; then STOP and gate. Full rules: "
+            "skills/meta/higgsfield-mcp-bridge.md (CHARACTER LOCK, STILLS 2-TAKE HARD RULE, "
+            "2D MEDIUM LOCK).\n"
             f"{voice_line}\n{music_line}\n{runtime_line}\n{budget_line}\n\n"
             "Follow AGENT_GUIDE.md and skills/meta/checkpoint-protocol.md. Execute stages in "
             "order. At every stage whose manifest sets human_approval_default: true, write the "
@@ -1480,19 +1488,25 @@ class ClaudeCodeRunner(Runner):
             f"project_id: {job_id}\nBrief: {brief}\n"
             f"language: {lang}    aspect_ratio: {ratio}\n\n"
             "BRAND — MANDATORY: read config/panda-elements.json and USE its Higgsfield reference "
-            "Element IDs — the panda Element for every panda slide, the customer Element for the "
-            "customer. Never invent a new panda. Look: styles/panda.yaml.\n"
+            "Element IDs — customer `089ddcec-c375-4299-8a65-6d8b757dd81a`, panda "
+            "`4c01c8f9-6cfb-4d8c-9eb9-74cb61462103`. Any human/traveller/customer OR panda/mascot "
+            "mention maps to those IDs (phrase_aliases). ATTACH as MCP media — never UUID in "
+            "prompt, never invent a new character. Look: styles/panda.yaml — default 2D flat. "
+            "Max 2 paid generate_image per slide; take 2 = i2i of take 1; then STOP. See "
+            "skills/meta/higgsfield-mcp-bridge.md (CHARACTER LOCK, STILLS 2-TAKE, 2D MEDIUM).\n"
             f"{budget_line}\n{script_line}\n\n"
             "Follow AGENT_GUIDE.md, pipeline_defs/panda-carousel.yaml, and "
             "skills/pipelines/panda-carousel/*-director.md. Execute stages in order.\n"
             "PIPELINE SHAPE: idea (internal, no gate) → script (GATE 1) → scene_plan TEXT "
             "(GATE 2) → assets STILLS ONLY (GATE 3) → DONE.\n"
             "  - scene_plan: one scene per slide, bilingual captions.zh/en, required_assets are "
-            "images only. Set metadata.aspect_ratio to the job option "
-            f"'{ratio}' (caller-set; default 4:5). Pass that same ratio to generate_image.\n"
-            "  - assets: generate ONLY stills via Higgsfield generate_image at that aspect ratio. "
-            "Bake primary-language copy into each still. Write asset_manifest (images only) with "
-            "per-still credits. Checkpoint status='awaiting_human' AND "
+            "images only (exactly one image per slide). Set metadata.aspect_ratio to the job option "
+            f"'{ratio}' (caller-set; default 4:5). Pass that same ratio to generate_image. "
+            "Name locked Element IDs; plan 2D flat.\n"
+            "  - assets: generate ONLY stills via Higgsfield generate_image at that aspect ratio "
+            "(max 2 paid calls per slide; take 2 = i2i). Bake primary-language copy into each "
+            "still. Write asset_manifest (images only) with per-still credits and Element IDs. "
+            "Checkpoint status='awaiting_human' AND "
             "partial_progress={\"phase\":\"stills\"} and STOP.\n"
             "Do NOT generate motion clips, TTS, music, edit_decisions, or a compose/render. "
             "Do NOT brand the stills (no wordmark overlay) — branding is a later POST /brand. "
@@ -1518,8 +1532,12 @@ class ClaudeCodeRunner(Runner):
             f"project_id: {job_id}\nBrief: {brief}\n"
             f"language: {lang}    aspect_ratio: {ratio}\n\n"
             "BRAND — MANDATORY: read config/panda-elements.json and USE its Higgsfield reference "
-            "Element IDs — the panda Element for every panda shot, the customer Element for the "
-            "customer. Never invent a new panda. Look: styles/panda.yaml.\n"
+            "Element IDs — customer `089ddcec-c375-4299-8a65-6d8b757dd81a`, panda "
+            "`4c01c8f9-6cfb-4d8c-9eb9-74cb61462103`. Any human/traveller/customer OR panda/mascot "
+            "mention maps to those IDs (phrase_aliases). ATTACH as MCP media — never UUID in "
+            "prompt, never invent a new character. Look: styles/panda.yaml — default 2D flat. "
+            "Max 2 paid generate_image; take 2 = i2i of take 1; then STOP. See "
+            "skills/meta/higgsfield-mcp-bridge.md (CHARACTER LOCK, STILLS 2-TAKE, 2D MEDIUM).\n"
             f"{budget_line}\n\n"
             "Follow AGENT_GUIDE.md, pipeline_defs/panda-image.yaml, and "
             "skills/pipelines/panda-image/*-director.md. Execute stages in order.\n"
@@ -1527,10 +1545,12 @@ class ClaudeCodeRunner(Runner):
             "assets ONE STILL (GATE 2) → DONE. There is NO script stage.\n"
             "  - scene_plan: exactly ONE scene, bilingual captions.zh/en, required_assets is "
             "one image only. Set metadata.aspect_ratio to the job option "
-            f"'{ratio}' (caller-set; default 1:1). Pass that same ratio to generate_image.\n"
-            "  - assets: generate ONE still via Higgsfield generate_image at that aspect ratio. "
-            "Bake primary-language copy into the still. Write asset_manifest (images only) with "
-            "credits. Checkpoint status='awaiting_human' AND "
+            f"'{ratio}' (caller-set; default 1:1). Pass that same ratio to generate_image. "
+            "Name locked Element IDs; plan 2D flat.\n"
+            "  - assets: generate ONE still via Higgsfield generate_image at that aspect ratio "
+            "(max 2 paid calls; take 2 = i2i). Bake primary-language copy into the still. Write "
+            "asset_manifest (images only) with credits and Element IDs. Checkpoint "
+            "status='awaiting_human' AND "
             "partial_progress={\"phase\":\"stills\"} and STOP.\n"
             "Do NOT generate motion clips, TTS, music, edit_decisions, or a compose/render. "
             "Do NOT brand the still (no wordmark overlay) — branding is a later POST /brand. "
@@ -1540,26 +1560,30 @@ class ClaudeCodeRunner(Runner):
     def _assets_phases_text(self, motion_sample: bool) -> str:
         stills = (
             "  PHASE 1 (stills): generate ONLY the stills — one per scene — via the Higgsfield "
-            "MCP bridge (skills/meta/higgsfield-mcp-bridge.md), then write the assets checkpoint "
-            "with status='awaiting_human' AND partial_progress={\"phase\":\"stills\"} and STOP. "
-            "Do NOT generate any video yet.\n")
+            "MCP bridge (skills/meta/higgsfield-mcp-bridge.md). CHARACTER LOCK: attach "
+            "customer/panda Element IDs as media (never invent, never UUID-in-prompt). "
+            "2D MEDIUM LOCK: styles/panda.yaml flat illustration. STILLS 2-TAKE HARD RULE: "
+            "max 2 paid generate_image per scene; take 2 = i2i of take 1; then write the assets "
+            "checkpoint with status='awaiting_human' AND partial_progress={\"phase\":\"stills\"} "
+            "and STOP. Do NOT generate any video yet.\n")
         if motion_sample:
             return stills + (
                 "  PHASE 2 (motion sample): only after the stills are approved, animate ONE "
                 "representative HERO still into a SINGLE sample clip (image_to_video) so the "
-                "motion/animation can be approved before the full batch. Write the assets "
-                "checkpoint status='awaiting_human' AND partial_progress={\"phase\":"
+                "motion/animation can be approved before the full batch. Hold the 2D still and "
+                "locked characters — do not invent a new person or make the clip 3D. Write the "
+                "assets checkpoint status='awaiting_human' AND partial_progress={\"phase\":"
                 "\"motion_sample\"} and STOP — no other clips, no audio yet.\n"
                 "  PHASE 3 (media): only after the motion sample is approved, animate the "
-                "REMAINING stills using the SAME motion approach + generate narration/music "
-                "(ElevenLabs), record everything (incl. the sample) in asset_manifest with "
-                "per-asset Higgsfield credits, then write the assets checkpoint "
-                "status='awaiting_human' (no phase marker) and STOP.\n")
+                "REMAINING stills using the SAME motion approach (hold 2D + locked Elements) + "
+                "generate narration/music (ElevenLabs), record everything (incl. the sample) in "
+                "asset_manifest with per-asset Higgsfield credits, then write the assets "
+                "checkpoint status='awaiting_human' (no phase marker) and STOP.\n")
         return stills + (
             "  PHASE 2 (media): only after the stills are approved, animate the approved stills "
-            "into motion clips (image_to_video) + generate narration/music (ElevenLabs), record "
-            "everything in asset_manifest, then write the assets checkpoint status='awaiting_human' "
-            "(no 'stills' phase marker) and STOP.\n")
+            "into motion clips (image_to_video; hold 2D + locked Elements) + generate "
+            "narration/music (ElevenLabs), record everything in asset_manifest, then write the "
+            "assets checkpoint status='awaiting_human' (no 'stills' phase marker) and STOP.\n")
 
     def _continue_prompt(self, job_id: str, pipeline: Optional[str] = None) -> str:
         p = pipeline or _DEFAULT_PIPELINE

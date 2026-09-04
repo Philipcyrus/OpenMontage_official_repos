@@ -34,3 +34,26 @@ def test_carousel_idea_is_ungated():
     manifest = load_pipeline("panda-carousel")
     idea = next(s for s in manifest["stages"] if s["name"] == "idea")
     assert idea["human_approval_default"] is False
+
+
+_CUSTOMER_ELEMENT = "089ddcec-c375-4299-8a65-6d8b757dd81a"
+_PANDA_ELEMENT = "4c01c8f9-6cfb-4d8c-9eb9-74cb61462103"
+
+
+def test_carousel_asset_director_locks_2take_2d_and_elements():
+    text = (ROOT / "skills/pipelines/panda-carousel/asset-director.md").read_text(encoding="utf-8")
+    assert "2-TAKE" in text or "2 paid" in text
+    assert "2D" in text or "2d" in text.lower()
+    assert "flat" in text.lower()
+    assert "CHARACTER LOCK" in text or "media" in text.lower()
+    assert "i2i" in text.lower()
+
+
+def test_higgsfield_bridge_locks_2take_2d_and_elements():
+    text = (ROOT / "skills/meta/higgsfield-mcp-bridge.md").read_text(encoding="utf-8")
+    assert "CHARACTER LOCK" in text
+    assert "STILLS 2-TAKE HARD RULE" in text
+    assert "2D MEDIUM LOCK" in text
+    assert _CUSTOMER_ELEMENT in text
+    assert _PANDA_ELEMENT in text
+    assert "never invent" in text.lower() or "Never invent" in text

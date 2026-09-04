@@ -57,13 +57,13 @@ The `panda-video` pipeline pauses for a human at up to six points (`pipeline_def
 | 1 | `approve_script` | the script |
 | 2 | `approve_scene_plan` | the structured **text** scene plan (no media generated yet) |
 | 3 | `approve_stills` | one still per scene — **no video yet**, so a reject here costs nothing |
-| 3.5 | `approve_motion_sample` | **one** hero clip — approve the motion/animation **before** the full batch (cost gate; on by default, skippable) |
+| 3.5 | `approve_motion_sample` | **one** hero clip — approve the motion/animation **before** the full batch (cost gate; **off by default**, opt in with `motion_sample:true`) |
 | 4 | `approve_assets` | the full media set (remaining stills animated into clips + VO + music; revise specific shots) |
 | 5 | `approve_final` | the finished (unbranded) video |
 
 Gates 3, 3.5 & 4 are pauses of the **same** `assets` stage (tell them apart by the `gate` field).
-The `approve_motion_sample` gate appears only when the `motion_sample` job option is on (**default**);
-set `motion_sample:false` for quick drafts. Approve advances; "revise" regenerates that stage (or
+The `approve_motion_sample` gate appears only when the `motion_sample` job option is on
+(**default off**); pass `motion_sample:true` to opt in. Approve advances; "revise" regenerates that stage (or
 just the named shots). Branding is offered **after** gate 5, only if asked — `POST /jobs/{id}/brand`.
 
 **`panda-carousel`** (stills-only sibling): `POST /jobs` with `"pipeline": "panda-carousel"`.

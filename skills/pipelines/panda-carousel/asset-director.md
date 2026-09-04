@@ -28,9 +28,23 @@ Walk every scene. Each `required_assets` entry of type `image` is one still task
 `scene_plan.metadata.aspect_ratio` — default `4:5`).
 
 ### 2. Generate STILLS ONLY, then STOP (GATE 3, approve_stills)
-Generate ONE still per slide:
-- On-brand (`styles/panda.yaml`) and character-consistent (panda master Element from
-  `config/panda-elements.json`). Never invent a new panda.
+Generate ONE still per slide. **Follow the binding rules in
+`skills/meta/higgsfield-mcp-bridge.md`:** **CHARACTER LOCK**, **STILLS 2-TAKE HARD RULE**,
+and **2D MEDIUM LOCK**. Summary:
+
+- Attach `customer_reference_element_id` / `panda_reference_element_id` from
+  `config/panda-elements.json` in the MCP media / `image_references` slot whenever that
+  role appears. Never invent a new human or panda. Never put Element UUIDs in the prompt
+  sentence. Log the IDs used on each `asset_manifest` row.
+- Max **2 paid `generate_image` calls per slide** this round. Take 1 = shipped still.
+  If unusable, take 2 = **i2i of take 1** (one change), never a fresh T2I. Then STOP
+  and gate — ship take 2 if it exists, else take 1. Flag remaining defects in the gate
+  question; do not generate a third time.
+- Default medium is **2D flat** per `styles/panda.yaml`.
+- Archive a rejected take 1 as `rejected_*` if take 2 ships.
+
+Also:
+- On-brand (`styles/panda.yaml`) and character-consistent. Never invent a new panda.
 - **Aspect ratio:** use `scene_plan.metadata.aspect_ratio` / the job's `options.aspect_ratio`
   (default `4:5`). Pass it to `generate_image`. Do not rewrite to `4:5`/`1:1` only.
 - **Slides that read:** bake the **primary-language** headline/body from
@@ -50,9 +64,9 @@ The launcher surfaces this as `approve_stills`. On approval it completes the sta
 the job is done — do **not** continue to motion, TTS, edit, or compose.
 
 On "request revision", honor `mode` (`fresh` | `edit`; infer if omitted — see
-`skills/meta/higgsfield-mcp-bridge.md`):
+`skills/meta/higgsfield-mcp-bridge.md`). Each flagged slide gets a **new** 2-take budget:
 
-- **fresh:** `generate_image` from text + Element IDs only. Do not pass the old PNG.
+- **fresh:** `generate_image` from text + Element IDs only (media slot). Do not pass the old PNG.
 - **edit:** load the flagged slide from disk, `media_import` it (not
   `media_import_url`), then `generate_image` with that `media_id` and a
   preservation prompt. Same aspect ratio. If the model rejects the source
@@ -63,7 +77,8 @@ Revise only the flagged slides (`response.shots`). Replace those files + their
 **top-level** `partial_progress={"phase":"stills"}` (not nested under `metadata`).
 
 ### 3. Character consistency
-Always pass the panda master Element id; use the customer Element for the customer.
+Always attach the panda master Element id in the media slot; use the customer Element
+for the customer. See CHARACTER LOCK in `skills/meta/higgsfield-mcp-bridge.md`.
 
 ### 4. Do not brand here
 Stills stay **UGC** (no wordmark overlay). Branding is `POST /jobs/{id}/brand` after the

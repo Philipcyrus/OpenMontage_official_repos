@@ -5,7 +5,8 @@ best-of-both shape (upstream text plan + a Panda stills cost gate):
     start -> GATE 1 (script) -> GATE 2 (scene_plan, TEXT) -> GATE 3 (stills, NO video)
           -> GATE 3.5 (motion sample, ONE clip) -> GATE 4 (assets, all media)
           -> GATE 5 (final) -> GATE 6 (approve_brand) -> done
-Also proves the motion_sample=false toggle skips the motion gate (stills -> assets directly).
+Also proves default motion_sample=off skips the motion gate (stills -> assets directly);
+opt in with options.motion_sample=true to exercise GATE 3.5.
 
 Proves the Dify-facing contract, local storage, checkpoint/resume, that scene_plan produces
 NO media (text only), that the STILLS gate produces stills with NO video on disk (the cost
@@ -62,8 +63,10 @@ h = c.get("/health").json()
 print("health:", h)
 
 # 1) Dify posts the brief -> GATE 1 (approve_script)
+# Opt in to motion_sample so this handshake still covers GATE 3.5 (default is off).
 b = _step("POST /jobs", c.post("/jobs", json={
-    "brief": "35s vertical eSIM tip: Panda mascot explains avoiding roaming fees."
+    "brief": "35s vertical eSIM tip: Panda mascot explains avoiding roaming fees.",
+    "options": {"motion_sample": True},
 }), want_gate="approve_script", want_status="awaiting_human")
 job = b["job_id"]
 
@@ -217,18 +220,18 @@ assert brv2.status_code == 200
 assert brv2.json()["artifacts"].get("branded_final") == b["artifacts"]["branded_final"]
 print("   video brand gate: approve stamps final.bgc.mp4, UGC final.mp4 kept, stills stamped")
 
-# 4d) motion_sample=false toggle: approving stills goes STRAIGHT to approve_assets ---------
-b2 = _step("POST /jobs (motion_sample off)", c.post("/jobs", json={
-    "brief": "quick draft: panda waves", "options": {"motion_sample": False}}),
+# 4d) default motion_sample=off: approving stills goes STRAIGHT to approve_assets ---------
+b2 = _step("POST /jobs (motion_sample default off)", c.post("/jobs", json={
+    "brief": "quick draft: panda waves"}),
     want_gate="approve_script", want_status="awaiting_human")
 job2 = b2["job_id"]
 c.post(f"/jobs/{job2}/respond", json={"decision": "approve"})            # -> scene_plan
 c.post(f"/jobs/{job2}/respond", json={"decision": "approve"})            # -> stills
-b2 = _step("respond approve (stills, sample off)", c.post(f"/jobs/{job2}/respond", json={"decision": "approve"}),
+b2 = _step("respond approve (stills, sample default off)", c.post(f"/jobs/{job2}/respond", json={"decision": "approve"}),
            want_gate="approve_assets", want_status="awaiting_human")
 assert b2["artifacts"].get("clips"), "with motion_sample off, approving stills must produce the full clips"
 assert "motion_sample" not in b2["artifacts"], "motion_sample off must not create a sample clip"
-print("   motion_sample=false: stills -> assets directly (no motion gate)")
+print("   motion_sample default off: stills -> assets directly (no motion gate)")
 
 # 4e) BUDGET HARD CAP: a low max_higgsfield_credits blocks the batch (budget_exceeded); raise to proceed
 b3 = _step("POST /jobs (budget cap 20)", c.post("/jobs", json={
@@ -449,7 +452,8 @@ assert _digest(job7, Path(b7["artifacts"]["stills"][0]).name) == id_ugc
 print("   image: scene_plan → 1 still → edit → fresh → approve_brand (revise stays, approve stamps)")
 
 print("\n[PASS] FULL DIFY GATE FLOW: start -> script -> scene_plan(text) -> stills(no video) -> "
-      "motion_sample(1 clip) -> assets(media) -> final -> approve_brand -> done  (+ motion_sample=false toggle)")
+      "motion_sample(1 clip, opt-in) -> assets(media) -> final -> approve_brand -> done  "
+      "(+ default motion_sample=off: stills -> assets)")
 print("   + panda-carousel: script → scene_plan → stills → approve_brand (skip) → done")
 print("   + panda-image: scene_plan → one still → edit → fresh → approve_brand (revise, approve) → done")
 print("   job dir:", store.job_dir(job))

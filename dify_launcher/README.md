@@ -23,11 +23,11 @@ Dify ──HTTP──▶ Dify Launcher ──▶ runner ──▶ agent/pipeline
 | GET  | `/jobs/{id}/cost` | per-project cost & time report — Higgsfield credits, ElevenLabs usage, generation time (native units) |
 
 **Gate sequence** (matches `pipeline_defs/panda-video.yaml` plus the launcher brand gate):
-`start → approve_script → approve_scene_plan → approve_stills → approve_motion_sample → approve_assets → approve_final → approve_brand → done`.
+`start → approve_script → approve_scene_plan → approve_stills → [approve_motion_sample] → approve_assets → approve_final → approve_brand → done`.
 `approve_stills`, `approve_motion_sample`, and `approve_assets` are pauses of the **same** `assets`
 stage (tell them apart by the `gate` field). `approve_motion_sample` (one hero clip, approve the
-motion before batching) appears only when the `motion_sample` option is on (**default**); it's
-skipped when off. `approve_brand` is launcher-only (no engine stage, no Higgsfield): **approve**
+motion before batching) appears only when the `motion_sample` option is on (**default off**); pass
+`true` to opt in. `approve_brand` is launcher-only (no engine stage, no Higgsfield): **approve**
 stamps BGC copies then `done`; **skip** finishes UGC; **revise** stays. Branding does not flow
 through animation. `POST /jobs/{id}/brand` remains for skip-then-brand-later.
 
@@ -93,8 +93,8 @@ DIFY_RUNNER=mock uvicorn dify_launcher.app:app --host 0.0.0.0 --port 8600
 - `language`, `narrator`, `voice_id`, `music`
 - `render_runtime` — `auto` (default) | `ffmpeg` | `remotion` | `hyperframes`. The `ffmpeg`
   lane (`panda_render`) needs no Node; `remotion`/`hyperframes` need **Node ≥ 22** on the box.
-- `motion_sample` — `true` (default) | `false`. When on, adds the `approve_motion_sample` gate
-  (one hero clip approved before the full batch). Set `false` for quick drafts.
+- `motion_sample` — `false` (default) | `true`. When on, adds the `approve_motion_sample` gate
+  (one hero clip approved before the full batch). Default is off; pass `true` to opt in.
 - `max_higgsfield_credits` — integer credit ceiling (unset = no cap). Before any Higgsfield
   generation, if cumulative spend would exceed it the agent blocks and pauses at `budget_exceeded`
   (raise the cap / revise / cancel). Hard pre-generation block — never overspends silently.
@@ -109,7 +109,7 @@ or `"panda-image"`.
 ## Connecting Dify
 Point Dify's HTTP/tool nodes at this service's base URL:
 1. **Start** → `POST /jobs` with the brief; show `question` + the inline `artifacts.script` (structured JSON — the dialogue is in `script.sections[].text`) and/or fetch `artifacts.preview` (`script.md`).
-2. On user approve/revise → `POST /jobs/{id}/respond`; repeat through `scene_plan → stills → motion_sample → assets → final → approve_brand` (`motion_sample` gate is on by default; set option `motion_sample:false` to skip it).
+2. On user approve/revise → `POST /jobs/{id}/respond`; repeat through `scene_plan → stills → assets → final → approve_brand` (default). Pass `motion_sample:true` to insert the optional motion-sample gate after stills.
 3. At `approve_brand`, collect approve (stamp BGC copies), skip (UGC only), or revise (ask again). Do not treat the job as finished until then. Render `final` (and `branded_final` if approved).
 4. Fetch `GET /jobs/{id}/cost` (or the `cost_report.md` artifact) for the per-project credits/time report.
 5. After skip, optional `POST /jobs/{id}/brand` `{profile: bgc}` can still stamp later. UGC originals stay. Branding does not flow through animation.
