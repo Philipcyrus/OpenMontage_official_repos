@@ -105,8 +105,9 @@ stages:
   #            generate ONLY the stills (cheap). Approve the LOOK (on-model panda, composition)
   #            BEFORE any expensive image->video spend. NO video generated yet.
   #   PHASE 2  partial_progress.phase="motion_sample" -> 🚦 GATE 3.5 approve_motion_sample
-  #            (only when job option motion_sample is on — DEFAULT) animate ONE hero still into a
-  #            single sample clip. Approve the MOTION/animation BEFORE batching all clips.
+  #            (only when job option motion_sample is on — DEFAULT OFF; pass true to opt in)
+  #            animate ONE hero still into a single sample clip. Approve the MOTION/animation
+  #            BEFORE batching all clips.
   #   PHASE 3  (no phase marker)                       -> 🚦 GATE 4 approve_assets
   #            animate the remaining stills into motion clips + narration + music, recorded
   #            canonically in asset_manifest. Approve the full media set (per-shot revisable).
@@ -132,7 +133,7 @@ stages:
     human_approval_default: true       # 🚦 GATES 3, 3.5 & 4 (stills, motion sample, full media)
     review_focus:
       - "PHASE 1 (stills): one still per scene, on-brand (styles/panda.yaml) and character-consistent (panda Elements), before any video is generated"
-      - "PHASE 2 (motion sample): one hero clip approves the motion/animation before the full batch (skipped if motion_sample option off)"
+      - "PHASE 2 (motion sample): one hero clip approves the motion/animation before the full batch (only if motion_sample:true; default off)"
       - "PHASE 3 (media): every required asset exists on disk and is listed in asset_manifest (path + scene_id)"
       - "Budget: cumulative Higgsfield credits stay within max_higgsfield_credits (if set); overruns hard-block before spend, not after"
       - Narration covers all script sections; music (if any) sits under the VO

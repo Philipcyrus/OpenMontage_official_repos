@@ -54,12 +54,15 @@ The assets stage must pass this to `generate_image`.
 
 ### 6. Panda identity as PLAN requirements
 Name the panda (and customer, if present) Element id from `config/panda-elements.json`.
-Set top-level `style_playbook` to `panda`. Never render here.
+Descriptions say "the woman" / "the panda", not "a traveller" / "a cute panda". Default
+medium is **2D flat** matching the turnaround sheets (`styles/panda.yaml`). Map phrase
+aliases per CHARACTER LOCK in `skills/meta/higgsfield-mcp-bridge.md`. Set top-level
+`style_playbook` to `panda`. Never render here.
 
 ### 7. Declare `required_assets` — one still
-The scene lists **one** `{type: "image", description: "...", source: "generate"}`.
+The scene lists **exactly one** `{type: "image", description: "...", source: "generate"}`.
 The description must be actionable (composition, mascot pose, where the copy sits,
-on-model Element). Do **not** declare video, narration, or music.
+on-model Element id, 2D flat). Do **not** declare intermediate plates, video, narration, or music.
 
 ### 8. Coverage checks (before submitting)
 - [ ] `scenes.length == 1`

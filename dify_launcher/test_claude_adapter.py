@@ -42,7 +42,13 @@ assert "approve_brand" in R.GATES
 assert R._STAGE_GATE["compose"] == "approve_final"
 assert R._STAGE_GATE["scene_plan"] == "approve_scene_plan"
 assert "assets" not in R._STAGE_GATE          # assets is phase-resolved, not a 1:1 map entry
+assert R._motion_sample_enabled({}) is False
+assert R._motion_sample_enabled({"options": {}}) is False
+assert R._motion_sample_enabled({"options": {"motion_sample": True}}) is True
+assert R._motion_sample_enabled({"options": {"motion_sample": "true"}}) is True
+assert R._motion_sample_enabled({"options": {"motion_sample": False}}) is False
 print("[ok] gate<->stage mapping")
+print("[ok] motion_sample default off; true opts in")
 
 # 1b) idea is INTERNAL — no human gate. The manifest is authoritative; the agent must never
 # surface an unexpected `approve_idea`. (Guards the reused-skill "Gate Reminder" conflict.)
@@ -380,6 +386,10 @@ cv = run._start_prompt("jC", "6-slide carousel", {"aspect_ratio": "4:5"}, "panda
 assert "STILLS-ONLY" in cv and "NOT a video" in cv
 assert "Do NOT generate motion clips" in cv
 assert "4:5" in cv
+assert "089ddcec-c375-4299-8a65-6d8b757dd81a" in cv
+assert "4c01c8f9-6cfb-4d8c-9eb9-74cb61462103" in cv
+assert "2D flat" in cv or "2D" in cv
+assert "Max 2 paid" in cv
 wide = run._start_prompt("jW", "story stills", {"aspect_ratio": "9:16"}, "panda-carousel")
 assert "aspect_ratio: 9:16" in wide
 assert "NEVER 9:16" not in wide
@@ -387,9 +397,19 @@ img = run._start_prompt("jI", "one still", {}, "panda-image")
 assert "ONE STILLS-ONLY" in img and "NO script" in img
 assert "1:1" in img
 assert "NOT a carousel" in img
+assert "089ddcec-c375-4299-8a65-6d8b757dd81a" in img
+assert "Max 2 paid" in img
 vid = run._start_prompt("jV", "a video", {}, "panda-video")
 assert "produce a video" in vid
 assert "STILLS-ONLY" not in vid
+assert "089ddcec-c375-4299-8a65-6d8b757dd81a" in vid
+assert "4c01c8f9-6cfb-4d8c-9eb9-74cb61462103" in vid
+assert "STILLS 2-TAKE" in vid
+assert "2D flat" in vid or "2D MEDIUM" in vid
+assert "PHASE 2 (motion sample)" not in vid, "default motion_sample=off must skip sample phase"
+assert "PHASE 2 (media)" in vid
+vid_ms = run._start_prompt("jV", "a video", {"motion_sample": True}, "panda-video")
+assert "PHASE 2 (motion sample)" in vid_ms
 print("[ok] start prompts: carousel/image stills-only vs video")
 
 # 7) _pipeline_of / gate-collapse helpers -----------------------------------

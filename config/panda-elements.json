@@ -17,11 +17,38 @@
     }
   },
   "higgsfield": {
-    "_note": "Reference Element ids keep the panda + customer consistent across stills and clips. These are the LOCKED brand elements (created on Higgsfield from the turnaround sheets above). Confirm live via MCP show_reference_elements. Use the panda element for every panda shot, the customer element for the customer.",
+    "_note": "Reference Element ids keep the panda + customer consistent across stills and clips. These are the LOCKED brand elements (created on Higgsfield from the turnaround sheets above). Confirm live via MCP show_reference_elements. Use the panda element for every panda shot, the customer element for the customer. Attach as MCP media / image_references — NEVER put the UUID in the prompt sentence (draws the turnaround sheet). Do not use student_ugc_element_id (TODO).",
     "panda_reference_element_id": "4c01c8f9-6cfb-4d8c-9eb9-74cb61462103",
     "customer_reference_element_id": "089ddcec-c375-4299-8a65-6d8b757dd81a",
     "student_ugc_element_id": "TODO — reusable id noted in memory panda-airport-arrival-ugc",
-    "default_model_identity": "seedance_2_0"
+    "default_model_identity": "seedance_2_0",
+    "phrase_aliases": {
+      "_note": "Any of these words in brief/idea/script/scene_plan/prompts MUST resolve to the locked Element above — never invent a new character. Full protocol: skills/meta/higgsfield-mcp-bridge.md CHARACTER LOCK.",
+      "customer": [
+        "human",
+        "person",
+        "woman",
+        "man",
+        "girl",
+        "guy",
+        "traveller",
+        "traveler",
+        "customer",
+        "UGC talent",
+        "user",
+        "character",
+        "the girl with the suitcase",
+        "someone at the airport"
+      ],
+      "panda": [
+        "panda",
+        "mascot",
+        "brand mascot",
+        "bear",
+        "Panda Mobile character",
+        "cute panda"
+      ]
+    }
   },
   "voices": {
     "_note": "PRODUCTION narration = ElevenLabs. Requires ELEVENLABS_API_KEY (or an ElevenLabs MCP) on the box; without it the agent falls back to Higgsfield seed_audio (a generic preset — NOT the brand voice). Pick by narrator + language; the launcher passes narrator/language from the Dify job `options`.",

@@ -42,11 +42,18 @@ Write `text` in the job's primary language. Put the other language in
 `captions.zh` and `captions.en`. Do not skip the second language — Dify/hand-posting
 needs both.
 
+### 3b. Character lock on slides
+If on-slide copy or notes refer to a human / traveller / customer or panda / mascot, those
+are the locked Elements from `config/panda-elements.json` — not free-invented talent. Do not
+write character-design prose into slide copy; leave identity to the scene plan + assets
+(CHARACTER LOCK in `skills/meta/higgsfield-mcp-bridge.md`).
+
 ### 4. Quality gate
 - [ ] Section count matches the planned slide count
 - [ ] Hook / content / CTA hierarchy is obvious from `label`s
 - [ ] Copy is short enough to read on the planned still (ratio from `options.aspect_ratio`)
 - [ ] CTA is a real action, not a vague closer
+- [ ] Any human/panda mention is treated as the locked brand characters, not new designs
 
 ### 5. Write the script + STOP (GATE 1)
 Persist a schema-valid `script` (`version: "1.0"`, `title`, `total_duration_seconds` =

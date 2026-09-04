@@ -27,6 +27,16 @@ Panda is brief-driven. Restate the image concept concretely — do **not** gener
 concepts. If the brief is genuinely ambiguous on a material point (subject, language, CTA copy),
 note it in `missing_capabilities` rather than inventing options.
 
+**Character lock (binding):** any human / traveller / customer / person (and
+`phrase_aliases.customer` in `config/panda-elements.json`) maps to
+`customer_reference_element_id`. Any panda / mascot (and `phrase_aliases.panda`) maps to
+`panda_reference_element_id`. Rewrite the brief so downstream never treats those words as a
+character-design prompt. Log `character_lock` in `decision_log` with the IDs. See CHARACTER LOCK
+in `skills/meta/higgsfield-mcp-bridge.md`.
+
+**Visual medium (binding):** default **2D flat** per `styles/panda.yaml`. Override only if the
+brief explicitly asks for 3D / photoreal / live-action — log it.
+
 ### 2. Deliverable & format
 Fix `deliverable_mix`:
 - **Kind:** one still that READS (paused, readable layout — not a frame that will be animated).
@@ -39,18 +49,21 @@ Fix `deliverable_mix`:
 
 ### 3. Provider decisions (log them)
 - **Visuals:** Higgsfield MCP stills (`generate_image`) with the panda/customer Element IDs from
-  `config/panda-elements.json`. Same look as panda-video (`styles/panda.yaml`).
+  `config/panda-elements.json` attached as media. Same look as panda-video (`styles/panda.yaml`,
+  2D flat default).
 - **No TTS, no music, no video generation, no compose.**
 - This pipeline has **no `compose` stage**, so there is no `render_runtime` to choose and no
   Remotion/HyperFrames conversation. Do not log a `render_runtime_selection`.
 
 ### 4. Brief metadata
 Recommended keys: `concept`, `deliverable_mix` (still_count=1, aspect_ratio, language),
-`missing_capabilities`, `fallback_policy`.
+`character_lock`, `visual_medium` (default `2d_flat`), `missing_capabilities`, `fallback_policy`.
 
 ### 5. Quality check (self, no human pause)
 - [ ] The concept is a single readable still, not a video or a carousel
 - [ ] Aspect ratio (from `options.aspect_ratio`, default `1:1`) + language are explicit
+- [ ] Human/panda phrases resolved to locked Element IDs; `character_lock` logged
+- [ ] Visual medium is 2D flat unless the brief explicitly overrides
 - [ ] Provider decision (Higgsfield stills + panda Elements) is logged
 - [ ] Missing capabilities / fallbacks are surfaced early
 

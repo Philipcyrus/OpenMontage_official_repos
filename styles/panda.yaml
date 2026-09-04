@@ -4,24 +4,28 @@
 
 identity:
   name: "Panda Mobile"
-  category: brand-mascot
+  category: custom
   mood: friendly, bright, trustworthy, playful-but-clean
-  pace: brisk
+  pace: moderate
   best_for: "Panda Mobile eSIM/travel explainers, UGC 避坑 tips, brand ads"
 
 taste_profile:
-  design_read: "Warm, approachable brand mascot content: clear, cheerful, uncluttered."
+  design_read: "Warm, approachable brand mascot content: clear, cheerful, uncluttered. Default medium is 2D flat illustration matching the locked customer and panda turnaround sheets."
   visual_variance: 4
   motion_intensity: 4
   information_density: 4
   palette_discipline: "Panda black + signature yellow accent; clean backgrounds; no muddy gradients."
-  reference_strategy: "Generate one on-brand reference still per scene family; reuse the panda master ref for consistency."
+  reference_strategy: "Attach locked Higgsfield Elements from config/panda-elements.json; reuse the same 2D medium for people, mascot, and set."
   anti_patterns:
     - "off-brand mascot proportions or colors"
     - "cluttered, busy frames that bury the panda"
     - "photoreal panda (this is a cartoon mascot)"
+    - "3D / CGI / Pixar human or hall with a flat 2D panda sticker (mixed media)"
+    - "photoreal human, photoreal environment, or inventing a new traveller face"
   quality_gates:
     - "Panda mascot is on-model and consistent across every still."
+    - "Customer (when present) matches the locked customer Element — never a hallucinated face."
+    - "Human, mascot, props, and set share one 2D flat illustration medium."
     - "Signature yellow used for emphasis, not everywhere."
 
 visual_language:
@@ -32,7 +36,7 @@ visual_language:
     text: "#000000"
     muted: "#6B7280"
   composition: clean, centered-to-editorial, generous negative space, mascot as focal point
-  texture: flat, bright, matte fields
+  texture: flat 2D illustration, clean even keyline, matte fills, no CGI gloss
 
 typography:
   # NOTE: on-screen captions are rendered by montage-svc (CJK-safe). This block only guides
@@ -44,16 +48,33 @@ typography:
     font: "TODO"
     weight: 400
 
+motion:
+  transitions: [cut, fade]
+  animation_style: "hold the 2D still; light subject motion only; no CGI camera flourishes"
+  pacing_rules:
+    min_scene_hold_seconds: 3.0
+    max_scene_hold_seconds: 8
+    text_card_hold_seconds: 3.0
+    transition_duration_seconds: 0.1
+
+audio:
+  voice_style: "friendly, clear, brand-safe"
+  music_mood: "upbeat light bed under VO"
+  music_volume: 0.08
+
 asset_generation:
-  image_prompt_prefix: "bright friendly Panda Mobile brand frame, clean cartoon panda mascot on model, signature yellow accent, generous negative space, "
-  image_negative_prompt: "photoreal panda, off-model, cluttered, muddy gradient, neon overload, low contrast"
+  image_prompt_prefix: "2D flat illustration matching the Panda Mobile customer and panda turnaround sheets, clean even keyline, matte fills, bright friendly brand frame, signature yellow accent, generous negative space, same medium for people mascot and set, "
+  image_negative_prompt: "3D render, CGI, Pixar, photoreal human, photoreal environment, photoreal panda, mixed media, glossy plush panda, off-model, cluttered, muddy gradient, neon overload, low contrast"
   consistency_anchors:
     - "Panda mascot on-model per config/panda-elements.json master ref"
+    - "Customer on-model per config/panda-elements.json customer Element when present"
     - "Black + signature yellow (#fdc50d) brand palette"
-    - "Clean bright background, one clear focal subject"
+    - "Clean bright 2D background, one clear focal subject"
 
 quality_rules:
   - "Panda mascot must match the master character reference in every scene"
+  - "Customer must match the locked customer Element — never invent a new person"
+  - "Both characters and the set share one 2D flat medium"
   - "Signature yellow is an accent, not a fill"
   - "Keep frames clean — one clear subject per still"
 

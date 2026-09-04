@@ -181,8 +181,9 @@ approve_stills         artifacts: stills[]  (NO video yet)   approve│revise (p
    │                                                          ↑ approve the look BEFORE paying
    ▼                                                            for image→video
 approve_motion_sample  artifacts: motion_sample (ONE clip)   approve│revise        ← only if the
-   │                                                            motion_sample option is on (default);
-   ▼                                                            approve the MOTION before the batch
+   │                                                            motion_sample option is on
+   ▼                                                            (**default off**; pass true to opt in);
+                                                                approve the MOTION before the batch
 approve_assets         artifacts: stills[]+clips[]+          approve│revise (per-shot)
    │                              asset_manifest (all media)
    ▼
@@ -238,7 +239,7 @@ done                   (+ branded_stills if approved)
 
 `status` values: `running` (working, keep polling) · `awaiting_human` (a gate — act) · `done` (finished) · `failed` (see `question`).
 
-> **The assets stage surfaces up to FOUR pauses.** `approve_stills`, `approve_motion_sample`, `budget_exceeded`, and `approve_assets` are `awaiting_human` pauses of the **same** `assets` stage (`stage:"assets"` at all of them). `approve_stills` shows **stills only** (no video — a rejection costs nothing). `approve_motion_sample` shows **one sample clip** so you approve the motion before the full batch — appears only when the `motion_sample` option is on (**default**). `budget_exceeded` is **conditional** — it appears only if a generation would push cumulative Higgsfield spend past `max_higgsfield_credits`; the agent blocks *before* spending and you raise the cap / revise / cancel. `approve_assets` shows the full media set. **Tell them apart by the `gate` field — do not rely on `stage` alone.**
+> **The assets stage surfaces up to FOUR pauses.** `approve_stills`, `approve_motion_sample`, `budget_exceeded`, and `approve_assets` are `awaiting_human` pauses of the **same** `assets` stage (`stage:"assets"` at all of them). `approve_stills` shows **stills only** (no video — a rejection costs nothing). `approve_motion_sample` shows **one sample clip** so you approve the motion before the full batch — appears only when the `motion_sample` option is on (**default off**; pass `true` to opt in). `budget_exceeded` is **conditional** — it appears only if a generation would push cumulative Higgsfield spend past `max_higgsfield_credits`; the agent blocks *before* spending and you raise the cap / revise / cancel. `approve_assets` shows the full media set. **Tell them apart by the `gate` field — do not rely on `stage` alone.**
 
 ---
 
@@ -268,7 +269,7 @@ after the last content gate — a post-cut overlay, never in generation. `skip` 
 | `voice_id` | ElevenLabs voice id (string) | **explicit override** — use this exact voice, ignore the default |
 | `music` | mood string, or `false` | background music via ElevenLabs (`"upbeat, light"`), or `false` to skip |
 | `render_runtime` | `"auto"` \| `"ffmpeg"` \| `"remotion"` \| `"hyperframes"` | which render engine composes the video. Default `"auto"` |
-| `motion_sample` | `true` (default) \| `false` | insert the `approve_motion_sample` gate (video only) |
+| `motion_sample` | `false` (default) \| `true` | insert the `approve_motion_sample` gate (video only; default off) |
 | `max_higgsfield_credits` | integer, or unset | **hard credit ceiling** for the run |
 | `aspect_ratio` | string | stills canvas, passed through to `generate_image`. Carousel default `"4:5"`; **panda-image** default `"1:1"`. Also `9:16`, `WIDTHxHEIGHT`, … |
 | `gates` | e.g. `["scene_plan", "stills"]` | carousel only — omit `script` to auto-approve GATE 1 |
@@ -299,7 +300,7 @@ If `voice_id` is omitted, the engine picks the brand voice from config by `narra
 | `{"decision":"approve","max_higgsfield_credits":<n>}` | **at `budget_exceeded`** — raise the credit cap and resume generation (the agent re-checks before spending) |
 | `{"decision":"cancel"}` | **at `budget_exceeded`** — stop the job; no further Higgsfield credits are spent |
 
-> Approving `approve_stills` on **panda-video** does **not** finish the assets stage — with `motion_sample` on (default) the next gate is `approve_motion_sample`; with it off, stills go to `approve_assets`. On **panda-carousel** and **panda-image**, approving stills opens **`approve_brand`** (not `done`). Dify must collect approve / skip / revise there before treating the job as finished.
+> Approving `approve_stills` on **panda-video** does **not** finish the assets stage — with `motion_sample` off (**default**) the next gate is `approve_assets`; with it on (`motion_sample:true`), stills go to `approve_motion_sample` first. On **panda-carousel** and **panda-image**, approving stills opens **`approve_brand`** (not `done`). Dify must collect approve / skip / revise there before treating the job as finished.
 
 Notes:
 - Edits are a **text instruction** the agent acts on (not a manual pixel editor). More specific = closer result.
@@ -357,7 +358,8 @@ curl -s -H "X-Dify-Token: $T" $BASE/jobs/job_xxxx
 # 3) approve (or revise)
 curl -s -X POST $BASE/jobs/job_xxxx/respond -H "X-Dify-Token: $T" -H "Content-Type: application/json" \
  -d '{"decision":"approve"}'
-# -> status:running ; go back to (2). Repeat: scene_plan -> stills -> motion_sample -> assets -> final -> approve_brand.
+# -> status:running ; go back to (2). Repeat: scene_plan -> stills -> assets -> final -> approve_brand
+#    (optional: pass motion_sample:true to insert approve_motion_sample after stills).
 
 # 4) at approve_brand, approve (stamp), skip (UGC), or revise (stay). Then when status=done, download the video
 curl -s -H "X-Dify-Token: $T" $BASE/jobs/job_xxxx/artifacts/final.mp4 -o final.mp4
