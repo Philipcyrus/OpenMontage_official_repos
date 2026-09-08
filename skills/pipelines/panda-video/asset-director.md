@@ -47,8 +47,9 @@ character-consistent. **Follow the binding rules in `skills/meta/higgsfield-mcp-
   sentence. Log the IDs used on each `asset_manifest` row.
 - Max **2 paid `generate_image` calls per scene** this round. Take 1 = shipped still
   (both characters in one T2I if needed). If unusable, take 2 = **i2i of take 1**
-  (one change), never a fresh T2I. Then STOP and gate — ship take 2 if it exists, else
-  take 1. Flag remaining defects in the gate question; do not generate a third time.
+  (one change), never a fresh T2I. Then STOP and gate — ship whichever take is **better
+  on the verified checks**, not automatically take 2; a worse take 2 is discarded in favour
+  of take 1. Record remaining defects in `review.blockers`; do not generate a third time.
 - Default medium is **2D flat** per `styles/panda.yaml`. Do not mix 3D human + 2D panda.
 - Archive a rejected take 1 as `rejected_*` if take 2 ships.
 

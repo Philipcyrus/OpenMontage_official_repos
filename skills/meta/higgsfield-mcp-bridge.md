@@ -133,8 +133,14 @@ Per scene, per stills round (first GATE 3 pass, or a later human `revise` on tha
    T2I if the scene needs both). Attach Element IDs in the MCP media slot; never put
    UUIDs in the prompt.
 2. If take 1 is unusable: **take 2 is i2i of take 1** (one change). Never a fresh T2I.
-3. **Stop.** Ship take 2 if it exists, else take 1. Write `approve_stills` and end
-   the turn. Flag remaining defects in the gate `question` — do not generate again.
+3. **Stop.** Ship whichever take is **better on the verified checks** — take 2 is not
+   automatically the winner, and a worse take 2 must be discarded in favour of take 1.
+   Archive the loser as `rejected_*`. Write `approve_stills` and end the turn, recording
+   remaining defects in `review.blockers` — do not generate again.
+
+   > This wording matters: while the rule read "ship take 2 if it exists", a reviewer
+   > declined a worthwhile second attempt purely because a worse take 2 would have been
+   > mandatory. Two paid attempts is the cap; it was never meant to make take 2 binding.
 4. A third paid `generate_image` for that scene in this round is a **defect**. Known
    no-ops (slide / reposition) do not get a third try.
 5. Offline `still_frame_conform` / HSV color passes do not count. `get_cost:true`
