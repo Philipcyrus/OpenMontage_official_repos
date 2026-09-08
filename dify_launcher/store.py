@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import uuid
 from pathlib import Path
 from typing import Any
@@ -40,10 +41,30 @@ def ensure_job(job_id: str) -> Path:
 
 
 def save_state(state: dict[str, Any]) -> None:
+    """Write state.json atomically.
+
+    A direct write_text leaves a truncated file if the process dies mid-write or two
+    writers overlap, and load_state then raises on every later read - the job becomes
+    unreadable rather than merely stale. Write a sibling temp file, flush it to disk,
+    then os.replace, which is atomic on the same filesystem: a reader sees either the
+    old complete file or the new complete file, never a partial one.
+    """
     d = ensure_job(state["job_id"])
-    (d / "state.json").write_text(
-        json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    target = d / "state.json"
+    payload = json.dumps(state, indent=2, ensure_ascii=False)
+    fd, tmp = tempfile.mkstemp(dir=str(d), prefix=".state-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, target)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def load_state(job_id: str) -> dict[str, Any] | None:

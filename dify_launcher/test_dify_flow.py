@@ -324,6 +324,21 @@ print("   carousel stills edit shot 3: 1080x1350 kept, other stills untouched")
 bad_skip = c.post(f"/jobs/{job4}/respond", json={"decision": "skip"})
 assert bad_skip.status_code == 400, bad_skip.text
 print("   skip at approve_stills -> 400")
+# `decision` is a Literal. A typo used to fall through to the revise branch and spend a
+# whole paid Claude leg regenerating a stage the human meant to accept.
+for _typo in ("aprove", "approve!", "yes", ""):
+    _r = c.post(f"/jobs/{job4}/respond", json={"decision": _typo})
+    assert _r.status_code == 422, f"{_typo!r} -> {_r.status_code}, expected 422"
+# `cancel` is only meaningful at the budget gate; everywhere else it used to mean revise
+_bad_cancel = c.post(f"/jobs/{job4}/respond", json={"decision": "cancel"})
+assert _bad_cancel.status_code == 400, _bad_cancel.text
+print("   decision typos -> 422, cancel outside budget_exceeded -> 400")
+# state.json is written atomically: a temp file is replaced, never a partial target
+_sd = store.job_dir(job4)
+assert (_sd / "state.json").is_file()
+assert not list(_sd.glob(".state-*.tmp")), "atomic write left a temp file behind"
+assert store.load_state(job4)["job_id"] == job4
+print("   state.json: atomic write, no temp files left")
 # approve stills -> approve_brand (not done)
 b4 = _step("carousel approve stills -> brand",
            c.post(f"/jobs/{job4}/respond", json={"decision": "approve"}),

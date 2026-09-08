@@ -134,7 +134,11 @@ class StartJob(BaseModel):
 
 
 class Respond(BaseModel):
-    decision: str = "approve"          # "approve" | "revise" | "skip" (brand gate) | "cancel" (budget)
+    # A Literal, not a bare str. Anything that was not exactly "approve", "skip" or
+    # "cancel" used to fall through to the revise branch, so a typo ("aprove",
+    # "approve!") silently spent a whole paid Claude leg regenerating a stage the human
+    # meant to accept. Unknown values are now a 422 from FastAPI before any work starts.
+    decision: Literal["approve", "revise", "skip", "cancel"] = "approve"
     answer: Optional[str] = None
     stills: list[str] = []             # optional user-supplied storyboard stills (paths)
     shots: list[int] = []              # optional 1-based indices: stills (GATE 3) or clips (GATE 4)
@@ -209,6 +213,10 @@ def respond(job_id: str, body: Respond, x_dify_token: Optional[str] = Header(Non
         raise HTTPException(status_code=409, detail=f"job is {state.get('status')}, not awaiting_human")
     if body.decision == "skip" and state.get("gate") != "approve_brand":
         raise HTTPException(status_code=400, detail="skip is only valid at the approve_brand gate")
+    if body.decision == "cancel" and state.get("gate") != "budget_exceeded":
+        # Everywhere else `cancel` fell through to revise and started a paid regeneration -
+        # the opposite of what the word means.
+        raise HTTPException(status_code=400, detail="cancel is only valid at the budget_exceeded gate")
     if _ASYNC:
         running = {**state, "status": "running",
                    "question": "processing — poll GET /jobs/{id} until status changes"}
