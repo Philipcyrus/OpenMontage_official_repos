@@ -169,6 +169,29 @@ When `human_approval_default: true`:
    Please review and approve to continue, or provide feedback for revision.
    ```
 
+2b. **Put the question and the blockers IN THE CHECKPOINT, not only in your reply.**
+
+   The launcher never reads your turn text. It reads the checkpoint file, and it shows
+   the human whatever `review` holds. Anything that lives only in your reply is invisible
+   at the gate — a video has already shipped with the hero's eyes closed and an English
+   voice over Mandarin because both were raised in the turn text and nowhere else.
+
+   ```json
+   "review": {
+     "question": "Approve the media? The Mandarin script is currently voiced in English.",
+     "blockers": [
+       {"severity": "critical", "scene_id": "s6",
+        "detail": "Hero's eyes are closed on the final frame.",
+        "remedy": "revise shot 6 (fresh)"},
+       {"severity": "minor", "scene_id": "s4", "detail": "Thumbs-up reads weak."}
+     ]
+   }
+   ```
+
+   `severity` is `critical` | `major` | `minor`. Without `review.question` the human sees
+   only "Approve <stage>, or request a revision." Every finding you would have written
+   under **Action Required** belongs in `review.blockers` as well.
+
 3. **END YOUR TURN.** Performing any further pipeline work in the same
    response is a gate violation. "Present and continue" is not waiting —
    the turn must end with the question, and the next pipeline action must

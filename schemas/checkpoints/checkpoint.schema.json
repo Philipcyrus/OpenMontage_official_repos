@@ -29,7 +29,24 @@
     },
     "review": {
       "type": "object",
-      "description": "Reviewer output for this stage, if any"
+      "description": "Reviewer output for this stage. `question` and `blockers` are read by the launcher and shown to the human AT the gate — anything needing an answer before approval must be here, not only in the agent's turn text, which the launcher never sees.",
+      "properties": {
+        "question": { "type": "string", "description": "The question for the human at this gate, in their words. Replaces the launcher's generic 'Approve <stage>, or request a revision.' when present." },
+        "blockers": {
+          "type": "array",
+          "description": "Findings the human must weigh before approving. Surfaced verbatim at the gate, critical first.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "severity": { "type": "string", "enum": ["critical", "major", "minor"] },
+              "detail": { "type": "string" },
+              "scene_id": { "type": "string" },
+              "remedy": { "type": "string" }
+            },
+            "required": ["severity", "detail"]
+          }
+        }
+      }
     },
     "cost_snapshot": {
       "type": "object",

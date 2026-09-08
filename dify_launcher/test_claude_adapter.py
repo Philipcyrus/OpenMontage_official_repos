@@ -441,6 +441,35 @@ ovr = run._start_prompt("jV", "a video", {"voice_id": "OVERRIDE123"}, "panda-vid
 assert "OVERRIDE123" in ovr
 print("[ok] VOICE LOCK: literal id in start + media legs; unresolvable pair blocks")
 
+# 6c) GATE QUESTION - the launcher used to hard-code "Approve <stage>, or request a
+# revision." and discard whatever the reviewer wrote, so findings raised only in the
+# agent's turn text were invisible at the gate and shipped.
+assert R._gate_question({}, "assets") == "Approve assets, or request a revision."
+assert R._gate_question({"review": {}}, "script") == "Approve script, or request a revision."
+
+_q = R._gate_question({"review": {
+    "question": "Approve the media? The Mandarin script is voiced in English.",
+    "blockers": [
+        {"severity": "minor", "detail": "Thumbs-up reads weak.", "scene_id": "s4"},
+        {"severity": "critical", "detail": "Hero eyes closed.", "scene_id": "s6",
+         "remedy": "revise shot 6"},
+    ]}}, "assets")
+assert _q.startswith("Approve the media?"), "review.question must replace the generic line"
+assert "CRITICAL" in _q and "Hero eyes closed" in _q
+assert "MINOR" in _q and "Thumbs-up reads weak" in _q
+assert _q.index("CRITICAL") < _q.index("MINOR"), "critical findings sort first"
+assert "remedy: revise shot 6" in _q
+assert "Approving ships it as-is" in _q, "a critical finding must warn before approval"
+
+# a blockers list with no critical finding gets no warning banner
+_q2 = R._gate_question({"review": {"blockers": [{"severity": "minor", "detail": "x"}]}}, "assets")
+assert "Approving ships it as-is" not in _q2
+# malformed review must never raise - a bad checkpoint must not take the gate down
+for _bad in ({"review": "nope"}, {"review": {"blockers": "nope"}},
+             {"review": {"blockers": [1, 2]}}, {"review": {"question": None}}):
+    R._gate_question(_bad, "assets")
+print("[ok] gate question: review.question + blockers surfaced, critical warned, junk tolerated")
+
 # 7) _pipeline_of / gate-collapse helpers -----------------------------------
 assert R._pipeline_of({}) == "panda-video"
 assert R._pipeline_of({"pipeline": "panda-carousel"}) == "panda-carousel"

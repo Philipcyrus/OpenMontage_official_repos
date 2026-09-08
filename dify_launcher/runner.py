@@ -123,6 +123,47 @@ def _voice_line(options: dict[str, Any]) -> str:
             "name the unconfigured narrator/language pair in the question.")
 
 
+def _gate_question(latest: dict[str, Any], stage: str) -> str:
+    """The question shown to the human at a gate.
+
+    The launcher used to hard-code "Approve <stage>, or request a revision." and throw away
+    whatever the reviewer had written. The agent's real findings - Mandarin script paired with
+    an English voice, the hero's eyes closed, an off-palette glyph - lived only in its turn
+    text, which the launcher never reads, so the human approved without ever seeing them and
+    those defects shipped. Prefer review.question, and always list review.blockers, so a
+    generic "approve" cannot silently accept a known critical defect.
+    """
+    review = latest.get("review") or {}
+    if not isinstance(review, dict):
+        review = {}
+    lines: list[str] = []
+
+    asked = str(review.get("question") or "").strip()
+    lines.append(asked or f"Approve {stage}, or request a revision.")
+
+    blockers = review.get("blockers") or []
+    if isinstance(blockers, list):
+        rank = {"critical": 0, "major": 1, "minor": 2}
+        rows = [b for b in blockers if isinstance(b, dict) and str(b.get("detail") or "").strip()]
+        rows.sort(key=lambda b: rank.get(str(b.get("severity", "minor")).lower(), 3))
+        if rows:
+            lines.append("")
+            lines.append("REVIEWER FINDINGS — read before approving:")
+            for b in rows:
+                sev = str(b.get("severity", "minor")).upper()
+                scene = str(b.get("scene_id") or "").strip()
+                where = f" [{scene}]" if scene else ""
+                lines.append(f"  • {sev}{where}: {str(b['detail']).strip()}")
+                remedy = str(b.get("remedy") or "").strip()
+                if remedy:
+                    lines.append(f"      remedy: {remedy}")
+            if any(str(b.get("severity", "")).lower() == "critical" for b in rows):
+                lines.append("")
+                lines.append("At least one CRITICAL finding is open. Approving ships it as-is — "
+                             "reply with a revision instead if that is not what you want.")
+    return "\n".join(lines)
+
+
 _DEFAULT_PIPELINE = os.environ.get("PANDA_PIPELINE_TYPE", "panda-video")
 
 
@@ -1233,7 +1274,7 @@ class ClaudeCodeRunner(Runner):
                 gate = _STAGE_GATE.get(stage, f"approve_{stage}")
             _apply_previews(job_id, arts, gate)
             state.update(status="awaiting_human", stage=stage, gate=gate,
-                         question=f"Approve {stage}, or request a revision.", artifacts=arts)
+                         question=_gate_question(latest, stage), artifacts=arts)
         else:  # completed
             nxt = cp.get_next_stage(self._projects_dir, job_id, _pipeline_of(state))
             _apply_previews(job_id, arts, None)
@@ -1495,7 +1536,11 @@ class ClaudeCodeRunner(Runner):
             "Follow AGENT_GUIDE.md and skills/meta/checkpoint-protocol.md. Execute stages in "
             "order. At every stage whose manifest sets human_approval_default: true, write the "
             "checkpoint with status='awaiting_human' and STOP (end your turn) — do NOT "
-            "self-approve.\n"
+            "self-approve. Put the question for the human in the checkpoint's "
+            "`review.question`, and every finding they must weigh in "
+            "`review.blockers` ([{severity: critical|major|minor, detail, scene_id, "
+            "remedy}]). The launcher shows those and never sees your turn text — a "
+            "defect raised only in your reply is invisible at the gate and ships.\n"
             "PIPELINE SHAPE: the `scene_plan` stage produces ONLY a structured TEXT plan — NO "
             "media, NO generation tools. The `assets` stage then runs in human-reviewed phases "
             "(cost gates):\n"
