@@ -52,6 +52,10 @@ GATES = ["approve_script", "approve_scene_plan", "approve_stills",
          "approve_motion_sample", "approve_assets", "approve_final", "approve_brand"]
 # gates from the previous storyboard-stills flow — resuming one is refused with a migration note
 _LEGACY_GATES = {"approve_storyboard", "approve_clips"}
+# Not a pipeline gate - deliberately NOT in GATES. It is a hold the launcher raises when the
+# agent is unreachable, cleared by approving (retry) or revising (abandon).
+_OUTAGE_GATE = "agent_unavailable"
+_OUTAGE_KEY = "interrupted_leg"
 
 
 def _motion_sample_enabled(state: dict[str, Any]) -> bool:
@@ -121,6 +125,26 @@ def _voice_line(options: dict[str, Any]) -> str:
             "borrow a neighbouring language, and do NOT fall back to Higgsfield audio to get past "
             "this. Generate everything else, then stop at the gate (status='awaiting_human') and "
             "name the unconfigured narrator/language pair in the question.")
+
+
+class AgentUnavailable(RuntimeError):
+    """The leg failed because the AGENT was unreachable, not because the job is bad.
+
+    Distinguished from every other leg failure so the launcher can park the job as
+    resumable instead of killing it. The retry inside _run_agent is 3 attempts over ~9
+    seconds - sized for a single blip, useless against an outage lasting minutes. Before
+    this existed, an outage marked the job `failed`, and a failed job cannot be resumed
+    (`/respond` accepts only `awaiting_human`), so every Higgsfield credit already spent
+    was lost and the brief had to be run again from the top.
+
+    Carries the prompt so the interrupted leg can be re-issued verbatim once the agent is
+    back. Re-running the same prompt is safe: the agent resumes from the latest checkpoint.
+    """
+
+    def __init__(self, message: str, prompt: str = "", label: str = "") -> None:
+        super().__init__(message)
+        self.prompt = prompt
+        self.label = label
 
 
 _DEFAULT_PIPELINE = os.environ.get("PANDA_PIPELINE_TYPE", "panda-video")
@@ -1064,6 +1088,23 @@ class ClaudeCodeRunner(Runner):
         if gate == "approve_brand":
             return _resolve_brand_gate(state, decision)
 
+        # The agent was unreachable and the leg was parked instead of failed. Approving
+        # re-issues that exact leg; the agent picks up from the latest checkpoint, so no
+        # completed work and no paid generation is repeated.
+        if gate == _OUTAGE_GATE:
+            parked = state.get(_OUTAGE_KEY) or {}
+            if decision != "approve":
+                state.update(status="failed", gate=None,
+                             question="Abandoned after the agent outage. Nothing further was run.")
+                state.pop(_OUTAGE_KEY, None)
+                return state
+            state["stage"] = parked.get("stage")
+            state["gate"] = parked.get("gate")
+            state.pop(_OUTAGE_KEY, None)
+            prompt = parked.get("prompt") or self._continue_prompt(job_id, _pipeline_of(state))
+            self._run_agent(prompt, job_id, parked.get("label") or "outage_resume")
+            return self._sync(state)
+
         stage = self._gate_stage(gate)
 
         # BUDGET HOLD — the agent blocked a generation that would exceed max_higgsfield_credits.
@@ -1146,6 +1187,7 @@ class ClaudeCodeRunner(Runner):
         import time
         attempts = int(os.environ.get("CLAUDE_MAX_ATTEMPTS", "3"))
         last = ""
+        transient = False
         started = time.monotonic()
         try:
             for i in range(attempts):
@@ -1166,7 +1208,13 @@ class ClaudeCodeRunner(Runner):
                     break
                 time.sleep(3 * (i + 1))  # brief backoff, then let the agent resume from checkpoint
             tail = last.splitlines()[-8:]
-            raise RuntimeError("claude failed: " + " | ".join(tail))
+            msg = "claude failed: " + " | ".join(tail)
+            if transient:
+                # Every attempt hit an infrastructure error. The backoff here spans ~9s, so an
+                # outage exhausts it instantly - the job is not broken, the agent is away.
+                # Park it as resumable rather than dead; see AgentUnavailable.
+                raise AgentUnavailable(msg, prompt=prompt, label=label)
+            raise RuntimeError(msg)
         finally:
             self._record_timing(job_id, label, round(time.monotonic() - started, 2))
 

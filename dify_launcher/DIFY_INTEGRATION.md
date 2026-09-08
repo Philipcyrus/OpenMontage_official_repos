@@ -239,6 +239,15 @@ done                   (+ branded_stills if approved)
 
 `status` values: `running` (working, keep polling) · `awaiting_human` (a gate — act) · `done` (finished) · `failed` (see `question`).
 
+> **`agent_unavailable` — an interruption, not a gate and not a failure.** If the AI agent
+> becomes unreachable mid-leg (an outage, not a problem with the job), the launcher parks the
+> job at `status:"awaiting_human"`, `gate:"agent_unavailable"` instead of marking it `failed`.
+> A failed job cannot be resumed — `/respond` accepts only `awaiting_human` — so this used to
+> destroy the job and every Higgsfield credit already spent. Everything generated so far is
+> intact. `{"decision":"approve"}` re-runs the interrupted step from the last checkpoint;
+> `{"decision":"revise"}` abandons the job. It can appear at **any** stage, so treat it as a
+> possible response to any poll, not as part of the gate sequence.
+
 > **The assets stage surfaces up to FOUR pauses.** `approve_stills`, `approve_motion_sample`, `budget_exceeded`, and `approve_assets` are `awaiting_human` pauses of the **same** `assets` stage (`stage:"assets"` at all of them). `approve_stills` shows **stills only** (no video — a rejection costs nothing). `approve_motion_sample` shows **one sample clip** so you approve the motion before the full batch — appears only when the `motion_sample` option is on (**default off**; pass `true` to opt in). `budget_exceeded` is **conditional** — it appears only if a generation would push cumulative Higgsfield spend past `max_higgsfield_credits`; the agent blocks *before* spending and you raise the cap / revise / cancel. `approve_assets` shows the full media set. **Tell them apart by the `gate` field — do not rely on `stage` alone.**
 
 ---

@@ -24,6 +24,11 @@ Dify ──HTTP──▶ Dify Launcher ──▶ runner ──▶ agent/pipeline
 
 **Gate sequence** (matches `pipeline_defs/panda-video.yaml` plus the launcher brand gate):
 `start → approve_script → approve_scene_plan → approve_stills → [approve_motion_sample] → approve_assets → approve_final → approve_brand → done`.
+`agent_unavailable` can interrupt **any** stage: the agent became unreachable, so the job is
+parked at `awaiting_human` (resumable) rather than `failed` (a dead end — `/respond` accepts
+only `awaiting_human`). Approve re-runs the interrupted leg from the last checkpoint; revise
+abandons. No work and no credits are lost.
+
 `approve_stills`, `approve_motion_sample`, and `approve_assets` are pauses of the **same** `assets`
 stage (tell them apart by the `gate` field). `approve_motion_sample` (one hero clip, approve the
 motion before batching) appears only when the `motion_sample` option is on (**default off**); pass

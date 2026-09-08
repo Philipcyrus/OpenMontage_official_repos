@@ -110,6 +110,23 @@ def _bg(job_id: str, fn: Callable[..., dict[str, Any]], state: dict[str, Any],
     try:
         result = fn(state) if arg is None else fn(state, arg)
         store.save_state(result)
+    except _runner.AgentUnavailable as e:
+        # The agent was unreachable, so the JOB is fine - only the leg was interrupted. Park it
+        # as a human-visible hold instead of `failed`: a failed job cannot be resumed (respond()
+        # accepts only awaiting_human), which used to throw away every credit already spent and
+        # force the whole brief to be re-run. `awaiting_human` is deliberate - Dify coerces any
+        # status it does not recognise to "running" and would poll a new one until it timed out.
+        st = store.load_state(job_id) or state
+        st[_runner._OUTAGE_KEY] = {"prompt": e.prompt, "label": e.label,
+                                   "stage": st.get("stage"), "gate": st.get("gate")}
+        st.update(status="awaiting_human", gate=_runner._OUTAGE_GATE,
+                  question=("The AI agent was unreachable, so this step stopped part-way. "
+                            "Your job and everything already generated are intact — nothing "
+                            "needs to be re-created and no credits were lost.\n\n"
+                            f"Details: {e}\n\n"
+                            "Reply \"approve\" to pick up exactly where it stopped, or "
+                            "\"revise\" to abandon this job."))
+        store.save_state(st)
     except Exception as e:  # noqa: BLE001 — surface any leg failure to the poller
         st = store.load_state(job_id) or state
         st.update(status="failed", gate=None, question=f"error: {e}")
