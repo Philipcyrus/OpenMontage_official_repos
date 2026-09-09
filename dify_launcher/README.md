@@ -23,31 +23,35 @@ Dify ──HTTP──▶ Dify Launcher ──▶ runner ──▶ agent/pipeline
 | GET  | `/jobs/{id}/cost` | per-project cost & time report — Higgsfield credits, ElevenLabs usage, generation time (native units) |
 
 **Gate sequence** (matches `pipeline_defs/panda-video.yaml` plus the launcher brand gate):
-`start → approve_script → approve_scene_plan → approve_stills → [approve_motion_sample] → approve_assets → approve_final → approve_brand → done`.
-`approve_stills`, `approve_motion_sample`, and `approve_assets` are pauses of the **same** `assets`
-stage (tell them apart by the `gate` field). `approve_motion_sample` (one hero clip, approve the
-motion before batching) appears only when the `motion_sample` option is on (**default off**); pass
-`true` to opt in. `approve_brand` is launcher-only (no engine stage, no Higgsfield): **approve**
-stamps BGC copies then `done`; **skip** finishes UGC; **revise** stays. Branding does not flow
-through animation. `POST /jobs/{id}/brand` remains for skip-then-brand-later.
+`start → approve_script → approve_scene_plan → approve_hero_still → approve_stills → [approve_motion_sample] → approve_assets → approve_final → approve_brand → done`.
+`approve_hero_still`, `approve_stills`, `approve_motion_sample`, and `approve_assets` are pauses of
+the **same** `assets` stage (tell them apart by the `gate` field). `approve_hero_still` (one look-lock
+still before the storyboard) is **on by default**; pass `hero_still:false` to skip.
+`approve_motion_sample` (one hero clip, approve the motion before batching) appears only when the
+`motion_sample` option is on (**default off**); pass `true` to opt in. `approve_brand` is
+launcher-only (no engine stage, no Higgsfield): **approve** stamps BGC copies then `done`; **skip**
+finishes UGC; **revise** stays. Branding does not flow through animation. `POST /jobs/{id}/brand`
+remains for skip-then-brand-later.
 
 **`panda-carousel`:** `POST /jobs` with `"pipeline": "panda-carousel"`.
-`start → approve_script → approve_scene_plan → approve_stills → approve_brand → done`. Optional
-`options.gates: ["scene_plan", "stills"]` skips GATE 1.
+`start → approve_script → approve_scene_plan → approve_hero_still → approve_stills → approve_brand → done`.
+Optional `options.gates: ["scene_plan", "stills"]` skips GATE 1. Pass `hero_still:false` to skip look-lock.
 
 **`panda-image`:** `POST /jobs` with `"pipeline": "panda-image"`.
-`start → approve_scene_plan → approve_stills → approve_brand → done` (no script). One PNG.
+`start → approve_scene_plan → approve_stills → approve_brand → done` (no script; no separate hero gate). One PNG.
 
 At `approve_script` and `approve_scene_plan`, the `script` and `scene_plan` come back **inline as
 structured JSON** inside the `/jobs/{id}` response (`artifacts.script` / `artifacts.scene_plan`) —
 display them directly. Dialogue lives in `script.sections[].text`. The same content is also a
 markdown file: `artifacts.preview` is `[ /jobs/{id}/artifacts/script.md ]` at the script gate and
-`[ …/scene_plan.md ]` at the scene-plan gate. At `approve_stills`, `artifacts.preview` is
-`[ …/storyboard.png ]` (shot grid + descriptions). Bind `artifacts.preview` to Dify’s file-preview
-slot. Only media (stills, clips, `final.mp4`) plus that storyboard PNG are download links via
-`/artifacts/{name}`. The `approve_scene_plan` plan is text only — no media yet.
+`[ …/scene_plan.md ]` at the scene-plan gate. At `approve_hero_still`, `artifacts.preview` is the
+single hero PNG. At `approve_stills`, `artifacts.preview` is `[ …/storyboard.png ]` (shot grid +
+descriptions). Bind `artifacts.preview` to Dify’s file-preview slot. Only media (stills, clips,
+`final.mp4`) plus that storyboard PNG are download links via `/artifacts/{name}`. The
+`approve_scene_plan` plan is text only — no media yet.
 
-At `approve_stills` / `approve_assets`, Dify may pass user-supplied media instead of generated:
+At `approve_hero_still` / `approve_stills` / `approve_assets`, Dify may pass user-supplied media
+instead of generated:
 `POST /jobs/{id}/respond {"decision":"approve","stills":["/path/a.png","/path/b.png"]}`.
 
 At the **assets** gate, every generated shot is reviewed together; revise specific shots:

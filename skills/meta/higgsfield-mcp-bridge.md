@@ -51,13 +51,51 @@ cinematic; `kling3_0` for multi-shot, native audio, or motion transfer;
 image generation, `models_explore` the stills model and confirm which media role
 it uses for a start/reference image before an **edit** revise.
 
-## Stills revise — FRESH vs EDIT (GATE 3)
+## LOOK LOCK (binding — panda-video / panda-carousel when `hero_still` is on)
 
-At `approve_stills` (`panda-video`, `panda-carousel`, and `panda-image`) the human may send
+After scene-plan approval, generate **one hero still** first (`hero_moment` scene, else
+scene/slide 1), pause at `approve_hero_still`, and let the human iterate. The approved PNG
+plus accumulated `look_notes` then drive the rest of the storyboard.
+
+**Checkpoint (hero pause):** top-level
+`partial_progress={"phase":"hero_still","hero_scene_id":"<id>","look_notes":[]}`.
+On each hero revise, append the `answer` to `look_notes` and stay on `phase:"hero_still"`.
+
+**After hero approve — remaining stills:**
+
+1. **Keep** the approved hero PNG. Do not regenerate it.
+2. `media_import` the hero PNG from disk (local upload — not `media_import_url` for
+   localhost artifact URLs).
+3. `models_explore` — confirm the image model's **style / look / reference** media role
+   (not a start-frame role that copies composition).
+4. For each remaining scene: `generate_image` with that look `media_id` plus Element IDs.
+   Prompt for **this scene's action and framing from `scene_plan`**, while matching the
+   hero's **palette, character rendering, lighting, medium, and wardrobe**. Bake every
+   entry in `look_notes` into the prompt.
+5. Same **STILLS 2-TAKE HARD RULE** per remaining scene.
+6. Checkpoint `awaiting_human` with `partial_progress={"phase":"stills"}`.
+
+**Do not** treat the hero PNG as a start-frame that pastes the same composition onto every
+scene. Look lock is style consistency, not a collage of the same shot.
+
+Later per-shot revises at `approve_stills` still honor LOOK LOCK (keep matching the approved
+hero look when regenerating flagged shots).
+
+**Opt out:** job option `hero_still: false` skips this gate and generates all stills in one
+pass (legacy sequence). **panda-image** never uses this gate — its single stills gate is
+the look-lock.
+
+## Stills revise — FRESH vs EDIT (GATE 2.5 hero + GATE 3 stills)
+
+At `approve_hero_still` and `approve_stills` (`panda-video`, `panda-carousel`, and
+`panda-image` for stills) the human may send
 `{"decision":"revise","mode":"fresh"|"edit","shots":[…],"answer":"…"}`. If `mode`
 is omitted, infer: `shots` set and the note is a local change (change / fix /
 remove / keep / edit) → **edit**; regenerate / redo / new / from scratch /
 different scene → **fresh**; no `shots` and ambiguous → **fresh**.
+
+At `approve_hero_still` there is only one still — revise that one; ignore multi-shot
+lists or treat them as the hero. Append `answer` to `look_notes`.
 
 Motion, clips, and final gates stay regenerate-only. Do not image-to-image after
 the job is `done`. Panda stills stay on Higgsfield MCP (not FLUX/BFL).
@@ -68,7 +106,8 @@ the job is `done`. Panda stills stay on Higgsfield MCP (not FLUX/BFL).
 **not** pass the previous PNG. Replace only the flagged still files and their
 `asset_manifest` rows (new `credits` / `job_id`). Leave other slides untouched.
 Then rewrite the assets checkpoint `status='awaiting_human'` with **top-level**
-`partial_progress={"phase":"stills"}` (not nested under `metadata`) and STOP.
+`partial_progress={"phase":"stills"}` (or `{"phase":"hero_still",…}` at the hero
+gate) — not nested under `metadata` — and STOP.
 
 ### EDIT (image-to-image)
 
@@ -84,7 +123,7 @@ Then rewrite the assets checkpoint `status='awaiting_human'` with **top-level**
 5. Replace that slide's file + `asset_manifest` row (new `credits` / `job_id`).
    Leave other slides untouched.
 6. Checkpoint `awaiting_human` with **top-level**
-   `partial_progress={"phase":"stills"}` and STOP.
+   `partial_progress={"phase":"stills"}` (or `hero_still` at the hero gate) and STOP.
 
 If the image model rejects a source still, surface a blocker and wait. Do **not**
 silently fall back to FRESH.

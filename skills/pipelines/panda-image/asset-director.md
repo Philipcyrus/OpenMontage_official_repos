@@ -28,6 +28,8 @@ There is one scene. Its `required_assets` entry of type `image` is the still tas
 `scene_plan.metadata.aspect_ratio` — default `1:1`).
 
 ### 2. Generate ONE STILL, then STOP (GATE 2, approve_stills)
+> **No separate hero look-lock gate on panda-image.** This pipeline has exactly one still —
+> `approve_stills` *is* the look-lock. Do not invent a `hero_still` phase.
 **Follow the binding rules in `skills/meta/higgsfield-mcp-bridge.md`:** **CHARACTER LOCK**,
 **STILLS 2-TAKE HARD RULE**, and **2D MEDIUM LOCK**. Summary:
 

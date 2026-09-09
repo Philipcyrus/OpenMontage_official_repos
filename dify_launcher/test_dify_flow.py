@@ -1,17 +1,20 @@
 """Plays the role of Dify against the launcher, in-process (no server, no LLM).
 
 Runs the full gate handshake with the MockRunner and asserts each transition — the
-best-of-both shape (upstream text plan + a Panda stills cost gate):
-    start -> GATE 1 (script) -> GATE 2 (scene_plan, TEXT) -> GATE 3 (stills, NO video)
+best-of-both shape (upstream text plan + Panda look-lock + stills cost gate):
+    start -> GATE 1 (script) -> GATE 2 (scene_plan, TEXT)
+          -> GATE 2.5 (hero still look-lock, ONE still) -> GATE 3 (stills, NO video)
           -> GATE 3.5 (motion sample, ONE clip) -> GATE 4 (assets, all media)
           -> GATE 5 (final) -> GATE 6 (approve_brand) -> done
-Also proves default motion_sample=off skips the motion gate (stills -> assets directly);
-opt in with options.motion_sample=true to exercise GATE 3.5.
+Also proves default motion_sample=off skips the motion gate; opt in with
+options.motion_sample=true to exercise GATE 3.5. Hero look-lock is ON by default;
+opt out with options.hero_still=false.
 
 Proves the Dify-facing contract, local storage, checkpoint/resume, that scene_plan produces
-NO media (text only), that the STILLS gate produces stills with NO video on disk (the cost
-gate), that clips + a schema-valid asset_manifest appear only at the assets gate, and that a
-REAL clean video is produced by the folded render.
+NO media (text only), that the HERO gate produces ONE still (no storyboard grid), that the
+STILLS gate produces stills with NO video on disk (the cost gate), that clips + a schema-valid
+asset_manifest appear only at the assets gate, and that a REAL clean video is produced by
+the folded render.
 Run:  python dify_launcher/test_dify_flow.py
 """
 
@@ -107,8 +110,32 @@ b = _step("respond revise (scene_plan)", c.post(f"/jobs/{job}/respond",
           want_gate="approve_scene_plan", want_status="awaiting_human")
 assert isinstance(b["artifacts"].get("scene_plan"), dict) and "stills" not in b["artifacts"]
 
-# 3) approve scene_plan -> GATE 3 (approve_stills): STILLS ONLY, NO video yet ------------
+# 2.5) approve scene_plan -> GATE 2.5 (approve_hero_still): ONE look-lock still ------------
 b = _step("respond approve (scene_plan)", c.post(f"/jobs/{job}/respond", json={"decision": "approve"}),
+          want_gate="approve_hero_still", want_status="awaiting_human")
+hero_stills = b["artifacts"].get("stills")
+assert hero_stills and len(hero_stills) == 1, f"hero gate must show ONE still, got {hero_stills}"
+assert "storyboard" not in Path(hero_stills[0]).name.lower()
+assert b["artifacts"].get("preview") == [f"/jobs/{job}/artifacts/{Path(hero_stills[0]).name}"], \
+    f"hero preview must be the single PNG, got {b['artifacts'].get('preview')}"
+assert "storyboard_html" not in b["artifacts"], "hero gate must not build the storyboard grid"
+assert "clips" not in b["artifacts"]
+assert not list(store.artifacts_dir(job).glob("*.mp4")), "hero gate must generate NO video"
+print(f"   hero still gate: 1 still ({Path(hero_stills[0]).name}), look-lock before storyboard")
+
+# revise hero still stays at hero gate (edit mode)
+hero_d0 = _digest(job, hero_stills[0])
+b = _step("respond revise hero mode=edit", c.post(f"/jobs/{job}/respond", json={
+    "decision": "revise", "mode": "edit",
+    "answer": "brighter panda, warmer lighting",
+}), want_gate="approve_hero_still", want_status="awaiting_human")
+hero_stills_e = b["artifacts"].get("stills")
+assert hero_stills_e and len(hero_stills_e) == 1
+assert _digest(job, hero_stills_e[0]) != hero_d0, "hero revise must rewrite the still"
+print("   hero revise: stayed at approve_hero_still with one still")
+
+# 3) approve hero -> GATE 3 (approve_stills): FULL STILLS, NO video yet -------------------
+b = _step("respond approve (hero_still)", c.post(f"/jobs/{job}/respond", json={"decision": "approve"}),
           want_gate="approve_stills", want_status="awaiting_human")
 stills = b["artifacts"].get("stills")
 assert stills and len(stills) == 3, f"expected 3 stills at the stills gate, got {stills}"
@@ -226,6 +253,7 @@ b2 = _step("POST /jobs (motion_sample default off)", c.post("/jobs", json={
     want_gate="approve_script", want_status="awaiting_human")
 job2 = b2["job_id"]
 c.post(f"/jobs/{job2}/respond", json={"decision": "approve"})            # -> scene_plan
+c.post(f"/jobs/{job2}/respond", json={"decision": "approve"})            # -> hero_still
 c.post(f"/jobs/{job2}/respond", json={"decision": "approve"})            # -> stills
 b2 = _step("respond approve (stills, sample default off)", c.post(f"/jobs/{job2}/respond", json={"decision": "approve"}),
            want_gate="approve_assets", want_status="awaiting_human")
@@ -239,6 +267,7 @@ b3 = _step("POST /jobs (budget cap 20)", c.post("/jobs", json={
     want_gate="approve_script", want_status="awaiting_human")
 job3 = b3["job_id"]
 c.post(f"/jobs/{job3}/respond", json={"decision": "approve"})            # -> scene_plan
+c.post(f"/jobs/{job3}/respond", json={"decision": "approve"})            # -> hero_still
 c.post(f"/jobs/{job3}/respond", json={"decision": "approve"})            # -> stills
 # approving stills would animate the full batch (~54 credits) > cap 20 -> HARD BLOCK, nothing generated
 b3 = _step("respond approve (stills, over budget)", c.post(f"/jobs/{job3}/respond", json={"decision": "approve"}),
@@ -258,6 +287,7 @@ print("   cap raised to 100 -> clips generated, Higgsfield credits recorded in m
 # cancel path: a capped job cancelled at the budget gate -> failed, no further spend
 jc = c.post("/jobs", json={"brief": "cancel me", "options": {"motion_sample": False, "max_higgsfield_credits": 5}}).json()["job_id"]
 c.post(f"/jobs/{jc}/respond", json={"decision": "approve"})              # -> scene_plan
+c.post(f"/jobs/{jc}/respond", json={"decision": "approve"})              # -> hero_still
 c.post(f"/jobs/{jc}/respond", json={"decision": "approve"})              # -> stills
 c.post(f"/jobs/{jc}/respond", json={"decision": "approve"})              # -> budget_exceeded
 bc = _step("respond cancel (budget)", c.post(f"/jobs/{jc}/respond", json={"decision": "cancel"}),
@@ -277,7 +307,7 @@ mig = _step("respond (legacy gate)", c.post(f"/jobs/{legacy}/respond", json={"de
 assert "start a new job" in (mig.get("question") or "").lower(), "legacy resume must return a migration message"
 print("   legacy migration message OK")
 
-# 6) panda-carousel: truncated sibling — script → scene_plan → stills → done
+# 6) panda-carousel: truncated sibling — script → scene_plan → hero → stills → brand
 b4 = _step("POST /jobs (panda-carousel)", c.post("/jobs", json={
     "brief": "6-slide IG carousel: eSIM before you fly",
     "pipeline": "panda-carousel",
@@ -297,6 +327,13 @@ assert b4["artifacts"].get("preview") == [f"/jobs/{job4}/artifacts/scene_plan.md
 assert all(s.get("captions", {}).get("zh") and s.get("captions", {}).get("en")
            for s in sp4["scenes"]), "carousel scene_plan must carry bilingual captions"
 assert "stills" not in b4["artifacts"]
+c.post(f"/jobs/{job4}/respond", json={"decision": "approve"})            # -> hero_still
+b4 = _step("carousel hero still", c.get(f"/jobs/{job4}"),
+           want_gate="approve_hero_still", want_status="awaiting_human")
+assert b4["artifacts"].get("stills") and len(b4["artifacts"]["stills"]) == 1
+assert "storyboard" not in Path(b4["artifacts"]["stills"][0]).name.lower()
+assert b4["artifacts"].get("preview") == [
+    f"/jobs/{job4}/artifacts/{Path(b4['artifacts']['stills'][0]).name}"]
 c.post(f"/jobs/{job4}/respond", json={"decision": "approve"})            # -> stills
 b4 = _step("carousel stills", c.get(f"/jobs/{job4}"),
            want_gate="approve_stills", want_status="awaiting_human")
@@ -333,7 +370,7 @@ assert isinstance(b4["artifacts"].get("asset_manifest"), dict)
 validate_artifact("asset_manifest", b4["artifacts"]["asset_manifest"])
 assert "clips" not in b4["artifacts"] and "final" not in b4["artifacts"]
 assert b4["artifacts"].get("branded") is False
-print("   carousel: script → scene_plan → stills → approve_brand (no clips/final)")
+print("   carousel: script → scene_plan → hero → stills → approve_brand (no clips/final)")
 
 # skip branding -> done UGC, no branded_stills
 b4 = _step("carousel skip brand -> done",
@@ -379,12 +416,38 @@ b6 = _step("POST /jobs (carousel 1:1)", c.post("/jobs", json={
     "pipeline": "panda-carousel",
     "options": {"aspect_ratio": "1:1", "gates": ["scene_plan", "stills"]},
 }), want_gate="approve_scene_plan", want_status="awaiting_human")
-c.post(f"/jobs/{b6['job_id']}/respond", json={"decision": "approve"})
+c.post(f"/jobs/{b6['job_id']}/respond", json={"decision": "approve"})  # -> hero
+c.post(f"/jobs/{b6['job_id']}/respond", json={"decision": "approve"})  # -> stills
 b6 = _step("carousel 1:1 stills", c.get(f"/jobs/{b6['job_id']}"),
            want_gate="approve_stills", want_status="awaiting_human")
 sq = b6["artifacts"].get("stills") or []
 assert sq and all(_size(b6["job_id"], s) == (1080, 1080) for s in sq), "1:1 must be 1080x1080"
 print("   carousel 1:1: 1080x1080 stills")
+
+# hero_still:false restores the old jump scene_plan → stills (video + carousel)
+b_opt = _step("POST /jobs (hero_still=false)", c.post("/jobs", json={
+    "brief": "skip look-lock",
+    "options": {"hero_still": False, "motion_sample": False},
+}), want_gate="approve_script", want_status="awaiting_human")
+job_opt = b_opt["job_id"]
+c.post(f"/jobs/{job_opt}/respond", json={"decision": "approve"})  # -> scene_plan
+b_opt = _step("hero_still=false scene_plan -> stills",
+              c.post(f"/jobs/{job_opt}/respond", json={"decision": "approve"}),
+              want_gate="approve_stills", want_status="awaiting_human")
+assert len(b_opt["artifacts"].get("stills") or []) == 3
+assert b_opt["artifacts"].get("preview") == [f"/jobs/{job_opt}/artifacts/storyboard.png"]
+print("   hero_still=false: scene_plan jumps straight to approve_stills")
+
+b_copt = _step("POST /jobs (carousel hero_still=false)", c.post("/jobs", json={
+    "brief": "carousel no look-lock",
+    "pipeline": "panda-carousel",
+    "options": {"hero_still": False, "gates": ["scene_plan", "stills"]},
+}), want_gate="approve_scene_plan", want_status="awaiting_human")
+b_copt = _step("carousel hero_still=false -> stills",
+               c.post(f"/jobs/{b_copt['job_id']}/respond", json={"decision": "approve"}),
+               want_gate="approve_stills", want_status="awaiting_human")
+assert len(b_copt["artifacts"].get("stills") or []) == 3
+print("   carousel hero_still=false: scene_plan jumps straight to approve_stills")
 
 # 7) panda-image: scene_plan → one still → edit → fresh → done + /brand
 b7 = _step("POST /jobs (panda-image)", c.post("/jobs", json={
@@ -451,9 +514,10 @@ assert b7["artifacts"].get("stills")
 assert _digest(job7, Path(b7["artifacts"]["stills"][0]).name) == id_ugc
 print("   image: scene_plan → 1 still → edit → fresh → approve_brand (revise stays, approve stamps)")
 
-print("\n[PASS] FULL DIFY GATE FLOW: start -> script -> scene_plan(text) -> stills(no video) -> "
-      "motion_sample(1 clip, opt-in) -> assets(media) -> final -> approve_brand -> done  "
-      "(+ default motion_sample=off: stills -> assets)")
-print("   + panda-carousel: script → scene_plan → stills → approve_brand (skip) → done")
+print("\n[PASS] FULL DIFY GATE FLOW: start -> script -> scene_plan(text) -> hero_still(1) -> "
+      "stills(no video) -> motion_sample(1 clip, opt-in) -> assets(media) -> final -> "
+      "approve_brand -> done  (+ default motion_sample=off: stills -> assets; "
+      "hero_still=false skips look-lock)")
+print("   + panda-carousel: script → scene_plan → hero → stills → approve_brand (skip) → done")
 print("   + panda-image: scene_plan → one still → edit → fresh → approve_brand (revise, approve) → done")
 print("   job dir:", store.job_dir(job))

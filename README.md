@@ -50,33 +50,37 @@ A second entrance, /montage/* (own X-Panda-Token), exposes the raw render core d
 
 ## The approval gates
 
-The `panda-video` pipeline pauses for a human at up to six points (`pipeline_defs/panda-video.yaml`):
+The `panda-video` pipeline pauses for a human at up to seven points (`pipeline_defs/panda-video.yaml`):
 
 | # | Gate | Reviewer approves |
 |---|------|-------------------|
 | 1 | `approve_script` | the script |
 | 2 | `approve_scene_plan` | the structured **text** scene plan (no media generated yet) |
+| 2.5 | `approve_hero_still` | **one** look-lock still — iterate palette/character/lighting **before** the full storyboard (**on by default**; opt out with `hero_still:false`) |
 | 3 | `approve_stills` | one still per scene — **no video yet**, so a reject here costs nothing |
 | 3.5 | `approve_motion_sample` | **one** hero clip — approve the motion/animation **before** the full batch (cost gate; **off by default**, opt in with `motion_sample:true`) |
 | 4 | `approve_assets` | the full media set (remaining stills animated into clips + VO + music; revise specific shots) |
 | 5 | `approve_final` | the finished (unbranded) video |
 
-Gates 3, 3.5 & 4 are pauses of the **same** `assets` stage (tell them apart by the `gate` field).
-The `approve_motion_sample` gate appears only when the `motion_sample` job option is on
-(**default off**); pass `motion_sample:true` to opt in. Approve advances; "revise" regenerates that stage (or
-just the named shots). Branding is offered **after** gate 5, only if asked — `POST /jobs/{id}/brand`.
+Gates 2.5, 3, 3.5 & 4 are pauses of the **same** `assets` stage (tell them apart by the `gate` field).
+`approve_hero_still` is on by default; pass `hero_still:false` if a chatflow hardcodes
+`scene_plan → stills`. The `approve_motion_sample` gate appears only when the `motion_sample`
+job option is on (**default off**); pass `motion_sample:true` to opt in. Approve advances;
+"revise" regenerates that stage (or just the named shots). Branding is offered **after**
+gate 5, only if asked — `POST /jobs/{id}/brand`.
 
 **`panda-carousel`** (stills-only sibling): `POST /jobs` with `"pipeline": "panda-carousel"`.
-Gates: `approve_script` → `approve_scene_plan` → `approve_stills` → `done`. No motion, clips,
-TTS, or compose. Optional `options.gates: ["scene_plan", "stills"]` skips the script gate.
+Gates: `approve_script` → `approve_scene_plan` → `approve_hero_still` → `approve_stills` → `done`.
+No motion, clips, TTS, or compose. Optional `options.gates: ["scene_plan", "stills"]` skips the
+script gate. Pass `hero_still:false` to skip look-lock.
 `options.aspect_ratio` is caller-set (default `4:5`; also `1:1`, `9:16`, `WIDTHxHEIGHT`, …).
 After `done`, `POST /jobs/{id}/brand` stamps the BGC wordmark onto copies of the stills.
 See [`dify_launcher/CAROUSEL.md`](dify_launcher/CAROUSEL.md).
 
 **`panda-image`** (single still): `POST /jobs` with `"pipeline": "panda-image"`.
-Gates: `approve_scene_plan` → `approve_stills` → `done`. No script, motion, clips, TTS, or
-compose. `options.aspect_ratio` default `1:1`. Dual-mode stills revise (`edit` | `fresh`).
-After `done`, `POST /jobs/{id}/brand` stamps the BGC wordmark onto a copy.
+Gates: `approve_scene_plan` → `approve_stills` → `done`. No script, separate hero gate, motion,
+clips, TTS, or compose. `options.aspect_ratio` default `1:1`. Dual-mode stills revise
+(`edit` | `fresh`). After `done`, `POST /jobs/{id}/brand` stamps the BGC wordmark onto a copy.
 See [`dify_launcher/IMAGE.md`](dify_launcher/IMAGE.md).
 
 ## Cost & time report

@@ -77,8 +77,11 @@ POST /jobs
 - Carousel gate sequence (shorter than video — no motion/clips/audio):
 
   ```
-  approve_script → approve_scene_plan → approve_stills → approve_brand → done
+  approve_script → approve_scene_plan → approve_hero_still → approve_stills → approve_brand → done
   ```
+
+  Pass `hero_still: false` to skip look-lock (`scene_plan → stills`). Chatflows that hardcode
+  `scene_plan → stills` need a branch for `approve_hero_still`, or that opt-out.
 
 See §6 for the full `options` reference.
 
@@ -94,11 +97,12 @@ Branch on the `gate` field:
 |---|---|---|
 | `approve_script` | **`artifacts.script`** (inline JSON) **and/or** **`artifacts.preview`** | Slide/dialogue copy is `artifacts.script.sections[].text`. `preview` is `[…/script.md]` — fetch that file for the file-preview slot. |
 | `approve_scene_plan` | **`artifacts.scene_plan`** (inline JSON) **and/or** **`artifacts.preview`** | TEXT plan, no media yet. Carries **per-slide bilingual captions (zh + en)** and `metadata.aspect_ratio`. `preview` is `[…/scene_plan.md]` (this gate only). |
+| `approve_hero_still` | **`artifacts.preview`** (single PNG) **and/or** **`artifacts.stills`** | One look-lock still. `preview` is that PNG (not the storyboard grid). Revise with `mode` `edit`\|`fresh` stays here; approve generates remaining slides under LOOK LOCK. |
 | `approve_stills` | **`artifacts.preview`** (storyboard PNG) **and/or** **`artifacts.stills`** | `preview` is `[…/storyboard.png]` — a Backlot-style grid (still + shot description); fetch it for the file-preview slot. `stills` remains the per-shot PNG list for revise-by-shot. After `{decision:"revise", mode:"edit", shots:[n]}`, poll again — the storyboard PNG is rebuilt. |
 | `approve_brand` | UGC stills again | Collect **approve** (stamp BGC copies), **skip** (keep UGC), or **revise** (ask again). Branding does not flow through animation. |
 | `budget_exceeded` | `question` (the credit warning) | Conditional — see §5. |
 
-**Rule of thumb:** at `approve_script` / `approve_scene_plan` render the inline JSON **or** fetch `artifacts.preview` (`script.md` / `scene_plan.md`). At `approve_stills` fetch `artifacts.preview` (`storyboard.png`) and/or each `artifacts.stills` file; after a shot revise, poll and show the rebuilt storyboard PNG. At `approve_brand` collect approve/skip/revise. Only at stills/brand/later video gates do you fetch media files.
+**Rule of thumb:** at `approve_script` / `approve_scene_plan` render the inline JSON **or** fetch `artifacts.preview` (`script.md` / `scene_plan.md`). At `approve_hero_still` fetch `artifacts.preview` (the single PNG). At `approve_stills` fetch `artifacts.preview` (`storyboard.png`) and/or each `artifacts.stills` file; after a shot revise, poll and show the rebuilt storyboard PNG. At `approve_brand` collect approve/skip/revise. Only at hero/stills/brand/later video gates do you fetch media files.
 
 ---
 

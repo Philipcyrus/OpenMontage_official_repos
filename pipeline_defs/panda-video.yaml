@@ -2,15 +2,16 @@ name: panda-video
 version: "1.0"
 description: >
   Panda Mobile video pipeline. Agent-driven production that mirrors upstream OpenMontage's
-  Animated Explainer architecture, with five human-approval gates: script, scene_plan
-  (TEXT), stills, assets (all generated media), and final video. The scene_plan stage produces ONLY
-  a structured text plan (no media, no generation tools); ALL media (stills, clips, voice,
-  music) is generated in the assets stage and recorded canonically in asset_manifest.
-  Generation runs through the Higgsfield MCP bridge + ElevenLabs. The compose stage is
-  runtime-routed (upstream-style) on edit_decisions.render_runtime: ffmpeg -> panda_render
-  (folded montage-svc, CLEAN default), remotion/hyperframes -> video_compose. The output is
-  always a CLEAN (unbranded) master. Panda branding (logo/watermark/cards) is applied ONLY on
-  explicit user request AFTER approval, via the standalone panda_brand tool — never baked in.
+  Animated Explainer architecture, with human-approval gates: script, scene_plan
+  (TEXT), hero still (look lock), stills, assets (all generated media), and final video.
+  The scene_plan stage produces ONLY a structured text plan (no media, no generation tools);
+  ALL media (stills, clips, voice, music) is generated in the assets stage and recorded
+  canonically in asset_manifest. Generation runs through the Higgsfield MCP bridge +
+  ElevenLabs. The compose stage is runtime-routed (upstream-style) on
+  edit_decisions.render_runtime: ffmpeg -> panda_render (folded montage-svc, CLEAN default),
+  remotion/hyperframes -> video_compose. The output is always a CLEAN (unbranded) master.
+  Panda branding (logo/watermark/cards) is applied ONLY on explicit user request AFTER
+  approval, via the standalone panda_brand tool — never baked in.
 category: hybrid
 stability: production             # schema allows only production|beta
 default_checkpoint_policy: guided
@@ -97,25 +98,29 @@ stages:
       - Every required_asset is feasible with the tools available in the assets stage
       - Panda identity / character-consistency (Element ids + character_actions) / composition are specified as plan requirements
 
-  # ---- GATES 3, 3.5 & 4 : the ASSETS stage runs in up to THREE human-reviewed phases ----
+  # ---- GATES 2.5, 3, 3.5 & 4 : the ASSETS stage runs in up to FOUR human-reviewed phases ----
   # Best-of-both: upstream's single asset-generation stage, PLUS Panda cost gates. The stage
-  # pauses up to 3× (all status='awaiting_human', stage='assets'), distinguished by the
+  # pauses up to 4× (all status='awaiting_human', stage='assets'), distinguished by the
   # checkpoint's partial_progress.phase:
-  #   PHASE 1  partial_progress.phase="stills"        -> 🚦 GATE 3 approve_stills
-  #            generate ONLY the stills (cheap). Approve the LOOK (on-model panda, composition)
-  #            BEFORE any expensive image->video spend. NO video generated yet.
-  #   PHASE 2  partial_progress.phase="motion_sample" -> 🚦 GATE 3.5 approve_motion_sample
+  #   PHASE 1  partial_progress.phase="hero_still"    -> 🚦 GATE 2.5 approve_hero_still
+  #            generate ONLY ONE hero still (hero_moment scene, else scene 1). Approve the LOOK
+  #            (palette, character, lighting, wardrobe) BEFORE spending on the full storyboard.
+  #            Opt out with job option hero_still:false (default ON).
+  #   PHASE 2  partial_progress.phase="stills"        -> 🚦 GATE 3 approve_stills
+  #            generate remaining stills under LOOK LOCK from the approved hero. Approve the
+  #            full storyboard BEFORE any expensive image->video spend. NO video generated yet.
+  #   PHASE 3  partial_progress.phase="motion_sample" -> 🚦 GATE 3.5 approve_motion_sample
   #            (only when job option motion_sample is on — DEFAULT OFF; pass true to opt in)
   #            animate ONE hero still into a single sample clip. Approve the MOTION/animation
   #            BEFORE batching all clips.
-  #   PHASE 3  (no phase marker)                       -> 🚦 GATE 4 approve_assets
+  #   PHASE 4  (no phase marker)                       -> 🚦 GATE 4 approve_assets
   #            animate the remaining stills into motion clips + narration + music, recorded
   #            canonically in asset_manifest. Approve the full media set (per-shot revisable).
   #   BUDGET   partial_progress.phase="budget_hold"    -> 🚦 budget_exceeded (CONDITIONAL)
   #            only when a generation would exceed the job's max_higgsfield_credits cap: the agent
   #            HARD-BLOCKS before spending and pauses; human raises the cap / revises / cancels.
   # The assets stage is gated (framework assets-gate-flip: a gated stage cannot complete
-  # without human approval). See dify_launcher/runner.py (_sync/_motion_sample_prompt).
+  # without human approval). See dify_launcher/runner.py (_sync/_hero_still/_motion_sample_prompt).
   - name: assets
     skill: pipelines/panda-video/asset-director
     required_artifacts_in:
@@ -124,17 +129,18 @@ stages:
     produces:
       - asset_manifest
     tools_available:
-      - image_selector           # PHASE 1: stills per scene (still-gen via the Higgsfield MCP bridge)
-      - higgsfield_mcp_video     # PHASE 2/3: OUR MCP bridge (image_to_video motion clips)
+      - image_selector           # PHASE 1–2: stills per scene (still-gen via the Higgsfield MCP bridge)
+      - higgsfield_mcp_video     # PHASE 3/4: OUR MCP bridge (image_to_video motion clips)
       - seedance_video
-      - elevenlabs_tts           # PHASE 3: narration
-      - music_gen                # PHASE 3: background music (ElevenLabs Music)
+      - elevenlabs_tts           # PHASE 4: narration
+      - music_gen                # PHASE 4: background music (ElevenLabs Music)
     checkpoint_required: true
-    human_approval_default: true       # 🚦 GATES 3, 3.5 & 4 (stills, motion sample, full media)
+    human_approval_default: true       # 🚦 GATES 2.5, 3, 3.5 & 4 (hero, stills, motion sample, full media)
     review_focus:
-      - "PHASE 1 (stills): one still per scene, on-brand (styles/panda.yaml) and character-consistent (panda Elements), before any video is generated"
-      - "PHASE 2 (motion sample): one hero clip approves the motion/animation before the full batch (only if motion_sample:true; default off)"
-      - "PHASE 3 (media): every required asset exists on disk and is listed in asset_manifest (path + scene_id)"
+      - "PHASE 1 (hero look-lock): one hero still locks palette/character/lighting before the storyboard (default on; hero_still:false skips)"
+      - "PHASE 2 (stills): remaining stills under LOOK LOCK from the approved hero; on-brand and character-consistent before any video"
+      - "PHASE 3 (motion sample): one hero clip approves the motion/animation before the full batch (only if motion_sample:true; default off)"
+      - "PHASE 4 (media): every required asset exists on disk and is listed in asset_manifest (path + scene_id)"
       - "Budget: cumulative Higgsfield credits stay within max_higgsfield_credits (if set); overruns hard-block before spend, not after"
       - Narration covers all script sections; music (if any) sits under the VO
       - Reviewer can approve the set or request revision of specific scenes/shots (regenerate only those)

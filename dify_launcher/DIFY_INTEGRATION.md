@@ -15,7 +15,7 @@ Dify  ──HTTP──▶  Launcher (this API)  ──▶  headless Claude agent
 ```
 
 - **One base URL**, a handful of endpoints (below).
-- The pipeline **pauses for human approval at 6 gates**: script → scene_plan (text) → stills (before video) → assets (all media) → final → **brand**. Branding is a launcher overlay, not an engine stage.
+- The pipeline **pauses for human approval at 7 gates** (video, default): script → scene_plan (text) → **hero still (look lock)** → stills (before video) → assets (all media) → final → **brand**. Branding is a launcher overlay, not an engine stage. Opt out of look-lock with `options.hero_still: false`.
 - Real generation takes **minutes**, so the API is **asynchronous**: you `POST`, then **poll** `GET` until the gate is ready. (See §4 — this is the single most important thing to build correctly.)
 - Output at each gate is **real reviewable material** — the **script** (dialogue/sections) and the **scene plan** come **inline** as structured JSON (show them directly at their gates), and the visual media (stills, clips, final MP4) come as downloadable files at the asset/final gates.
 
@@ -177,6 +177,9 @@ approve_script         artifacts: script                    approve│revise
 approve_scene_plan     artifacts: scene_plan (TEXT plan)     approve│revise        ← no media here
    │
    ▼
+approve_hero_still     artifacts: stills[] (ONE PNG)         approve│revise (edit|fresh)
+   │                                                          ↑ look-lock BEFORE the storyboard
+   ▼                                                            (default ON; hero_still:false skips)
 approve_stills         artifacts: stills[]  (NO video yet)   approve│revise (per-scene)
    │                                                          ↑ approve the look BEFORE paying
    ▼                                                            for image→video
@@ -198,6 +201,7 @@ done                   artifacts: final (+ branded_final if approved)
 
 **`panda-carousel`** (`"pipeline": "panda-carousel"`). Slide size is `options.aspect_ratio`
 (default `4:5` — see [`CAROUSEL.md`](CAROUSEL.md)). Dual-mode stills revise: `mode` `edit` | `fresh`.
+Hero look-lock is on by default (`hero_still: false` to skip).
 
 ```
 POST /jobs  { "pipeline": "panda-carousel", ... }
@@ -207,6 +211,9 @@ approve_script         artifacts: script                    (skippable via optio
    │
    ▼
 approve_scene_plan     artifacts: scene_plan + captions     approve│revise
+   │
+   ▼
+approve_hero_still     artifacts: stills[] (ONE PNG)        approve│revise
    │
    ▼
 approve_stills         artifacts: stills[] (UGC)            approve│revise
@@ -239,7 +246,7 @@ done                   (+ branded_stills if approved)
 
 `status` values: `running` (working, keep polling) · `awaiting_human` (a gate — act) · `done` (finished) · `failed` (see `question`).
 
-> **The assets stage surfaces up to FOUR pauses.** `approve_stills`, `approve_motion_sample`, `budget_exceeded`, and `approve_assets` are `awaiting_human` pauses of the **same** `assets` stage (`stage:"assets"` at all of them). `approve_stills` shows **stills only** (no video — a rejection costs nothing). `approve_motion_sample` shows **one sample clip** so you approve the motion before the full batch — appears only when the `motion_sample` option is on (**default off**; pass `true` to opt in). `budget_exceeded` is **conditional** — it appears only if a generation would push cumulative Higgsfield spend past `max_higgsfield_credits`; the agent blocks *before* spending and you raise the cap / revise / cancel. `approve_assets` shows the full media set. **Tell them apart by the `gate` field — do not rely on `stage` alone.**
+> **The assets stage surfaces up to FIVE pauses.** `approve_hero_still`, `approve_stills`, `approve_motion_sample`, `budget_exceeded`, and `approve_assets` are `awaiting_human` pauses of the **same** `assets` stage (`stage:"assets"` at all of them). `approve_hero_still` shows **one look-lock still** (default on; `hero_still:false` skips) — iterate the look before paying for the full storyboard. `approve_stills` shows **stills only** (no video — a rejection costs nothing). `approve_motion_sample` shows **one sample clip** so you approve the motion before the full batch — appears only when the `motion_sample` option is on (**default off**; pass `true` to opt in). `budget_exceeded` is **conditional** — it appears only if a generation would push cumulative Higgsfield spend past `max_higgsfield_credits`; the agent blocks *before* spending and you raise the cap / revise / cancel. `approve_assets` shows the full media set. **Tell them apart by the `gate` field — do not rely on `stage` alone.**
 
 ---
 
@@ -252,8 +259,8 @@ Plain-language description of the video. **Be specific** — duration, what happ
 
 ### `pipeline` (optional, default `"panda-video"`)
 Which manifest to run. `"panda-video"` is the full video (content gates + `approve_brand`). `"panda-carousel"` is the
-stills-only sibling: `approve_script` → `approve_scene_plan` → `approve_stills` → `approve_brand` → `done`.
-`"panda-image"` is a single still: `approve_scene_plan` → `approve_stills` → `approve_brand` → `done` (no script).
+stills-only sibling: `approve_script` → `approve_scene_plan` → `approve_hero_still` → `approve_stills` → `approve_brand` → `done`.
+`"panda-image"` is a single still: `approve_scene_plan` → `approve_stills` → `approve_brand` → `done` (no script; no separate hero gate).
 Persist this per job — mixed video + carousel + image on one launcher is supported.
 
 ### `profile` (optional, default `"ugc"`)
@@ -270,6 +277,7 @@ after the last content gate — a post-cut overlay, never in generation. `skip` 
 | `music` | mood string, or `false` | background music via ElevenLabs (`"upbeat, light"`), or `false` to skip |
 | `render_runtime` | `"auto"` \| `"ffmpeg"` \| `"remotion"` \| `"hyperframes"` | which render engine composes the video. Default `"auto"` |
 | `motion_sample` | `false` (default) \| `true` | insert the `approve_motion_sample` gate (video only; default off) |
+| `hero_still` | `true` (default) \| `false` | insert the `approve_hero_still` look-lock gate (video + carousel; default on). Remaining storyboard stills are generated from the approved hero look. **panda-image ignores this** (its single stills gate is the look-lock). Pass `false` if a Dify chatflow hardcodes `scene_plan → stills` |
 | `max_higgsfield_credits` | integer, or unset | **hard credit ceiling** for the run |
 | `aspect_ratio` | string | stills canvas, passed through to `generate_image`. Carousel default `"4:5"`; **panda-image** default `"1:1"`. Also `9:16`, `WIDTHxHEIGHT`, … |
 | `gates` | e.g. `["scene_plan", "stills"]` | carousel only — omit `script` to auto-approve GATE 1 |
@@ -308,19 +316,20 @@ is ElevenLabs itself being unavailable — an infrastructure failure, never a mi
 |---|---|
 | `{"decision":"skip"}` | **at `approve_brand` only** — finish `done` with UGC (`branded: false`). Other gates → `400` |
 | `{"decision":"approve"}` | accept this gate, advance to the next. At `approve_brand`, stamps BGC copies then `done` |
-| `{"decision":"revise","answer":"<what to change>"}` | regenerate this gate's output honoring the note, stay at the same gate (at `approve_scene_plan` this rewrites the text plan; at `approve_stills` this regenerates stills unless `mode` is `edit`; at `approve_motion_sample` this regenerates only the sample clip; at `approve_brand` this stays at the gate with UGC unchanged — no regen) |
+| `{"decision":"revise","answer":"<what to change>"}` | regenerate this gate's output honoring the note, stay at the same gate (at `approve_scene_plan` this rewrites the text plan; at `approve_hero_still` / `approve_stills` this regenerates stills unless `mode` is `edit`; at `approve_motion_sample` this regenerates only the sample clip; at `approve_brand` this stays at the gate with UGC unchanged — no regen) |
 | `{"decision":"revise","shots":[1,3],"answer":"…"}` | at `approve_stills` (those scenes' stills) **or** `approve_assets` (those shots' clips) |
-| `{"decision":"revise","mode":"edit","shots":[3],"answer":"…"}` | **at `approve_stills` only** (video, carousel, and image): image-to-image the flagged stills (keep composition; apply the note). `mode:"fresh"` regenerates from text + Element IDs and does not pass the old PNG. Omit `mode` to infer: `shots` + local-change language → edit; regenerate/redo/new → fresh; otherwise fresh |
-| `{"decision":"approve","stills":["/abs/path.png", …]}` | **at `approve_stills` / `approve_assets`** — supply your own media instead of generated ones (associated with the asset manifest, not the scene plan) |
+| `{"decision":"revise","mode":"edit","shots":[3],"answer":"…"}` | **at `approve_hero_still` or `approve_stills`** (video, carousel, and image): image-to-image the flagged stills (keep composition; apply the note). `mode:"fresh"` regenerates from text + Element IDs and does not pass the old PNG. Omit `mode` to infer: `shots` + local-change language → edit; regenerate/redo/new → fresh; otherwise fresh |
+| `{"decision":"approve","stills":["/abs/path.png", …]}` | **at `approve_hero_still` / `approve_stills` / `approve_assets`** — supply your own media instead of generated ones (associated with the asset manifest, not the scene plan) |
 | `{"decision":"approve","max_higgsfield_credits":<n>}` | **at `budget_exceeded`** — raise the credit cap and resume generation (the agent re-checks before spending) |
 | `{"decision":"cancel"}` | **at `budget_exceeded`** — stop the job; no further Higgsfield credits are spent |
 
-> Approving `approve_stills` on **panda-video** does **not** finish the assets stage — with `motion_sample` off (**default**) the next gate is `approve_assets`; with it on (`motion_sample:true`), stills go to `approve_motion_sample` first. On **panda-carousel** and **panda-image**, approving stills opens **`approve_brand`** (not `done`). Dify must collect approve / skip / revise there before treating the job as finished.
+> Approving `approve_hero_still` generates the remaining storyboard stills under LOOK LOCK (hero PNG as style reference + accumulated edit notes) and opens `approve_stills`. Approving `approve_stills` on **panda-video** does **not** finish the assets stage — with `motion_sample` off (**default**) the next gate is `approve_assets`; with it on (`motion_sample:true`), stills go to `approve_motion_sample` first. On **panda-carousel** and **panda-image**, approving stills opens **`approve_brand`** (not `done`). Dify must collect approve / skip / revise there before treating the job as finished.
 
 Notes:
 - Edits are a **text instruction** the agent acts on (not a manual pixel editor). More specific = closer result.
-- `mode` (`fresh` | `edit`) applies only at `approve_stills`. Motion / clips / final revises stay regenerate-only. There is no image-to-image after `done`.
+- `mode` (`fresh` | `edit`) applies at `approve_hero_still` and `approve_stills`. Motion / clips / final revises stay regenerate-only. There is no image-to-image after `done`.
 - After any `respond`, the job goes back to `running` — **poll again**.
+- Chatflows that hardcode `scene_plan → stills` need a branch for `approve_hero_still`, or pass `hero_still: false`.
 
 ---
 
@@ -336,7 +345,7 @@ Returned under `artifacts` in every state; grouped by kind:
 | `scene_plan_md` | relative URL to `scene_plan.md` | at the scene_plan gate (and later, if the plan is still on the job) |
 | `preview` | list of **one** relative URL — the current text gate’s `.md` | **`approve_script`** → `script.md`; **`approve_scene_plan`** → `scene_plan.md`. Absent at stills/clips/final. Bind this for Dify’s file-preview slot. |
 | `stills` | list of image paths | at the **stills** gate (UGC originals; kept after `/brand`) |
-| `preview` | list of **one** relative URL | at **`approve_stills`** → `storyboard.png` (shot grid + descriptions). Absent at later gates. Bind Dify’s file-preview slot here. After a per-shot revise, poll again — the PNG is rebuilt. |
+| `preview` | list of **one** relative URL | at **`approve_hero_still`** → the single hero PNG; at **`approve_stills`** → `storyboard.png` (shot grid + descriptions). Absent at later gates. Bind Dify’s file-preview slot here. After a per-shot revise, poll again — the PNG is rebuilt. |
 | `storyboard_html` | relative URL to `storyboard.html` | same grid as HTML (sibling still filenames). |
 | `branded_stills` | list of image paths | after `approve_brand` approve, or later `POST /jobs/{id}/brand` (BGC wordmark copies) |
 | `clips` | list of video paths | at the **assets** gate (video pipeline) |
@@ -350,7 +359,7 @@ Structured artifacts (`script`, `scene_plan`, `asset_manifest`) come as **inline
 
 **Dual-surface at text gates:** the same content is also written as `script.md` / `scene_plan.md`. `artifacts.preview` is a one-item list of that file’s URL for the **current** gate (`approve_script` → script.md, `approve_scene_plan` → scene_plan.md). Bind Dify’s file-preview node to `artifacts.preview` (or `script_md` / `scene_plan_md`) so the chat does not show “the engine sent no preview.” Do **not** put these `.md` files in `stills`.
 
-File artifacts (`stills`, `clips`, `final`) come as **relative URLs** — fetch with `GET /jobs/{id}/artifacts/{basename}` (prepend the base URL). At **`approve_stills`**, `artifacts.preview` is `[…/storyboard.png]` (a Backlot-style shot grid with descriptions) — bind the file-preview slot to it. After `{decision:"revise","shots":[n]}`, poll again; the PNG is rebuilt. `preview` is dropped at later gates. Show `stills`/`clips` at the assets gate; show `final` at the final gate.
+File artifacts (`stills`, `clips`, `final`) come as **relative URLs** — fetch with `GET /jobs/{id}/artifacts/{basename}` (prepend the base URL). At **`approve_hero_still`**, `artifacts.preview` is the single hero PNG. At **`approve_stills`**, `artifacts.preview` is `[…/storyboard.png]` (a Backlot-style shot grid with descriptions) — bind the file-preview slot to it. After `{decision:"revise","shots":[n]}`, poll again; the PNG is rebuilt. `preview` is dropped at later gates. Show `stills`/`clips` at the assets gate; show `final` at the final gate.
 
 ---
 
@@ -373,8 +382,9 @@ curl -s -H "X-Dify-Token: $T" $BASE/jobs/job_xxxx
 # 3) approve (or revise)
 curl -s -X POST $BASE/jobs/job_xxxx/respond -H "X-Dify-Token: $T" -H "Content-Type: application/json" \
  -d '{"decision":"approve"}'
-# -> status:running ; go back to (2). Repeat: scene_plan -> stills -> assets -> final -> approve_brand
-#    (optional: pass motion_sample:true to insert approve_motion_sample after stills).
+# -> status:running ; go back to (2). Repeat: scene_plan -> hero_still -> stills -> assets -> final -> approve_brand
+#    (optional: pass motion_sample:true to insert approve_motion_sample after stills;
+#     pass hero_still:false to skip the look-lock and jump scene_plan -> stills).
 
 # 4) at approve_brand, approve (stamp), skip (UGC), or revise (stay). Then when status=done, download the video
 curl -s -H "X-Dify-Token: $T" $BASE/jobs/job_xxxx/artifacts/final.mp4 -o final.mp4

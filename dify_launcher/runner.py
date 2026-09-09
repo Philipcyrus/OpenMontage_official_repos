@@ -12,17 +12,18 @@ Two runners:
                         Skeleton only; swap it in where the box has `claude` + OpenRouter + MCP.
 
 Gate sequence (matches pipeline_defs/panda-video.yaml — upstream shape + Panda cost gates):
-    start ─▶ GATE 1 approve_script ─▶ GATE 2 approve_scene_plan (TEXT) ─▶ GATE 3 approve_stills
+    start ─▶ GATE 1 approve_script ─▶ GATE 2 approve_scene_plan (TEXT)
+          ─▶ [GATE 2.5 approve_hero_still] ─▶ GATE 3 approve_stills
           ─▶ [GATE 3.5 approve_motion_sample] ─▶ GATE 4 approve_assets ─▶ GATE 5 approve_final
           ─▶ GATE 6 approve_brand ─▶ done
-scene_plan produces a TEXT plan only (no media). The assets stage runs in up to THREE human-
-reviewed phases (all stage="assets"): first STILLS ONLY (cheap — approve the look before any
-video); then, when the job option motion_sample is on (default off; opt in), ONE hero still is animated into
-a MOTION SAMPLE (approve the motion/animation before batching all clips — the biggest cost/time
-gate); then the full media (all clips + voice + music) recorded in asset_manifest. The pauses are
-distinguished by the checkpoint's partial_progress.phase ("stills" | "motion_sample" | full).
-approve_brand is a launcher-only gate after the last content gate: approve stamps BGC copies,
-skip keeps UGC, revise stays. Branding does not flow through animation.
+scene_plan produces a TEXT plan only (no media). The assets stage runs in human-reviewed phases
+(all stage="assets"): first (default on) ONE HERO STILL look-lock; then the full STILLS storyboard
+(cheap — approve remaining frames before video); then, when motion_sample is on (default off),
+ONE still is animated into a MOTION SAMPLE; then the full media (clips + voice + music) in
+asset_manifest. Pauses are distinguished by partial_progress.phase
+("hero_still" | "stills" | "motion_sample" | full). Opt out of look-lock with options.hero_still=false.
+panda-image has no hero gate (its single stills gate is the look-lock). approve_brand is
+launcher-only after the last content gate.
 """
 
 from __future__ import annotations
@@ -40,15 +41,16 @@ from dify_launcher.storyboard_preview import (
     apply_storyboard_preview,
     is_storyboard_name,
     is_superseded_still,
+    still_basenames,
 )
 
 _ENGINE_ROOT = Path(__file__).resolve().parents[1]
 
-# ordered human-approval gates. Note: approve_stills + approve_motion_sample + approve_assets are
-# pauses of the SINGLE `assets` stage (stills cost gate, motion-sample cost gate, then full media)
-# — see _sync/_do_stills/_do_motion_sample. approve_motion_sample only occurs when the job option
-# motion_sample is on (default false; Dify/OpenWebUI may pass true to opt in).
-GATES = ["approve_script", "approve_scene_plan", "approve_stills",
+# ordered human-approval gates. Note: approve_hero_still + approve_stills + approve_motion_sample
+# + approve_assets are pauses of the SINGLE `assets` stage — see _sync/_do_hero_still/_do_stills.
+# approve_hero_still is ON by default (opt out with hero_still:false); approve_motion_sample only
+# when motion_sample is on (default false).
+GATES = ["approve_script", "approve_scene_plan", "approve_hero_still", "approve_stills",
          "approve_motion_sample", "approve_assets", "approve_final", "approve_brand"]
 # gates from the previous storyboard-stills flow — resuming one is refused with a migration note
 _LEGACY_GATES = {"approve_storyboard", "approve_clips"}
@@ -58,6 +60,28 @@ def _motion_sample_enabled(state: dict[str, Any]) -> bool:
     """Whether to insert the one-clip motion-sample cost gate (job option, default OFF)."""
     v = (state.get("options") or {}).get("motion_sample", False)
     return str(v).lower() not in ("false", "0", "no", "off", "")
+
+
+def _hero_still_enabled(state: dict[str, Any]) -> bool:
+    """Whether to insert the one-still look-lock gate (default ON; opt out with hero_still:false).
+
+    Never for panda-image — its single approve_stills gate is already the look-lock.
+    """
+    if _is_image(state):
+        return False
+    v = (state.get("options") or {}).get("hero_still", True)
+    return str(v).lower() not in ("false", "0", "no", "off", "")
+
+
+def _hero_scene_index(scene_plan: dict[str, Any]) -> int:
+    """Index of the look-lock still: hero_moment scene, else first scene."""
+    scenes = scene_plan.get("scenes") or []
+    if not scenes:
+        return 0
+    for i, sc in enumerate(scenes):
+        if sc.get("hero_moment"):
+            return i
+    return 0
 
 
 def _budget_cap(state: dict[str, Any]) -> Optional[int]:
@@ -374,20 +398,27 @@ def _apply_previews(job_id: str, arts: dict[str, Any],
 
     Dual-surfaces the text .md copies (script.md / scene_plan.md) and, at the stills
     gate, the storyboard composite — then picks ONE preview for the current gate:
-    script.md at approve_script, scene_plan.md at approve_scene_plan, the storyboard
-    at approve_stills, and nothing at any other gate. Inline JSON on artifacts.script /
-    artifacts.scene_plan is left untouched (a structured dict still wins over a stray .md).
+    script.md at approve_script, scene_plan.md at approve_scene_plan, the single hero
+    PNG at approve_hero_still, the storyboard at approve_stills, and nothing at any
+    other gate. Inline JSON on artifacts.script / artifacts.scene_plan is left untouched.
     """
     # Always write the .md copies (so downloads exist); no preview set here.
     _write_text_previews(job_id, arts, None)
     # Storyboard writes its files + preview only at approve_stills; drops preview otherwise.
     apply_storyboard_preview(job_id, arts,
                              "approve_stills" if gate == "approve_stills" else None)
-    # Text gates own the preview slot over the (now-cleared) storyboard default.
+    # Text gates / hero look-lock own the preview slot over the (now-cleared) storyboard default.
     if gate == "approve_script" and arts.get("script_md"):
         arts["preview"] = ["script.md"]
     elif gate == "approve_scene_plan" and arts.get("scene_plan_md"):
         arts["preview"] = ["scene_plan.md"]
+    elif gate == "approve_hero_still":
+        stills = still_basenames(arts)
+        if stills:
+            arts["stills"] = stills
+            arts["preview"] = [stills[0]]
+        else:
+            arts.pop("preview", None)
     elif gate != "approve_stills":
         arts.pop("preview", None)
     return arts
@@ -615,6 +646,7 @@ class MockRunner(Runner):
             regen = {
                 "approve_script": self._do_script,
                 "approve_scene_plan": self._do_scene_plan,
+                "approve_hero_still": self._do_hero_still,
                 "approve_stills": self._do_stills,
                 "approve_motion_sample": self._do_motion_sample,
                 "approve_assets": self._do_assets,
@@ -631,16 +663,20 @@ class MockRunner(Runner):
         if gate == "approve_script":
             return self._do_scene_plan(state, response)
         if gate == "approve_scene_plan":
-            return self._do_stills(state, response)      # assets phase 1: stills only
+            if _hero_still_enabled(state):
+                return self._do_hero_still(state, response)  # assets: one hero look-lock still
+            return self._do_stills(state, response)          # assets: full stills (hero_still off)
+        if gate == "approve_hero_still":
+            return self._do_stills(state, response)          # look locked → remaining storyboard stills
         if gate == "approve_stills":
             if _is_stills_terminal(state):
                 return self._finish_stills_job(state)   # terminal — no motion / clips / compose
-            # assets phase 2: one motion sample first (if enabled), else straight to full media
+            # assets phase: one motion sample first (if enabled), else straight to full media
             if _motion_sample_enabled(state):
                 return self._do_motion_sample(state, response)
             return self._do_assets(state, response)
         if gate == "approve_motion_sample":
-            return self._do_assets(state, response)       # assets phase 3: all clips + audio + manifest
+            return self._do_assets(state, response)       # assets phase: all clips + audio + manifest
         if gate == "approve_assets":
             return self._do_production(state, response)
         if gate == "approve_final":
@@ -703,6 +739,7 @@ class MockRunner(Runner):
                 "movement": "static",
                 "narrative_role": {"hook": "establish_context", "content": "deliver_payload",
                                    "cta": "call_to_action"}[role],
+                "hero_moment": (i == 1) if n > 1 else True,
                 "required_assets": [asset] if stills_only else [
                     asset,
                     {"type": "video", "description": f"Motion clip for scene {i+1}",
@@ -732,6 +769,60 @@ class MockRunner(Runner):
         )
         return state
 
+    # --- GATE 2.5: assets PHASE 0 — one HERO STILL (look lock before storyboard) --
+    def _do_hero_still(self, state: dict[str, Any], response: dict[str, Any]) -> dict[str, Any]:
+        """Generate ONE hero still from the approved scene plan — look-lock before the full
+        storyboard. Scene with hero_moment, else scene 1. Revise stays here (fresh|edit);
+        look_notes accumulate for the remaining-stills pass. On the box this checkpoint carries
+        partial_progress.phase='hero_still' so the launcher surfaces approve_hero_still."""
+        job_id = state["job_id"]
+        scene_plan = state.get("artifacts", {}).get("scene_plan") or {}
+        scenes = scene_plan.get("scenes") or []
+        n = max(len(scenes), 1)
+        hero_idx = _hero_scene_index(scene_plan)
+        hero_sid = scenes[hero_idx]["id"] if hero_idx < len(scenes) else f"scene-{hero_idx + 1}"
+
+        look_notes = list(state.get("look_notes") or [])
+        decision = (response or {}).get("decision", "approve")
+        note = (response or {}).get("answer") or ""
+        if decision == "revise" and note.strip():
+            look_notes.append(note.strip())
+
+        all_names = [f"still_{i:02d}.png" for i in range(n)]
+        existing = [_still_basename(x) for x in (state.get("artifacts", {}).get("stills") or [])
+                    if not is_superseded_still(x) and not is_storyboard_name(x)]
+        if existing:
+            all_names[hero_idx] = existing[0]
+
+        if decision == "revise" and existing:
+            if _stills_revise_mode(response) == "edit":
+                edited = self._edit_existing_stills(
+                    job_id, [all_names[hero_idx]], [0], note)
+                stills = [edited[0]]
+            else:
+                filled = self._placeholder_stills(
+                    job_id, n, state=state, indices=[hero_idx], existing=all_names)
+                stills = [filled[hero_idx]]
+        else:
+            filled = self._placeholder_stills(
+                job_id, n, state=state, indices=[hero_idx], existing=all_names)
+            stills = [filled[hero_idx]]
+
+        arts = {k: v for k, v in state.get("artifacts", {}).items()
+                if k not in ("clips", "asset_manifest")}
+        arts["stills"] = stills
+        arts["hero_scene_id"] = hero_sid
+        _apply_previews(job_id, arts, "approve_hero_still")
+        state["look_notes"] = look_notes
+        state.update(
+            stage="assets", status="awaiting_human", gate="approve_hero_still",
+            question="Approve this HERO still (look lock) — palette, character, lighting, "
+                     "wardrobe — or request a revision. Remaining storyboard stills are generated "
+                     "only after this look is locked.",
+            artifacts=arts,
+        )
+        return state
+
     # --- GATE 3: assets PHASE 1 — stills only (cheap, pre-video cost gate) --
     def _do_stills(self, state: dict[str, Any], response: dict[str, Any]) -> dict[str, Any]:
         """Generate STILLS ONLY from the approved scene plan — one per scene, NO video yet.
@@ -740,13 +831,17 @@ class MockRunner(Runner):
         mock makes placeholder stills. On the box this checkpoint carries
         partial_progress.phase='stills' so the launcher surfaces it as approve_stills.
 
+        When arriving from an approved hero look-lock, keep the hero PNG and generate only
+        the remaining scenes (mock: placeholders; real agent: look-reference i2i).
+
         Revise at this gate is dual-mode: `mode=fresh` regenerates placeholders; `mode=edit`
         draws the note onto copies of the existing PNGs (keeps size/colors). Honor `shots`."""
         job_id = state["job_id"]
         scene_plan = state.get("artifacts", {}).get("scene_plan") or {}
         scenes = scene_plan.get("scenes") or []
         n = len(scenes) or 3
-        existing = [_still_basename(x) for x in (state.get("artifacts", {}).get("stills") or [])]
+        existing = [_still_basename(x) for x in (state.get("artifacts", {}).get("stills") or [])
+                    if not is_superseded_still(x) and not is_storyboard_name(x)]
         decision = (response or {}).get("decision", "approve")
         if decision == "revise" and existing:
             indices = _revise_shot_indices(response, len(existing))
@@ -757,6 +852,14 @@ class MockRunner(Runner):
                 stills = self._placeholder_stills(
                     job_id, max(n, len(existing)), state=state,
                     indices=indices, existing=existing)
+        elif existing and len(existing) < n and decision != "revise":
+            # After hero look-lock approve: keep the hero PNG, fill remaining scenes.
+            hero_idx = _hero_scene_index(scene_plan)
+            all_names = [f"still_{i:02d}.png" for i in range(n)]
+            all_names[hero_idx] = existing[0]
+            indices = [i for i in range(n) if i != hero_idx]
+            stills = self._placeholder_stills(
+                job_id, n, state=state, indices=indices, existing=all_names)
         else:
             stills = self._placeholder_stills(job_id, n, state=state)
         # entering the stills phase drops any clips/manifest from a prior pass
@@ -990,8 +1093,9 @@ class MockRunner(Runner):
 # ---------------------------------------------------------------------------
 
 # OpenMontage stage  ->  launcher gate name (matches pipeline_defs/panda-video.yaml).
-# NOTE: the `assets` stage is deliberately absent here — it surfaces TWO gates chosen by the
-# checkpoint's partial_progress.phase: "stills" -> approve_stills (pre-video), else
+# NOTE: the `assets` stage is deliberately absent here — it surfaces multiple gates chosen by the
+# checkpoint's partial_progress.phase: "hero_still" -> approve_hero_still (look lock),
+# "stills" -> approve_stills (pre-video), "motion_sample" -> approve_motion_sample, else
 # approve_assets (full media). See _sync() and _gate_stage().
 _STAGE_GATE = {
     "script": "approve_script",
@@ -1086,9 +1190,22 @@ class ClaudeCodeRunner(Runner):
                     job_id, "assets_revise")
             return self._sync(state)
 
-        # Approving a within-assets phase (stills / motion sample) must NOT complete the assets
-        # stage — it only unlocks the next phase WITHIN the same stage. Continue the agent from the
-        # latest checkpoint so it does the next phase and stops again at the next assets sub-gate.
+        # Approving a within-assets phase (hero / stills / motion sample) must NOT complete the
+        # assets stage — it only unlocks the next phase WITHIN the same stage. Continue the agent
+        # from the latest checkpoint so it does the next phase and stops again at the next gate.
+        if gate == "approve_hero_still":
+            if decision != "approve":
+                self._run_agent(self._revise_prompt(
+                    job_id, "assets (HERO STILL phase — revise the one look-lock still and stop "
+                            "again at the hero_still gate; do NOT generate the remaining storyboard "
+                            "stills yet)",
+                    response or {}, state=state),
+                    job_id, "hero_still_revise")
+            else:
+                # look locked — generate remaining storyboard stills from the approved hero
+                self._run_agent(self._hero_approved_prompt(job_id, state), job_id, "stills")
+            return self._sync(state)
+
         if gate == "approve_stills":
             if decision != "approve":
                 self._run_agent(self._revise_prompt(
@@ -1223,12 +1340,19 @@ class ClaudeCodeRunner(Runner):
                          question=latest.get("error", "stage failed"), artifacts=arts)
         elif status == "awaiting_human":
             if stage == "assets":
-                # the assets stage pauses at: stills, one motion sample, a CONDITIONAL budget hold
-                # (only when a generation would exceed max_higgsfield_credits), then full media.
+                # assets pauses at: hero look-lock, stills, motion sample, CONDITIONAL budget hold,
+                # then full media.
                 phase = (latest.get("partial_progress") or {}).get("phase")
-                gate = {"stills": "approve_stills",
+                gate = {"hero_still": "approve_hero_still",
+                        "stills": "approve_stills",
                         "motion_sample": "approve_motion_sample",
                         "budget_hold": "budget_exceeded"}.get(phase, "approve_assets")
+                # Carry look-lock notes from the checkpoint into launcher state for the next leg.
+                pp = latest.get("partial_progress") or {}
+                if isinstance(pp.get("look_notes"), list):
+                    state["look_notes"] = list(pp["look_notes"])
+                if pp.get("hero_scene_id"):
+                    arts.setdefault("hero_scene_id", pp["hero_scene_id"])
             else:
                 gate = _STAGE_GATE.get(stage, f"approve_{stage}")
             _apply_previews(job_id, arts, gate)
@@ -1403,7 +1527,8 @@ class ClaudeCodeRunner(Runner):
 
     # -- approvals + prompts ------------------------------------------------
     def _gate_stage(self, gate: Optional[str]) -> Optional[str]:
-        if gate in ("approve_stills", "approve_motion_sample", "budget_exceeded", "approve_assets"):
+        if gate in ("approve_hero_still", "approve_stills", "approve_motion_sample",
+                    "budget_exceeded", "approve_assets"):
             return "assets"                 # all are pauses of the single assets stage
         if gate == "approve_brand":
             return "brand"
@@ -1437,6 +1562,8 @@ class ClaudeCodeRunner(Runner):
         runtime = str(options.get("render_runtime", "auto")).lower()  # auto|ffmpeg|remotion|hyperframes
         motion_sample = str(options.get("motion_sample", False)).lower() \
             not in ("false", "0", "no", "off", "")    # one-clip motion cost gate (default off)
+        hero_still = str(options.get("hero_still", True)).lower() \
+            not in ("false", "0", "no", "off", "")    # one-still look-lock (default on)
         cap = _budget_cap({"options": options})       # max_higgsfield_credits, or None (no cap)
 
         if cap is not None:
@@ -1499,7 +1626,7 @@ class ClaudeCodeRunner(Runner):
             "PIPELINE SHAPE: the `scene_plan` stage produces ONLY a structured TEXT plan — NO "
             "media, NO generation tools. The `assets` stage then runs in human-reviewed phases "
             "(cost gates):\n"
-            + self._assets_phases_text(motion_sample) +
+            + self._assets_phases_text(motion_sample, hero_still=hero_still) +
             "Finally compose the approved assets with the `panda_render` tool. Stop at the first gate."
         )
 
@@ -1508,6 +1635,8 @@ class ClaudeCodeRunner(Runner):
         ratio = _carousel_aspect(options)
         cap = _budget_cap({"options": options})
         auto_script = not _script_gate_enabled({"options": options})
+        hero_still = str(options.get("hero_still", True)).lower() \
+            not in ("false", "0", "no", "off", "")
         if cap is not None:
             budget_line = (
                 f"BUDGET — HARD CAP of {cap} Higgsfield credits. Before ANY Higgsfield still "
@@ -1525,6 +1654,27 @@ class ClaudeCodeRunner(Runner):
             if auto_script else
             "SCRIPT GATE — write script status='awaiting_human' and STOP. Do NOT self-approve."
         )
+        if hero_still:
+            assets_shape = (
+                "  - assets PHASE 1 (hero look-lock): generate ONLY ONE hero still (scene with "
+                "hero_moment, else slide 1) via Higgsfield generate_image. CHARACTER LOCK + "
+                "2D MEDIUM + STILLS 2-TAKE. Checkpoint status='awaiting_human' AND top-level "
+                "partial_progress={\"phase\":\"hero_still\",\"hero_scene_id\":\"…\","
+                "\"look_notes\":[]} and STOP. Do NOT generate other slides yet.\n"
+                "  - assets PHASE 2 (full stills): only after the hero look is approved, keep the "
+                "approved hero PNG, LOOK LOCK remaining slides (media_import hero as style "
+                "reference — do NOT copy composition; bake look_notes into prompts), write "
+                "asset_manifest with per-still credits and Element IDs, checkpoint "
+                "status='awaiting_human' AND partial_progress={\"phase\":\"stills\"} and STOP.\n"
+            )
+        else:
+            assets_shape = (
+                "  - assets: generate ONLY stills via Higgsfield generate_image at that aspect ratio "
+                "(max 2 paid calls per slide; take 2 = i2i). Bake primary-language copy into each "
+                "still. Write asset_manifest (images only) with per-still credits and Element IDs. "
+                "Checkpoint status='awaiting_human' AND "
+                "partial_progress={\"phase\":\"stills\"} and STOP.\n"
+            )
         return (
             f"Run the `panda-carousel` pipeline to produce a STILLS-ONLY social carousel "
             f"(NOT a video).\n"
@@ -1536,21 +1686,22 @@ class ClaudeCodeRunner(Runner):
             "mention maps to those IDs (phrase_aliases). ATTACH as MCP media — never UUID in "
             "prompt, never invent a new character. Look: styles/panda.yaml — default 2D flat. "
             "Max 2 paid generate_image per slide; take 2 = i2i of take 1; then STOP. See "
-            "skills/meta/higgsfield-mcp-bridge.md (CHARACTER LOCK, STILLS 2-TAKE, 2D MEDIUM).\n"
+            "skills/meta/higgsfield-mcp-bridge.md (CHARACTER LOCK, STILLS 2-TAKE, 2D MEDIUM, "
+            "LOOK LOCK).\n"
             f"{budget_line}\n{script_line}\n\n"
             "Follow AGENT_GUIDE.md, pipeline_defs/panda-carousel.yaml, and "
             "skills/pipelines/panda-carousel/*-director.md. Execute stages in order.\n"
             "PIPELINE SHAPE: idea (internal, no gate) → script (GATE 1) → scene_plan TEXT "
-            "(GATE 2) → assets STILLS ONLY (GATE 3) → DONE.\n"
+            "(GATE 2) → "
+            + ("assets HERO STILL look-lock then full STILLS (GATEs 2.5+3) → DONE.\n"
+               if hero_still else
+               "assets STILLS ONLY (GATE 3) → DONE.\n")
+            +
             "  - scene_plan: one scene per slide, bilingual captions.zh/en, required_assets are "
             "images only (exactly one image per slide). Set metadata.aspect_ratio to the job option "
             f"'{ratio}' (caller-set; default 4:5). Pass that same ratio to generate_image. "
-            "Name locked Element IDs; plan 2D flat.\n"
-            "  - assets: generate ONLY stills via Higgsfield generate_image at that aspect ratio "
-            "(max 2 paid calls per slide; take 2 = i2i). Bake primary-language copy into each "
-            "still. Write asset_manifest (images only) with per-still credits and Element IDs. "
-            "Checkpoint status='awaiting_human' AND "
-            "partial_progress={\"phase\":\"stills\"} and STOP.\n"
+            "Name locked Element IDs; plan 2D flat. Mark exactly one hero_moment when useful.\n"
+            + assets_shape +
             "Do NOT generate motion clips, TTS, music, edit_decisions, or a compose/render. "
             "Do NOT brand the stills (no wordmark overlay) — branding is a later POST /brand. "
             "Stop at the first human_approval gate."
@@ -1600,31 +1751,52 @@ class ClaudeCodeRunner(Runner):
             "Stop at the first human_approval gate."
         )
 
-    def _assets_phases_text(self, motion_sample: bool) -> str:
-        stills = (
-            "  PHASE 1 (stills): generate ONLY the stills — one per scene — via the Higgsfield "
-            "MCP bridge (skills/meta/higgsfield-mcp-bridge.md). CHARACTER LOCK: attach "
-            "customer/panda Element IDs as media (never invent, never UUID-in-prompt). "
-            "2D MEDIUM LOCK: styles/panda.yaml flat illustration. STILLS 2-TAKE HARD RULE: "
-            "max 2 paid generate_image per scene; take 2 = i2i of take 1; then write the assets "
-            "checkpoint with status='awaiting_human' AND partial_progress={\"phase\":\"stills\"} "
-            "and STOP. Do NOT generate any video yet.\n")
+    def _assets_phases_text(self, motion_sample: bool, *, hero_still: bool = True) -> str:
+        if hero_still:
+            hero = (
+                "  PHASE 1 (hero look-lock): generate ONLY ONE hero still — the scene with "
+                "hero_moment=true, else scene 1 — via the Higgsfield MCP bridge "
+                "(skills/meta/higgsfield-mcp-bridge.md). CHARACTER LOCK: attach customer/panda "
+                "Element IDs as media. 2D MEDIUM LOCK. STILLS 2-TAKE HARD RULE for that one "
+                "scene. Then write the assets checkpoint status='awaiting_human' AND top-level "
+                "partial_progress={\"phase\":\"hero_still\",\"hero_scene_id\":\"…\","
+                "\"look_notes\":[]} and STOP. Do NOT generate other stills or any video yet.\n"
+                "  PHASE 2 (stills): only after the hero look is approved, KEEP the approved hero "
+                "PNG. Generate remaining scene stills under LOOK LOCK: media_import the hero PNG "
+                "as a style/look reference (confirm media role with models_explore — do NOT use "
+                "it as a start-frame that copies composition). Match palette, character rendering, "
+                "lighting, medium, wardrobe; apply each scene's action/framing from scene_plan; "
+                "bake look_notes into every remaining prompt. Same 2-take cap per remaining scene. "
+                "Then write the assets checkpoint status='awaiting_human' AND "
+                "partial_progress={\"phase\":\"stills\"} and STOP. Do NOT generate any video yet.\n"
+            )
+            next_phase = 3
+        else:
+            hero = (
+                "  PHASE 1 (stills): generate ONLY the stills — one per scene — via the Higgsfield "
+                "MCP bridge (skills/meta/higgsfield-mcp-bridge.md). CHARACTER LOCK: attach "
+                "customer/panda Element IDs as media (never invent, never UUID-in-prompt). "
+                "2D MEDIUM LOCK: styles/panda.yaml flat illustration. STILLS 2-TAKE HARD RULE: "
+                "max 2 paid generate_image per scene; take 2 = i2i of take 1; then write the assets "
+                "checkpoint with status='awaiting_human' AND partial_progress={\"phase\":\"stills\"} "
+                "and STOP. Do NOT generate any video yet.\n")
+            next_phase = 2
         if motion_sample:
-            return stills + (
-                "  PHASE 2 (motion sample): only after the stills are approved, animate ONE "
-                "representative HERO still into a SINGLE sample clip (image_to_video) so the "
+            return hero + (
+                f"  PHASE {next_phase} (motion sample): only after the stills are approved, animate "
+                "ONE representative HERO still into a SINGLE sample clip (image_to_video) so the "
                 "motion/animation can be approved before the full batch. Hold the 2D still and "
                 "locked characters — do not invent a new person or make the clip 3D. Write the "
                 "assets checkpoint status='awaiting_human' AND partial_progress={\"phase\":"
                 "\"motion_sample\"} and STOP — no other clips, no audio yet.\n"
-                "  PHASE 3 (media): only after the motion sample is approved, animate the "
-                "REMAINING stills using the SAME motion approach (hold 2D + locked Elements) + "
+                f"  PHASE {next_phase + 1} (media): only after the motion sample is approved, animate "
+                "the REMAINING stills using the SAME motion approach (hold 2D + locked Elements) + "
                 "generate narration/music (ElevenLabs), record everything (incl. the sample) in "
                 "asset_manifest with per-asset Higgsfield credits, then write the assets "
                 "checkpoint status='awaiting_human' (no phase marker) and STOP.\n")
-        return stills + (
-            "  PHASE 2 (media): only after the stills are approved, animate the approved stills "
-            "into motion clips (image_to_video; hold 2D + locked Elements) + generate "
+        return hero + (
+            f"  PHASE {next_phase} (media): only after the stills are approved, animate the approved "
+            "stills into motion clips (image_to_video; hold 2D + locked Elements) + generate "
             "narration/music (ElevenLabs), record everything in asset_manifest, then write the "
             "assets checkpoint status='awaiting_human' (no 'stills' phase marker) and STOP.\n")
 
@@ -1641,6 +1813,31 @@ class ClaudeCodeRunner(Runner):
             f"Continue the `{p}` pipeline for project_id: {job_id}. Read the latest "
             "checkpoint, proceed from the next stage, and STOP at the next human_approval gate "
             f"(status='awaiting_human', end your turn). If the pipeline is complete, finish.{extra}"
+        )
+
+    def _hero_approved_prompt(self, job_id: str, state: Optional[dict[str, Any]] = None) -> str:
+        look_notes = list((state or {}).get("look_notes") or [])
+        # Prefer notes carried on the latest checkpoint partial_progress when state is stale.
+        notes_txt = ""
+        if look_notes:
+            notes_txt = " Accumulated look_notes from hero revises: " + json.dumps(look_notes) + "."
+        hero_sid = ((state or {}).get("artifacts") or {}).get("hero_scene_id") or ""
+        sid_txt = f" hero_scene_id={hero_sid}." if hero_sid else ""
+        return (
+            f"For project_id: {job_id}, the HERO STILL look-lock phase of the `assets` stage is "
+            "APPROVED. Do NOT mark the assets stage completed yet, and do NOT generate video. "
+            "KEEP the approved hero PNG on disk."
+            f"{sid_txt}{notes_txt} "
+            "Generate the REMAINING scene stills under LOOK LOCK "
+            "(skills/meta/higgsfield-mcp-bridge.md): media_import the hero PNG as a style/look "
+            "reference (confirm the live media role with models_explore — do NOT pass it as a "
+            "start-frame that copies composition onto every scene). Match palette, character "
+            "rendering, lighting, medium, and wardrobe from the hero; use each remaining scene's "
+            "action/framing from scene_plan; bake look_notes into every remaining prompt. Same "
+            "CHARACTER LOCK + 2D MEDIUM + STILLS 2-TAKE per remaining scene. Record all stills "
+            "(incl. the approved hero) in asset_manifest with credits. Then rewrite the assets "
+            "checkpoint with status='awaiting_human' AND top-level "
+            "partial_progress={\"phase\":\"stills\"} and STOP for full storyboard approval."
         )
 
     def _stills_approved_prompt(self, job_id: str,
@@ -1694,9 +1891,45 @@ class ClaudeCodeRunner(Runner):
         shots = response.get("shots") or []
         shot_txt = f" Regenerate only shots {shots}." if shots else ""
         extra = ""
-        is_stills = ((state or {}).get("gate") == "approve_stills"
-                     or "STILLS" in str(stage or "").upper())
-        if is_stills:
+        gate = (state or {}).get("gate")
+        is_hero = (gate == "approve_hero_still"
+                   or "HERO STILL" in str(stage or "").upper())
+        is_stills = (gate == "approve_stills"
+                     or ("STILLS" in str(stage or "").upper() and not is_hero))
+        if is_hero:
+            mode = _stills_revise_mode(response)
+            mode_label = "EDIT" if mode == "edit" else "FRESH"
+            paths = _still_abs_paths(
+                job_id, state, shots or [1], getattr(self, "_projects_dir", None))
+            path_txt = (f" Current hero still absolute path(s): {paths}." if paths else
+                        f" Current hero still lives under projects/{job_id}/assets/images/ "
+                        "and the launcher artifacts dir.")
+            look_notes = list((state or {}).get("look_notes") or [])
+            if note and note != "(no note)":
+                look_notes = look_notes + [note]
+            notes_txt = f" Append to look_notes (full list after this revise): {json.dumps(look_notes)}."
+            if mode == "edit":
+                extra = (
+                    f" MODE={mode_label}.{path_txt} EDIT the ONE hero look-lock still: load it "
+                    "from disk, media_import locally, generate_image with that media_id plus a "
+                    "preservation prompt (keep composition/character/layout; apply only the "
+                    "feedback). Keep Element IDs. Same aspect ratio."
+                    f"{notes_txt}"
+                )
+            else:
+                extra = (
+                    f" MODE={mode_label}.{path_txt} FRESH: generate_image the ONE hero still from "
+                    "text + panda/customer Element IDs only. Do NOT pass the old PNG."
+                    f"{notes_txt}"
+                )
+            extra += (
+                " Rewrite the assets checkpoint with status='awaiting_human' AND top-level "
+                "partial_progress={\"phase\":\"hero_still\",\"hero_scene_id\":"
+                "<same id>,\"look_notes\":<updated list>} (not nested under metadata) and STOP. "
+                "Do NOT generate remaining storyboard stills or video."
+            )
+            shot_txt = " Only the one hero still."
+        elif is_stills:
             mode = _stills_revise_mode(response)
             mode_label = "EDIT" if mode == "edit" else "FRESH"
             paths = _still_abs_paths(
@@ -1714,14 +1947,16 @@ class ClaudeCodeRunner(Runner):
                     "model's start/reference media role with models_explore, then generate_image "
                     "with that media_id plus a preservation prompt: keep composition, character, "
                     "layout, and typography; apply only the feedback. Keep Element IDs. Same "
-                    "aspect ratio. Replace only those files and their asset_manifest rows "
+                    "aspect ratio. Honor LOOK LOCK from the approved hero still when regenerating. "
+                    "Replace only those files and their asset_manifest rows "
                     "(new credits / job_id). Leave other slides untouched. If the image model "
                     "rejects a source still, surface a blocker — do NOT silently switch to FRESH."
                 )
             else:
                 extra = (
                     f" MODE={mode_label}.{path_txt} FRESH: generate_image from text + "
-                    "panda/customer Element IDs only. Do NOT pass the old PNG. Replace only "
+                    "panda/customer Element IDs only (still honor LOOK LOCK / look_notes from the "
+                    "approved hero). Do NOT pass the old PNG. Replace only "
                     "the flagged files and their asset_manifest rows. Leave other slides untouched."
                 )
             extra += (

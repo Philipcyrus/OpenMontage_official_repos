@@ -2,11 +2,12 @@ name: panda-carousel
 version: "1.0"
 description: >
   Panda Mobile stills-only carousel pipeline. Truncated sibling of panda-video:
-  idea → script (GATE 1) → scene_plan (GATE 2) → assets stills only (GATE 3) → done.
-  No motion_sample, clips, TTS, music, edit, or compose. The job reaches `done`
-  once stills are approved. Branding (UGC → BGC wordmark) is a separate on-demand
-  POST /jobs/{id}/brand pass after approval — never baked into generation.
-  Same styles/panda.yaml look and panda Element IDs as panda-video.
+  idea → script (GATE 1) → scene_plan (GATE 2) → assets hero look-lock then stills
+  (GATEs 2.5+3) → done. No motion_sample, clips, TTS, music, edit, or compose. The job
+  reaches `done` once stills are approved. Branding (UGC → BGC wordmark) is a separate
+  on-demand POST /jobs/{id}/brand pass after approval — never baked into generation.
+  Same styles/panda.yaml look and panda Element IDs as panda-video. Opt out of look-lock
+  with options.hero_still:false.
 category: hybrid
 stability: production
 default_checkpoint_policy: guided
@@ -83,10 +84,11 @@ stages:
       - Copy hierarchy (hook / content / CTA) is specified via narrative_role
       - Panda identity / Element ids / composition are specified as plan requirements
 
-  # ---- GATE 3 : STILLS ONLY — terminal. Approving this completes the job. ----
+  # ---- GATES 2.5 & 3 : STILLS with optional hero look-lock — terminal on approve_stills ----
+  # partial_progress.phase="hero_still" -> approve_hero_still (default ON; hero_still:false skips).
   # partial_progress.phase="stills" -> approve_stills. No motion_sample, no clips.
   # BUDGET hold (phase="budget_hold") still applies if a stills batch would exceed
-  # max_higgsfield_credits. On approval the launcher completes the assets stage
+  # max_higgsfield_credits. On approval of stills the launcher completes the assets stage
   # and the job is done (get_next_stage is None). Branding is POST /jobs/{id}/brand.
   - name: assets
     skill: pipelines/panda-carousel/asset-director
@@ -98,9 +100,10 @@ stages:
     tools_available:
       - image_selector           # stills per slide via the Higgsfield MCP bridge
     checkpoint_required: true
-    human_approval_default: true       # 🚦 GATE 3 (terminal)
+    human_approval_default: true       # 🚦 GATES 2.5 (hero) & 3 (stills, terminal)
     review_focus:
-      - One still per slide, on-brand (styles/panda.yaml) and character-consistent (panda Elements)
+      - "PHASE 1 (hero look-lock): one hero slide locks palette/character/lighting (default on; hero_still:false skips)"
+      - "PHASE 2 (stills): remaining slides under LOOK LOCK; on-brand and character-consistent"
       - "Social ratio matches options.aspect_ratio (default 4:5); slides that READ, not frames that move"
       - On-slide copy matches the scene_plan captions (primary language baked in)
       - Every required still exists on disk and is listed in asset_manifest (path + scene_id)

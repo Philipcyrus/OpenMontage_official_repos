@@ -30,7 +30,8 @@ from lib import checkpoint as cp
 run = R.ClaudeCodeRunner()
 
 # 1) gate <-> stage mapping ------------------------------------------------
-# both assets sub-gates reverse-map to the single `assets` stage
+# assets sub-gates reverse-map to the single `assets` stage
+assert run._gate_stage("approve_hero_still") == "assets"
 assert run._gate_stage("approve_stills") == "assets"
 assert run._gate_stage("approve_motion_sample") == "assets"
 assert run._gate_stage("budget_exceeded") == "assets"
@@ -39,6 +40,7 @@ assert run._gate_stage("approve_scene_plan") == "scene_plan"
 assert run._gate_stage("approve_script") == "script"
 assert run._gate_stage("approve_brand") == "brand"
 assert "approve_brand" in R.GATES
+assert "approve_hero_still" in R.GATES
 assert R._STAGE_GATE["compose"] == "approve_final"
 assert R._STAGE_GATE["scene_plan"] == "approve_scene_plan"
 assert "assets" not in R._STAGE_GATE          # assets is phase-resolved, not a 1:1 map entry
@@ -47,8 +49,16 @@ assert R._motion_sample_enabled({"options": {}}) is False
 assert R._motion_sample_enabled({"options": {"motion_sample": True}}) is True
 assert R._motion_sample_enabled({"options": {"motion_sample": "true"}}) is True
 assert R._motion_sample_enabled({"options": {"motion_sample": False}}) is False
+assert R._hero_still_enabled({}) is True
+assert R._hero_still_enabled({"options": {}}) is True
+assert R._hero_still_enabled({"options": {"hero_still": False}}) is False
+assert R._hero_still_enabled({"options": {"hero_still": "false"}}) is False
+assert R._hero_still_enabled({"pipeline": "panda-image"}) is False
+assert R._hero_scene_index({"scenes": [{"id": "a"}, {"id": "b", "hero_moment": True}]}) == 1
+assert R._hero_scene_index({"scenes": [{"id": "a"}, {"id": "b"}]}) == 0
 print("[ok] gate<->stage mapping")
 print("[ok] motion_sample default off; true opts in")
+print("[ok] hero_still default on; false opts out; panda-image never")
 
 # 1b) idea is INTERNAL — no human gate. The manifest is authoritative; the agent must never
 # surface an unexpected `approve_idea`. (Guards the reused-skill "Gate Reminder" conflict.)
@@ -259,6 +269,15 @@ def _fake_next(_pd, _jid, _pt=None):
 cp.get_latest_checkpoint = _fake_latest
 cp.get_next_stage = _fake_next
 
+# assets stage, HERO STILL phase (partial_progress.phase) -> approve_hero_still
+_fake_latest.cp = {"stage": "assets", "status": "awaiting_human", "artifacts": {},
+                   "partial_progress": {"phase": "hero_still", "hero_scene_id": "scene-2",
+                                        "look_notes": ["warmer light"]}}
+st = run._sync({"job_id": "jX"})
+assert st["status"] == "awaiting_human" and st["gate"] == "approve_hero_still"
+assert st.get("look_notes") == ["warmer light"]
+assert st["artifacts"].get("hero_scene_id") == "scene-2"
+
 # assets stage, STILLS phase (partial_progress.phase) -> approve_stills
 _fake_latest.cp = {"stage": "assets", "status": "awaiting_human", "artifacts": {},
                    "partial_progress": {"phase": "stills"}}
@@ -406,11 +425,19 @@ assert "089ddcec-c375-4299-8a65-6d8b757dd81a" in vid
 assert "4c01c8f9-6cfb-4d8c-9eb9-74cb61462103" in vid
 assert "STILLS 2-TAKE" in vid
 assert "2D flat" in vid or "2D MEDIUM" in vid
+assert "hero look-lock" in vid.lower() or "PHASE 1 (hero" in vid
 assert "PHASE 2 (motion sample)" not in vid, "default motion_sample=off must skip sample phase"
-assert "PHASE 2 (media)" in vid
+assert "PHASE 3 (media)" in vid, "with hero_still on, media is PHASE 3 when motion_sample off"
 vid_ms = run._start_prompt("jV", "a video", {"motion_sample": True}, "panda-video")
-assert "PHASE 2 (motion sample)" in vid_ms
-print("[ok] start prompts: carousel/image stills-only vs video")
+assert "PHASE 3 (motion sample)" in vid_ms
+assert "PHASE 4 (media)" in vid_ms
+vid_no_hero = run._start_prompt("jV", "a video", {"hero_still": False}, "panda-video")
+assert "PHASE 1 (stills)" in vid_no_hero
+assert "PHASE 2 (media)" in vid_no_hero
+assert "PHASE 1 (hero" not in vid_no_hero
+cv_hero = run._start_prompt("jC", "carousel", {}, "panda-carousel")
+assert "hero look-lock" in cv_hero.lower() or "PHASE 1 (hero" in cv_hero
+print("[ok] start prompts: carousel/image stills-only vs video (+ hero look-lock)")
 
 # 6b) VOICE LOCK — the narration counterpart of CHARACTER LOCK. Parity is three things: the
 # LITERAL id sits in the prompt (not an instruction to go look it up), it is present on the legs
@@ -502,5 +529,26 @@ p_other = run._revise_prompt("jS", "script", {"answer": "shorter"},
                              state={"gate": "approve_script"})
 assert "MODE=" not in p_other
 print("[ok] stills revise prompt: EDIT vs FRESH + still path")
+
+# 8b) hero still revise prompt stays on hero_still phase + look_notes
+JOBH = "job_revise_hero"
+p_hero = store.artifact_path(JOBH, "still_01.png")
+p_hero.parent.mkdir(parents=True, exist_ok=True)
+p_hero.write_bytes(b"\x89PNG\r\n")
+st_hero = {"job_id": JOBH, "gate": "approve_hero_still", "look_notes": ["warmer"],
+           "artifacts": {"stills": ["still_01.png"], "hero_scene_id": "scene-2"}}
+ph = run._revise_prompt(
+    JOBH, "assets (HERO STILL phase — revise the one look-lock still)",
+    {"decision": "revise", "mode": "edit", "answer": "brighter panda"},
+    state=st_hero)
+assert "MODE=EDIT" in ph
+assert "hero_still" in ph
+assert "look_notes" in ph
+assert "brighter panda" in ph
+assert "Do NOT generate remaining storyboard" in ph or "remaining storyboard" in ph
+ha = run._hero_approved_prompt(JOBH, st_hero)
+assert "LOOK LOCK" in ha and "hero_still" not in ha.split("APPROVED")[0]  # phase done
+assert "partial_progress={\"phase\":\"stills\"}" in ha or 'phase\":\"stills\"' in ha
+print("[ok] hero still revise + approved prompts")
 
 print("\n[PASS] ClaudeCodeRunner adapter: mapping, mirroring, sync, approval, migration")
