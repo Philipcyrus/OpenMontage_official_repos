@@ -15,6 +15,7 @@ Dify ──HTTP──▶ Dify Launcher ──▶ runner ──▶ agent/pipeline
 | Method | Path | Purpose |
 |---|---|---|
 | GET  | `/health` | liveness + which runner is active |
+| GET  | `/health/canary` | last result of the daily Claude/Higgsfield cron canary (`deploy/panda_healthcheck.py`); read-only, never re-runs a check |
 | POST | `/jobs` | start a run from `{brief, pipeline?, profile?, options?}` → first gate |
 | GET  | `/jobs/{id}` | current `{status, stage, gate, question, artifacts}` |
 | POST | `/jobs/{id}/respond` | `{decision: approve\|revise\|skip, answer?, stills?}` → resume to next gate (`skip` only at `approve_brand`) |

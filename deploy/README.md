@@ -130,21 +130,47 @@ chmod 600 ~/.config/panda-healthcheck.env
 /usr/bin/python3 deploy/panda_healthcheck.py --no-alert
 ```
 
-Install the cron entry with `crontab -e` **without `sudo`**. This example runs daily at 06:00 UTC,
-prevents overlapping checks, and keeps a local audit log. The same entry is available as
+Install the cron entry with `crontab -e` **without `sudo`**. This example runs daily at **07:00
+Pacific**, prevents overlapping checks, and keeps a local audit log. The same entry is available as
 `deploy/panda-healthcheck.cron.example`:
 
 ```cron
 SHELL=/bin/bash
 HOME=/home/ec2-user
 PATH=/home/ec2-user/.nvm/versions/node/v22.23.2/bin:/home/ec2-user/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+CRON_TZ=America/Los_Angeles
 
-0 6 * * * /usr/bin/flock -n /tmp/panda-healthcheck.lock /usr/bin/python3 /home/ec2-user/OpenMontage-Repos/OpenMontage_official_repos/deploy/panda_healthcheck.py >> /home/ec2-user/panda-healthcheck.log 2>&1
+0 7 * * * /usr/bin/flock -n /tmp/panda-healthcheck.lock /usr/bin/python3 /home/ec2-user/OpenMontage-Repos/OpenMontage_official_repos/deploy/panda_healthcheck.py >> /home/ec2-user/panda-healthcheck.log 2>&1
 ```
 
-Cron uses the server's UTC timezone unless `CRON_TZ` is supported and set. The script alerts on the
-first failure, reminds after `PANDA_HEALTH_REMINDER_HOURS`, and sends one recovery notification. A
-healthy daily run is logged but not alerted unless `PANDA_HEALTH_NOTIFY_SUCCESS=true`.
+`CRON_TZ` is what keeps 07:00 at 07:00 across daylight saving; the box's own clock is UTC, so
+without it the entry drifts an hour twice a year. cronie (Amazon Linux) supports it — verify with
+`crontab -l` and one dated line in the log after the first run.
+
+The script alerts on the first failure, reminds after `PANDA_HEALTH_REMINDER_HOURS`, and sends one
+recovery notification. A healthy daily run is logged but not alerted unless
+`PANDA_HEALTH_NOTIFY_SUCCESS=true`.
+
+### Reporting the result into Dify
+
+Every run writes its full verdict to `PANDA_HEALTH_STATE_FILE`, and the launcher serves that file
+at **`GET /health/canary`** (contract in
+[`dify_launcher/DIFY_INTEGRATION.md`](../dify_launcher/DIFY_INTEGRATION.md)). Dify polls that
+endpoint on its own schedule — a few minutes after the cron run, e.g. 07:05 Pacific — and renders
+the morning report. Nothing on this box calls out to Dify, so no Dify credentials live here.
+
+The endpoint is read-only: it serves what cron already wrote and never re-runs a check, so Dify's
+poll returns immediately instead of blocking on a live agent turn.
+
+**Branch the Dify report on `status`, never on `healthy`.** A response can be
+`{"healthy": true, "stale": true}` — that is *yesterday's* verdict plus the news that the checker
+has stopped running. `status` folds that in: `ok` only when the result is both passing and fresh,
+otherwise `failed`, `stale` (older than `PANDA_HEALTH_MAX_AGE_S`, default 26h), or `never_run`.
+Without the staleness gate, a dead cron job reads as a green morning forever.
+
+The launcher reads `PANDA_HEALTH_STATE_FILE` from its own environment, so if you move the state
+file, set that variable in **both** `~/.config/panda-healthcheck.env` and the launcher's `.env`,
+then restart the launcher.
 
 Failure codes distinguish Claude logout/OAuth expiry, Claude overload/rate limit/timeout,
 Higgsfield discovery/auth/provider failure, low credits, and launcher failure. Reauthenticate

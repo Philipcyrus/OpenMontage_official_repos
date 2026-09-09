@@ -608,6 +608,7 @@ def run(config: Config, *, no_alert: bool = False) -> int:
         first_failed_at = now.isoformat()
     if healthy:
         first_failed_at = None
+    detail = [asdict(result) for result in results]
     state = {
         "healthy": healthy,
         "checked_at": now.isoformat(),
@@ -616,6 +617,9 @@ def run(config: Config, *, no_alert: bool = False) -> int:
             now.isoformat() if alert_deliveries else previous.get("last_alerted_at")
         ),
         "codes": [result.code for result in results],
+        # Served verbatim by the launcher's GET /health/canary so Dify can render the
+        # full morning report without re-running any check.
+        "results": detail,
     }
     write_state(config.state_file, state)
 
@@ -624,7 +628,7 @@ def run(config: Config, *, no_alert: bool = False) -> int:
         "checked_at": now.isoformat(),
         "notification": None if no_alert else kind,
         "alert_deliveries": alert_deliveries,
-        "results": [asdict(result) for result in results],
+        "results": detail,
         "alert_errors": alert_errors,
     }
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True))

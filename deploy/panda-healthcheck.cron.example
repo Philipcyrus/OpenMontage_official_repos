@@ -2,5 +2,11 @@ SHELL=/bin/bash
 HOME=/home/ec2-user
 PATH=/home/ec2-user/.nvm/versions/node/v22.23.2/bin:/home/ec2-user/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
 
-# Daily at 06:00 server time (currently UTC). Install in ec2-user's crontab, not root's.
-0 6 * * * /usr/bin/flock -n /tmp/panda-healthcheck.lock /usr/bin/python3 /home/ec2-user/OpenMontage-Repos/OpenMontage_official_repos/deploy/panda_healthcheck.py >> /home/ec2-user/panda-healthcheck.log 2>&1
+# CRON_TZ pins the schedule to Pacific so 07:00 stays 07:00 across daylight saving.
+# Without it the entry runs on the box's UTC clock and drifts an hour twice a year.
+# (cronie, on Amazon Linux, supports CRON_TZ. If yours does not, use `0 15 * * *` for PST
+# and accept the one-hour shift during PDT.)
+CRON_TZ=America/Los_Angeles
+
+# Daily at 07:00 Pacific. Install in ec2-user's crontab, not root's.
+0 7 * * * /usr/bin/flock -n /tmp/panda-healthcheck.lock /usr/bin/python3 /home/ec2-user/OpenMontage-Repos/OpenMontage_official_repos/deploy/panda_healthcheck.py >> /home/ec2-user/panda-healthcheck.log 2>&1

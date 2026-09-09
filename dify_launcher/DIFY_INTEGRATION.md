@@ -44,6 +44,56 @@ Liveness + mode.
 ```
 `runner:"claude"` = real AI. `runner:"mock"` = placeholder mode (no AI, for wiring tests). `async:true` = poll model (see §4). `montage_door:true` = the direct render door (§15) is mounted.
 
+### `GET /health/canary`
+Result of the **daily 07:00 Pacific health canary** (`deploy/panda_healthcheck.py`, installed on
+the box via cron). It proves the production path still works *before* a brief needs it: the
+launcher is up, `claude` is still authenticated, and a real Higgsfield `balance` MCP call
+succeeds. Poll it once each morning and render the report.
+
+This endpoint is **read-only** — it serves what cron already wrote and never re-runs a check, so
+it returns immediately instead of blocking on a live agent turn.
+
+```json
+{
+  "status": "ok",
+  "healthy": true,
+  "checked_at": "2026-09-10T14:00:11.482913+00:00",
+  "age_seconds": 313,
+  "stale": false,
+  "first_failed_at": null,
+  "codes": ["LAUNCHER_OK", "CLAUDE_AUTH_PRESENT", "HIGGSFIELD_OK"],
+  "results": [
+    {"component": "launcher", "ok": true, "code": "LAUNCHER_OK", "detail": "launcher /health returned ok",
+     "severity": "info", "metadata": {"runner": "claude", "async": true, "montage_door": true}},
+    {"component": "claude_auth", "ok": true, "code": "CLAUDE_AUTH_PRESENT", "detail": "authenticated via claude.ai",
+     "severity": "info", "metadata": {"auth_method": "claude.ai", "subscription_type": "max"}},
+    {"component": "higgsfield_mcp", "ok": true, "code": "HIGGSFIELD_OK", "detail": "real Higgsfield balance tool call succeeded",
+     "severity": "info", "metadata": {"credits": 5648, "attempts": 1}}
+  ]
+}
+```
+
+**`status` is the field to branch on** — four values, and only one of them is good:
+
+| `status` | Meaning | What to show |
+|---|---|---|
+| `ok` | fresh run, everything passed | green report; `results[].metadata.credits` is the live Higgsfield balance |
+| `failed` | fresh run, something is broken | red report; render `results[]` — each failing entry carries a `code` and a human `detail` |
+| `stale` | the stored result is older than 26h | **treat as broken.** Cron stopped running, so nothing is being checked |
+| `never_run` | no result file on the box | the canary was never installed, or its state file moved |
+
+> **Do not branch on `healthy` alone.** A `stale` response can carry `"healthy": true` — that is
+> yesterday's verdict, not today's. `healthy:true` + `stale:true` means *"the last check passed,
+> and then the checker died."* Branching on `healthy` would report a green morning indefinitely
+> after the box stopped checking anything. Always gate on `status == "ok"`.
+
+Failure `code`s are specific so the report can say what to actually do: `CLAUDE_LOGGED_OUT` /
+`CLAUDE_OAUTH_EXPIRED` (run `claude auth login` on the box), `HIGGSFIELD_AUTH_FAILED` /
+`HIGGSFIELD_NOT_DISCOVERED` (reconnect the Higgsfield connector in Claude.ai settings),
+`HIGGSFIELD_LOW_CREDITS` (top up), `LAUNCHER_DOWN` / `LAUNCHER_UNHEALTHY` (check the uvicorn
+process), and `CLAUDE_OVERLOADED` / `CLAUDE_RATE_LIMITED` / `CLAUDE_TIMEOUT` (usually a temporary
+provider incident — worth re-checking before acting).
+
 ### `POST /jobs` — start a job
 Body:
 ```json
