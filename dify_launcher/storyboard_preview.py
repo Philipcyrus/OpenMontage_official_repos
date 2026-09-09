@@ -69,6 +69,69 @@ def still_basenames(arts: dict[str, Any]) -> list[str]:
     return out
 
 
+def _scene_still_map(arts: dict[str, Any]) -> dict[str, str]:
+    """scene_id -> still basename from asset_manifest (preferred) when present."""
+    manif = arts.get("asset_manifest") if isinstance(arts.get("asset_manifest"), dict) else {}
+    out: dict[str, str] = {}
+    for a in manif.get("assets") or []:
+        if not isinstance(a, dict) or a.get("type") not in (None, "image"):
+            continue
+        sid = str(a.get("scene_id") or "").strip()
+        path = a.get("path") or a.get("file") or ""
+        name = Path(str(path)).name
+        if sid and name and not is_storyboard_name(name) and not is_superseded_still(path):
+            out.setdefault(sid, name)
+    return out
+
+
+def _still_matches_scene(name: str, sid: str, index: int) -> bool:
+    """Filename heuristics when manifest has no scene_id (hero_scene-3, still_scene-1, sc1_still)."""
+    n = name.lower()
+    sid_l = str(sid or "").lower()
+    if sid_l and sid_l in n.replace("_", "-"):
+        return True
+    m = re.search(r"(\d+)\s*$", str(sid or ""))
+    if not m:
+        return False
+    num = int(m.group(1))
+    patterns = (
+        f"scene-{num}", f"scene_{num}", f"sc{num}_", f"sc{num}.", f"_sc{num}",
+        f"still_{num:02d}", f"still-{num:02d}", f"_{num:02d}.",
+    )
+    return any(p in n for p in patterns)
+
+
+def ordered_still_basenames(arts: dict[str, Any]) -> list[str]:
+    """Scene-plan order (not alphabetical disk order). Critical when hero is scene-N.
+
+    Disk scan often yields hero_scene-3.png before still_scene-1.png; zipping that list
+    to scenes[i] mis-assigns cards and breaks the storyboard after the hero look-lock.
+    """
+    raw = still_basenames(arts)
+    plan = arts.get("scene_plan") if isinstance(arts.get("scene_plan"), dict) else {}
+    scenes = [s for s in (plan.get("scenes") or []) if isinstance(s, dict)]
+    if not scenes:
+        return raw
+    by_scene = _scene_still_map(arts)
+    used: set[str] = set()
+    ordered: list[str] = []
+    for i, sc in enumerate(scenes):
+        sid = str(sc.get("id") or f"scene-{i + 1}")
+        pick = by_scene.get(sid)
+        if pick and pick in raw and pick not in used:
+            ordered.append(pick)
+            used.add(pick)
+            continue
+        match = next((n for n in raw if n not in used and _still_matches_scene(n, sid, i)), None)
+        if match:
+            ordered.append(match)
+            used.add(match)
+    for n in raw:
+        if n not in used:
+            ordered.append(n)
+    return ordered
+
+
 def _scene_label(sid: str, index: int) -> str:
     m = re.search(r"(\d+)\s*$", str(sid or ""))
     if m:
@@ -77,16 +140,29 @@ def _scene_label(sid: str, index: int) -> str:
 
 
 def cards_from_arts(arts: dict[str, Any]) -> list[dict[str, Any]]:
-    """Zip stills[i] with scene_plan.scenes[i] (stills gate often has no asset_manifest)."""
-    stills = still_basenames(arts)
+    """One card per scene_plan.scenes[i], still matched by scene_id / filename (not list index)."""
+    stills = ordered_still_basenames(arts)
     plan = arts.get("scene_plan") if isinstance(arts.get("scene_plan"), dict) else {}
     scenes = list(plan.get("scenes") or []) if isinstance(plan, dict) else []
+    by_scene = _scene_still_map(arts)
     n = len(scenes) if scenes else len(stills)
     cards: list[dict[str, Any]] = []
+    used: set[str] = set()
     for i in range(n):
         sc = scenes[i] if i < len(scenes) and isinstance(scenes[i], dict) else {}
-        still = stills[i] if i < len(stills) else None
         sid = str(sc.get("id") or f"scene-{i + 1}")
+        still = by_scene.get(sid)
+        if still and still in stills and still not in used:
+            used.add(still)
+        else:
+            still = next((n for n in stills if n not in used and _still_matches_scene(n, sid, i)), None)
+            if still:
+                used.add(still)
+            elif i < len(stills) and stills[i] not in used:
+                still = stills[i]
+                used.add(still)
+            else:
+                still = None
         start, end = sc.get("start_seconds"), sc.get("end_seconds")
         dur = None
         if start is not None and end is not None:
@@ -360,9 +436,10 @@ body {{ margin:0; background:var(--bg); color:var(--text);
 def apply_storyboard_preview(job_id: str, arts: dict[str, Any],
                              gate: Optional[str] = None) -> dict[str, Any]:
     """At approve_stills, write the composite and set preview. Other gates drop preview."""
-    stills = still_basenames(arts)
+    stills = ordered_still_basenames(arts)
     if gate == "approve_stills" and stills:
         store.ensure_job(job_id)
+        arts["stills"] = stills  # scene order before card zip / Dify stills list
         cards = cards_from_arts(arts)
         write_storyboard_html(job_id, cards)
         write_storyboard_png(job_id, cards)

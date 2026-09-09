@@ -41,6 +41,7 @@ from dify_launcher.storyboard_preview import (
     apply_storyboard_preview,
     is_storyboard_name,
     is_superseded_still,
+    ordered_still_basenames,
     still_basenames,
 )
 
@@ -82,6 +83,58 @@ def _hero_scene_index(scene_plan: dict[str, Any]) -> int:
         if sc.get("hero_moment"):
             return i
     return 0
+
+
+def _assets_phase_from_checkpoint(latest: dict[str, Any],
+                                  arts: Optional[dict[str, Any]] = None) -> tuple[Optional[str], dict[str, Any]]:
+    """Resolve assets pause phase from top-level partial_progress, with nested fallbacks.
+
+    Agents sometimes put stage_phase under asset_manifest.metadata instead of top-level
+    partial_progress (seen on job_1e6cfce0a44a) — without this fallback the launcher maps
+    to approve_assets / completes assets and never builds storyboard.png.
+    """
+    pp = latest.get("partial_progress") if isinstance(latest.get("partial_progress"), dict) else {}
+    phase = pp.get("phase")
+    if phase:
+        return str(phase), dict(pp)
+    blob = arts if isinstance(arts, dict) else {}
+    if not blob:
+        blob = latest.get("artifacts") if isinstance(latest.get("artifacts"), dict) else {}
+    manif = blob.get("asset_manifest") if isinstance(blob.get("asset_manifest"), dict) else {}
+    if not manif:
+        raw = blob.get("_checkpoint_artifacts")
+        if isinstance(raw, dict) and isinstance(raw.get("asset_manifest"), dict):
+            manif = raw["asset_manifest"]
+    meta = manif.get("metadata") if isinstance(manif.get("metadata"), dict) else {}
+    nested = meta.get("stage_phase") or meta.get("phase")
+    if not nested:
+        return None, dict(pp)
+    merged = dict(pp)
+    merged["phase"] = nested
+    if meta.get("hero_scene_id") and "hero_scene_id" not in merged:
+        merged["hero_scene_id"] = meta["hero_scene_id"]
+    if isinstance(meta.get("look_notes"), list) and "look_notes" not in merged:
+        merged["look_notes"] = list(meta["look_notes"])
+    return str(nested), merged
+
+
+def _stills_only_media(arts: dict[str, Any]) -> bool:
+    """True when we have storyboard stills but no clips/final yet (pre-video cost gate)."""
+    return bool(arts.get("stills")) and not arts.get("clips") and not arts.get("final")
+
+
+def _resolve_assets_gate(phase: Optional[str], arts: dict[str, Any]) -> str:
+    """Map assets phase (+ stills-only inference) to a launcher gate."""
+    known = {"hero_still": "approve_hero_still",
+             "stills": "approve_stills",
+             "motion_sample": "approve_motion_sample",
+             "budget_hold": "budget_exceeded"}
+    if phase in known:
+        return known[phase]
+    # No / unknown phase: stills on disk and no video yet → storyboard gate, not full media.
+    if _stills_only_media(arts):
+        return "approve_stills"
+    return "approve_assets"
 
 
 def _budget_cap(state: dict[str, Any]) -> Optional[int]:
@@ -1341,14 +1394,10 @@ class ClaudeCodeRunner(Runner):
         elif status == "awaiting_human":
             if stage == "assets":
                 # assets pauses at: hero look-lock, stills, motion sample, CONDITIONAL budget hold,
-                # then full media.
-                phase = (latest.get("partial_progress") or {}).get("phase")
-                gate = {"hero_still": "approve_hero_still",
-                        "stills": "approve_stills",
-                        "motion_sample": "approve_motion_sample",
-                        "budget_hold": "budget_exceeded"}.get(phase, "approve_assets")
-                # Carry look-lock notes from the checkpoint into launcher state for the next leg.
-                pp = latest.get("partial_progress") or {}
+                # then full media. Phase may be top-level partial_progress OR nested under
+                # asset_manifest.metadata.stage_phase (agent mistake — recover).
+                phase, pp = _assets_phase_from_checkpoint(latest, arts)
+                gate = _resolve_assets_gate(phase, arts)
                 if isinstance(pp.get("look_notes"), list):
                     state["look_notes"] = list(pp["look_notes"])
                 if pp.get("hero_scene_id"):
@@ -1359,6 +1408,24 @@ class ClaudeCodeRunner(Runner):
             state.update(status="awaiting_human", stage=stage, gate=gate,
                          question=f"Approve {stage}, or request a revision.", artifacts=arts)
         else:  # completed
+            # Recover skipped stills/storyboard gate: agent generated remaining stills after
+            # hero look-lock then marked assets completed (or nested phase only in metadata)
+            # without awaiting_human phase=stills — never wrote storyboard.png (job_1e6cfce0a44a).
+            if (stage == "assets" and not _is_stills_terminal(state)
+                    and _stills_only_media(arts)):
+                phase, pp = _assets_phase_from_checkpoint(latest, arts)
+                if phase == "hero_still":
+                    gate = "approve_hero_still"
+                else:
+                    gate = "approve_stills"
+                if isinstance(pp.get("look_notes"), list):
+                    state["look_notes"] = list(pp["look_notes"])
+                if pp.get("hero_scene_id"):
+                    arts.setdefault("hero_scene_id", pp["hero_scene_id"])
+                _apply_previews(job_id, arts, gate)
+                state.update(status="awaiting_human", stage="assets", gate=gate,
+                             question=f"Approve assets, or request a revision.", artifacts=arts)
+                return state
             nxt = cp.get_next_stage(self._projects_dir, job_id, _pipeline_of(state))
             _apply_previews(job_id, arts, None)
             if nxt is None:
@@ -1493,7 +1560,10 @@ class ClaudeCodeRunner(Runner):
                 if n:
                     out["script"] = n
         if stills:
-            out["stills"] = stills
+            # Re-order by scene_plan / asset_manifest so hero_scene-N is not first alphabetically
+            # (breaks storyboard zip after look-lock when hero is not scene-1).
+            tmp = {**out, "stills": stills}
+            out["stills"] = ordered_still_basenames(tmp) or stills
         if clips:
             out["clips"] = clips
         if final:
@@ -1837,7 +1907,8 @@ class ClaudeCodeRunner(Runner):
             "CHARACTER LOCK + 2D MEDIUM + STILLS 2-TAKE per remaining scene. Record all stills "
             "(incl. the approved hero) in asset_manifest with credits. Then rewrite the assets "
             "checkpoint with status='awaiting_human' AND top-level "
-            "partial_progress={\"phase\":\"stills\"} and STOP for full storyboard approval."
+            "partial_progress={\"phase\":\"stills\"} (NOT nested under asset_manifest.metadata) "
+            "and STOP for full storyboard approval. Do NOT mark assets completed yet."
         )
 
     def _stills_approved_prompt(self, job_id: str,

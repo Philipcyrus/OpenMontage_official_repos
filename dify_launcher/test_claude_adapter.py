@@ -190,7 +190,8 @@ assert arts_r.get("stills") == ["sc-01.png", "sc-02.png"], arts_r.get("stills")
 print("[ok] rejected takes stay out of artifacts.stills")
 
 # 2f) storyboard builder drops rejected takes; two scenes zip to two live cards
-from dify_launcher.storyboard_preview import cards_from_arts, is_superseded_still, still_basenames
+from dify_launcher.storyboard_preview import (
+    cards_from_arts, is_superseded_still, ordered_still_basenames, still_basenames)
 arts_sb = {
     "stills": [
         "rejected_sc1_take1.png",
@@ -213,6 +214,29 @@ assert cards[1]["still"] == "still_sc2.png" and cards[1]["label"] == "SC 02"
 assert is_superseded_still("rejected_sc1_take1.png")
 assert is_superseded_still("assets/images/superseded-stills/rejected_sc2_take1.png")
 print("[ok] storyboard drops rejected takes; two scenes zip to two cards")
+
+# 2g) hero still named alphabetically-first must still map to its scene, not scene-1
+arts_hero_order = {
+    "stills": ["hero_scene-3.png", "still_scene-1.png", "still_scene-2.png"],
+    "scene_plan": {"version": "1.0", "scenes": [
+        {"id": "scene-1", "description": "A"},
+        {"id": "scene-2", "description": "B"},
+        {"id": "scene-3", "description": "C", "hero_moment": True},
+    ]},
+    "asset_manifest": {"version": "1.0", "assets": [
+        {"type": "image", "path": "assets/images/hero_scene-3.png", "scene_id": "scene-3"},
+        {"type": "image", "path": "assets/images/still_scene-1.png", "scene_id": "scene-1"},
+        {"type": "image", "path": "assets/images/still_scene-2.png", "scene_id": "scene-2"},
+    ]},
+}
+assert ordered_still_basenames(arts_hero_order) == [
+    "still_scene-1.png", "still_scene-2.png", "hero_scene-3.png"
+], ordered_still_basenames(arts_hero_order)
+hc = cards_from_arts(arts_hero_order)
+assert [c["still"] for c in hc] == [
+    "still_scene-1.png", "still_scene-2.png", "hero_scene-3.png"
+], [c["still"] for c in hc]
+print("[ok] storyboard orders stills by scene_id (hero not forced first)")
 
 # 2h) long scene-plan framing essays must not become unwrapped shot chips
 essay = "Vertical 9:16. Percentages below are of the FINAL 1080x1920 master frame. " * 8
@@ -300,6 +324,58 @@ assert st["status"] == "awaiting_human" and st["gate"] == "budget_exceeded"
 _fake_latest.cp = {"stage": "assets", "status": "awaiting_human", "artifacts": {}}
 st = run._sync({"job_id": "jX"})
 assert st["status"] == "awaiting_human" and st["gate"] == "approve_assets"
+
+# nested stage_phase in asset_manifest.metadata (agent mistake) -> stills gate + storyboard
+JOBNEST = "job_nested_phase_stills"
+pnest = run._projects_dir / JOBNEST
+(pnest / "assets" / "images").mkdir(parents=True, exist_ok=True)
+from PIL import Image as _Image
+for name in ("hero_scene-3.png", "still_scene-1.png", "still_scene-2.png"):
+    _Image.new("RGB", (64, 112), (40, 40, 40)).save(pnest / "assets" / "images" / name)
+_fake_latest.cp = {
+    "stage": "assets", "status": "awaiting_human",
+    "artifacts": {
+        "scene_plan": {"version": "1.0", "scenes": [
+            {"id": "scene-1", "description": "A", "start_seconds": 0, "end_seconds": 4},
+            {"id": "scene-2", "description": "B", "start_seconds": 4, "end_seconds": 8},
+            {"id": "scene-3", "description": "C", "hero_moment": True,
+             "start_seconds": 8, "end_seconds": 12},
+        ]},
+        "asset_manifest": {
+            "version": "1.0",
+            "assets": [
+                {"id": "h", "type": "image", "path": "assets/images/hero_scene-3.png",
+                 "scene_id": "scene-3"},
+                {"id": "s1", "type": "image", "path": "assets/images/still_scene-1.png",
+                 "scene_id": "scene-1"},
+                {"id": "s2", "type": "image", "path": "assets/images/still_scene-2.png",
+                 "scene_id": "scene-2"},
+            ],
+            "metadata": {"stage_phase": "stills", "hero_scene_id": "scene-3"},
+        },
+    },
+}
+st = run._sync({"job_id": JOBNEST, "pipeline": "panda-video"})
+assert st["gate"] == "approve_stills", st.get("gate")
+assert st["artifacts"].get("preview") == ["storyboard.png"], st["artifacts"].get("preview")
+assert store.artifact_path(JOBNEST, "storyboard.png").is_file()
+assert st["artifacts"].get("stills") == [
+    "still_scene-1.png", "still_scene-2.png", "hero_scene-3.png"
+], st["artifacts"].get("stills")
+assert st["artifacts"].get("hero_scene_id") == "scene-3"
+
+# completed assets with stills only (skipped stills gate) -> reopen approve_stills
+_fake_latest.cp = {**_fake_latest.cp, "status": "completed", "partial_progress": None}
+# drop partial_progress key entirely
+_fake_latest.cp = {
+    "stage": "assets", "status": "completed",
+    "artifacts": _fake_latest.cp["artifacts"],
+}
+_fake_next.val = "edit"
+st = run._sync({"job_id": JOBNEST, "pipeline": "panda-video"})
+assert st["status"] == "awaiting_human" and st["gate"] == "approve_stills", st
+assert st["artifacts"].get("preview") == ["storyboard.png"]
+print("[ok] nested stage_phase + skipped-stills recovery → approve_stills + storyboard")
 
 _fake_latest.cp = {"stage": "scene_plan", "status": "awaiting_human", "artifacts": {}}
 st = run._sync({"job_id": "jX"})

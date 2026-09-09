@@ -76,8 +76,10 @@ After the hero is approved (or immediately when `hero_still` is off):
 - Per remaining scene: same CHARACTER LOCK + 2D MEDIUM + STILLS 2-TAKE.
 
 **Generate NO video and NO audio yet.** Then write the assets checkpoint with
-`status='awaiting_human'` **and `partial_progress={"phase": "stills"}`** and STOP.
+`status='awaiting_human'` **and top-level `partial_progress={"phase": "stills"}`**
+(not nested under `asset_manifest.metadata`) and STOP.
 The launcher surfaces this as the **approve_stills** gate (storyboard grid preview).
+Do **not** mark the assets stage `completed` at this point — that skips the storyboard gate.
 
 On "request revision" at this gate, honor `mode` (`fresh` | `edit`). Each flagged shot gets a
 **new** 2-take budget; still honor LOOK LOCK from the approved hero. Replace only flagged
