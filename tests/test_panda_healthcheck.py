@@ -49,6 +49,57 @@ def test_parse_requires_real_balance_tool_result():
     assert result.metadata["credits"] == 5648
 
 
+def test_block_list_tool_result_is_accepted():
+    """A tool_result may carry content as blocks rather than a bare string.
+
+    Treating only the string shape as valid reported a healthy Higgsfield as
+    unavailable, which alerted every morning on a working system.
+    """
+    stdout = "\n".join([
+        _line({
+            "type": "assistant",
+            "message": {"content": [{
+                "type": "tool_use", "id": "tool-3", "name": health.BALANCE_TOOL,
+            }]},
+        }),
+        _line({
+            "type": "user",
+            "message": {"content": [{
+                "type": "tool_result", "tool_use_id": "tool-3",
+                "content": [{
+                    "type": "text",
+                    "text": '{"credits":5648,"subscription_plan_type":"ultra"}',
+                }],
+            }]},
+        }),
+    ])
+    result = health.parse_canary_stream(stdout, "", False)
+    assert result.ok
+    assert result.code == "HIGGSFIELD_OK"
+    assert result.metadata["credits"] == 5648
+
+
+def test_block_list_prose_still_cannot_fake_success():
+    """The block-list shape must not become a way to pass without real credits."""
+    stdout = "\n".join([
+        _line({
+            "type": "assistant",
+            "message": {"content": [{
+                "type": "tool_use", "id": "tool-4", "name": health.BALANCE_TOOL,
+            }]},
+        }),
+        _line({
+            "type": "user",
+            "message": {"content": [{
+                "type": "tool_result", "tool_use_id": "tool-4",
+                "content": [{"type": "text", "text": "HIGGSFIELD_OK"}],
+            }]},
+        }),
+    ])
+    result = health.parse_canary_stream(stdout, "", False)
+    assert not result.ok
+
+
 def test_prose_alone_cannot_fake_success():
     stdout = _line({
         "type": "assistant",

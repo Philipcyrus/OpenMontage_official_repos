@@ -249,6 +249,42 @@ def _json_lines(text: str) -> Iterable[Dict[str, Any]]:
             yield value
 
 
+def _result_text(content: Any) -> Optional[str]:
+    """Flatten a tool_result ``content`` field to text.
+
+    The MCP transport may deliver it as a bare string or as a list of content
+    blocks; treating only the string shape as valid would report a healthy
+    Higgsfield as unavailable.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict):
+        content = [content]
+    if isinstance(content, list):
+        parts = [
+            block["text"]
+            for block in content
+            if isinstance(block, dict)
+            and block.get("type") == "text"
+            and isinstance(block.get("text"), str)
+        ]
+        if parts:
+            return "".join(parts)
+    return None
+
+
+def _result_payload(content: Any) -> Optional[Dict[str, Any]]:
+    """Return the JSON object a tool_result carries, in either content shape."""
+    text = _result_text(content)
+    if text is None:
+        return None
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
 def parse_canary_stream(stdout: str, stderr: str, timed_out: bool) -> CheckResult:
     """Classify the real MCP exchange from Claude's stream-json output."""
     records = list(_json_lines(stdout))
@@ -275,12 +311,7 @@ def parse_canary_stream(stdout: str, stderr: str, timed_out: bool) -> CheckResul
         if not block:
             continue
         content = block.get("content")
-        parsed: Any = None
-        if isinstance(content, str):
-            try:
-                parsed = json.loads(content)
-            except json.JSONDecodeError:
-                parsed = None
+        parsed = _result_payload(content)
         if not block.get("is_error", False) and isinstance(parsed, dict):
             credits = parsed.get("credits")
             if isinstance(credits, (int, float)) and not isinstance(credits, bool):
