@@ -1,0 +1,6 @@
+SHELL=/bin/bash
+HOME=/home/ec2-user
+PATH=/home/ec2-user/.nvm/versions/node/v22.23.2/bin:/home/ec2-user/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
+
+# Daily at 06:00 server time (currently UTC). Install in ec2-user's crontab, not root's.
+0 6 * * * /usr/bin/flock -n /tmp/panda-healthcheck.lock /usr/bin/python3 /home/ec2-user/OpenMontage-Repos/OpenMontage_official_repos/deploy/panda_healthcheck.py >> /home/ec2-user/panda-healthcheck.log 2>&1
