@@ -28,14 +28,13 @@ from __future__ import annotations
 import json
 import os
 import threading
-from datetime import datetime, timezone
-from pathlib import Path
 from typing import Any, Callable, Literal, Optional
 
 from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
+from dify_launcher import canary as _canary
 from dify_launcher import runner as _runner
 from dify_launcher import store
 from dify_launcher.storyboard_preview import is_superseded_still
@@ -168,63 +167,21 @@ def health() -> dict[str, Any]:
             "montage_door": _MONTAGE_DOOR}
 
 
-# Where deploy/panda_healthcheck.py leaves its result. Same env var the canary reads, so
-# the two cannot drift apart when an operator relocates the file.
-_CANARY_STATE = Path(os.environ.get(
-    "PANDA_HEALTH_STATE_FILE", "~/.local/state/panda-healthcheck/status.json")).expanduser()
-# A daily canary plus two hours of grace. Past this the stored verdict is not evidence about
-# now, it is evidence that cron stopped running.
-_CANARY_MAX_AGE_S = int(os.environ.get("PANDA_HEALTH_MAX_AGE_S", str(26 * 3600)))
-
-
 @app.get("/health/canary")
 def health_canary(x_dify_token: Optional[str] = Header(None)) -> dict[str, Any]:
     """Last result of the daily Claude/Higgsfield canary (deploy/panda_healthcheck.py).
 
-    Read-only: this serves what cron already wrote and never re-runs a check, so Dify's
-    morning poll returns immediately instead of blocking on a live agent turn.
+    Read-only: serves what cron already wrote and never re-runs a check, so the poll
+    returns immediately instead of blocking on a live agent turn.
 
-    `age_seconds`/`stale` are the important part. Without them a canary that stopped running
-    is indistinguishable from one that keeps passing, and the report Dify shows would go on
-    saying "healthy" long after the box stopped checking. A stale result is reported as
-    status="stale" even when the stored verdict was healthy.
-
-    Never raises on a missing or malformed state file: the absence of a result is itself a
-    reportable state ("never_run"), not a 500 for Dify to puzzle over.
+    Note the blind spot this route cannot fix: it is served BY the launcher, so when the
+    launcher is down Dify gets a connection error rather than a diagnosis. The standalone
+    `deploy/panda_health_service.py` on port 8502 exists for exactly that case and serves
+    the same shape plus a live launcher probe. Point Dify at that one; this stays as a
+    convenience and a fallback.
     """
     _auth(x_dify_token)
-    try:
-        raw = json.loads(_CANARY_STATE.read_text(encoding="utf-8"))
-        if not isinstance(raw, dict):
-            raise ValueError("state file is not a JSON object")
-    except (OSError, ValueError) as exc:
-        return {"status": "never_run", "healthy": None, "stale": True,
-                "checked_at": None, "age_seconds": None,
-                "detail": f"no canary result at {_CANARY_STATE} ({type(exc).__name__})",
-                "codes": [], "results": []}
-
-    checked_at = raw.get("checked_at")
-    age: Optional[int] = None
-    try:
-        when = datetime.fromisoformat(str(checked_at).replace("Z", "+00:00"))
-        if not when.tzinfo:
-            when = when.replace(tzinfo=timezone.utc)
-        age = int((datetime.now(timezone.utc) - when).total_seconds())
-    except (TypeError, ValueError):
-        age = None
-
-    healthy = raw.get("healthy")
-    stale = age is None or age > _CANARY_MAX_AGE_S
-    return {
-        "status": "stale" if stale else ("ok" if healthy else "failed"),
-        "healthy": None if healthy is None else bool(healthy),
-        "checked_at": checked_at,
-        "age_seconds": age,
-        "stale": stale,
-        "first_failed_at": raw.get("first_failed_at"),
-        "codes": raw.get("codes", []),
-        "results": raw.get("results", []),
-    }
+    return _canary.read_canary()
 
 
 @app.post("/jobs")

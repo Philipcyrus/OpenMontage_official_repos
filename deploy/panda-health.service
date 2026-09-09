@@ -1,0 +1,32 @@
+[Unit]
+Description=Panda AI - Health Service (reports when the main launcher cannot)
+After=network.target
+# Deliberately NOT After=panda-launcher.service and NOT Requires=. This service exists to
+# keep answering when the launcher is down; tying its lifecycle to the launcher's would
+# reintroduce the shared failure domain it was created to break.
+
+[Service]
+User=ec2-user
+WorkingDirectory=/home/ec2-user/OpenMontage-Repos/OpenMontage_official_repos
+
+# The state file path and the optional DIFY_TOKEN come from the launcher's .env so the
+# two services agree. `-` prefix: a missing .env must not stop this service from starting,
+# because a box in that state is exactly when you need the report.
+EnvironmentFile=-/home/ec2-user/OpenMontage-Repos/OpenMontage_official_repos/.env
+
+# No Node on the PATH on purpose. This service renders no media and runs no agent; the
+# fewer things it can depend on, the fewer ways it can die alongside what it monitors.
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+
+# Port 8502. Add a location block on the dev.om.mvnoc.ai proxy pointing /health/canary
+# here rather than at 8501, so the report survives the launcher going down.
+# --host 0.0.0.0 so a reverse proxy in another namespace/container can reach it; a
+# loopback bind returns 502s to Dify while every check run on the box passes.
+# SECURITY: the EC2 security group MUST restrict inbound 8502 to the proxy only.
+ExecStart=/home/ec2-user/OpenMontage-Repos/OpenMontage_official_repos/.venv/bin/python \
+    -m uvicorn deploy.panda_health_service:app --host 0.0.0.0 --port 8502
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

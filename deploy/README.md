@@ -153,30 +153,64 @@ recovery notification. A healthy daily run is logged but not alerted unless
 
 ### Reporting the result into Dify
 
-Every run writes its full verdict to `PANDA_HEALTH_STATE_FILE`, and the launcher serves that file
-at **`GET /health/canary`** (contract in
-[`dify_launcher/DIFY_INTEGRATION.md`](../dify_launcher/DIFY_INTEGRATION.md)). Dify polls that
-endpoint on its own schedule — a few minutes after the cron run, e.g. 07:05 Pacific — and renders
-the morning report. Nothing on this box calls out to Dify, so no Dify credentials live here.
+Every run writes its full verdict to `PANDA_HEALTH_STATE_FILE`. Two processes can serve that
+file; **point Dify at the second one.**
 
-The endpoint is read-only: it serves what cron already wrote and never re-runs a check, so Dify's
-poll returns immediately instead of blocking on a live agent turn.
+| Port | Served by | Use |
+|---|---|---|
+| 8501 | the main launcher (`dify_launcher/app.py`) | convenience + fallback |
+| **8502** | **`deploy/panda_health_service.py`** | **what Dify should poll** |
+
+Both expose `GET /health/canary` with the same field names, so switching ports needs no
+workflow change. The difference is what happens when the launcher dies.
+
+**Why a second process rather than a route on the launcher.** A monitor that shares a failure
+domain with the thing it monitors cannot report that thing's failure. Served from 8501, a dead
+launcher gives Dify a bare connection error — indistinguishable from a network problem or a
+misfiring HTTP node. The health service has no such blind spot: it imports nothing from the
+engine, holds no job state, and answers `LAUNCHER_DOWN` with detail while the launcher is down.
+Both read the same file through `dify_launcher/canary.py`, so the two ports cannot disagree.
+
+It answers two questions at once:
+
+- `launcher_live` — a fresh probe of 8501 done *now*, costing nothing
+- the stored fields (`status`, `codes`, `results`, …) — cron's daily deep check, which spends a
+  real Claude turn proving auth and Higgsfield still work
+
+The deep check stays in cron. Worst case it runs 260s (90s Higgsfield + 60s retry delay + 90s
+retry, plus auth and launcher checks), and `DIFY_INTEGRATION.md` §4 tells Dify to cap HTTP nodes
+at 30–60s. A synchronous "run the canary now" endpoint would time out first under exactly the
+conditions the canary exists to detect.
+
+**Install it:**
+
+```bash
+sudo cp deploy/panda-health.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now panda-health
+systemctl status panda-health --no-pager
+
+curl -s http://127.0.0.1:8502/health          # this service's own liveness
+curl -s http://127.0.0.1:8502/health/canary   # the morning report
+```
+
+`Restart=always` means it self-heals. It deliberately has **no** `After=panda-launcher.service`
+and no Node on its `PATH` — tying its lifecycle or its dependencies to the launcher's would
+rebuild the shared failure domain it exists to break.
+
+Then add a location block on the `dev.om.mvnoc.ai` proxy sending `/health/canary` to `127.0.0.1:8502`
+instead of 8501, and open 8502 to the proxy only in the security group (never `0.0.0.0/0`).
 
 **Branch the Dify report on `status`, never on `healthy`.** A response can be
 `{"healthy": true, "stale": true}` — that is *yesterday's* verdict plus the news that the checker
-has stopped running. `status` folds that in: `ok` only when the result is both passing and fresh,
-otherwise `failed`, `stale` (older than `PANDA_HEALTH_MAX_AGE_S`, default 26h), or `never_run`.
-Without the staleness gate, a dead cron job reads as a green morning forever.
+stopped running. `status` folds in both freshness and live launcher state: `ok` only when the
+launcher is up now **and** the stored check passed **and** it is fresh; otherwise `failed`,
+`stale` (older than `PANDA_HEALTH_MAX_AGE_S`, default 26h), or `never_run`. `canary_status`
+carries the stored verdict on its own if you want to show them separately.
 
-The launcher reads `PANDA_HEALTH_STATE_FILE` from its own environment, so if you move the state
-file, set that variable in **both** `~/.config/panda-healthcheck.env` and the launcher's `.env`,
-then restart the launcher.
-
-Failure codes distinguish Claude logout/OAuth expiry, Claude overload/rate limit/timeout,
-Higgsfield discovery/auth/provider failure, low credits, and launcher failure. Reauthenticate
-Claude with `claude auth login`; because Higgsfield is a Claude.ai account connector rather than a
-locally configured MCP server, reconnect it in the Claude.ai connector settings when the checker
-reports `HIGGSFIELD_AUTH_FAILED` or `HIGGSFIELD_NOT_DISCOVERED`.
+Both services read `PANDA_HEALTH_STATE_FILE` from their environment, so if you move the state
+file, set it in `~/.config/panda-healthcheck.env` **and** the launcher `.env` that both units
+load, then restart both.
 
 > If you don't need the Remotion/HyperFrames lanes, you can skip the three Node lines — the
 > launcher runs fine on system Node 18 and the default `ffmpeg`/`panda_render` lane is unaffected.
@@ -265,5 +299,7 @@ endpoint contract.
 | `panda_healthcheck.py` | cron-safe Claude/Higgsfield/launcher health canary + alerts |
 | `panda-healthcheck.env.example` | private health-check configuration template |
 | `panda-healthcheck.cron.example` | example entry for `ec2-user`'s crontab |
+| `panda_health_service.py` | standalone health reporter on 8502 — answers when the launcher can't |
+| `panda-health.service` | systemd unit for that reporter (`Restart=always`) |
 | `nginx-panda.conf` | reverse-proxy block (subpath or subdomain) |
 | `requirements-launcher.txt` | minimal deps for launcher + render |

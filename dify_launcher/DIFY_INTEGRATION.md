@@ -50,8 +50,29 @@ the box via cron). It proves the production path still works *before* a brief ne
 launcher is up, `claude` is still authenticated, and a real Higgsfield `balance` MCP call
 succeeds. Poll it once each morning and render the report.
 
+> **Poll this on the health service, not on the launcher.** The same path is served by two
+> processes: the main launcher on 8501, and `deploy/panda_health_service.py` on **8502**. Use
+> **8502**. The launcher cannot report its own death — if it is down you get a bare connection
+> error, indistinguishable from a network fault or your own HTTP node misfiring. The health
+> service is a separate process with no engine imports, so it stays up and answers
+> `launcher_live.code = "LAUNCHER_DOWN"` with detail. Field names are identical on both, so
+> switching is a URL change, nothing more.
+
 This endpoint is **read-only** — it serves what cron already wrote and never re-runs a check, so
-it returns immediately instead of blocking on a live agent turn.
+it returns immediately instead of blocking on a live agent turn. Do not ask for a "check now"
+variant: a live run takes up to 260s, well past the 30–60s HTTP budget in §4, and it would time
+out first under exactly the conditions worth detecting.
+
+Two extra fields come from the health service (8502) only:
+
+| Field | Meaning |
+|---|---|
+| `launcher_live` | a probe of the launcher done **at request time** — `{ok, code, detail, runner}` |
+| `canary_status` | the stored daily verdict on its own, before live launcher state is folded in |
+
+`status` combines both. `launcher_live.ok = false` forces `status: "failed"` even when the
+stored canary passed — a green report about a box that is not currently serving anything would
+be worse than no report.
 
 ```json
 {

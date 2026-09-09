@@ -159,10 +159,11 @@ def _client_and_app(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
 
     from dify_launcher import app as app_module
+    from dify_launcher import canary as canary_mod
 
     state = tmp_path / "status.json"
-    monkeypatch.setattr(app_module, "_CANARY_STATE", state)
-    return TestClient(app_module.app), app_module, state
+    monkeypatch.setattr(canary_mod, "state_path", lambda: state)
+    return TestClient(app_module.app), canary_mod, state
 
 
 def _write(state, payload):
@@ -213,7 +214,7 @@ def test_stale_result_is_not_reported_as_healthy(tmp_path, monkeypatch):
     reporting a green morning long after the box stopped checking anything.
     """
     client, mod, state = _client_and_app(tmp_path, monkeypatch)
-    monkeypatch.setattr(mod, "_CANARY_MAX_AGE_S", 26 * 3600)
+    monkeypatch.setattr(mod, "max_age_s", lambda: 26 * 3600)
     old = (datetime.now(timezone.utc) - timedelta(hours=30)).isoformat()
     _write(state, {"healthy": True, "checked_at": old, "codes": ["HIGGSFIELD_OK"]})
     body = client.get("/health/canary").json()
@@ -253,3 +254,112 @@ def test_canary_writes_what_the_endpoint_reads(tmp_path, monkeypatch):
     assert components == ["launcher", "claude_auth", "higgsfield_mcp"]
     credits = [r for r in body["results"] if r["component"] == "higgsfield_mcp"][0]
     assert credits["metadata"]["credits"] == 5648
+
+
+# --- the standalone health service (deploy/panda_health_service.py) ---------
+#
+# The reason this process exists: a monitor served BY the launcher cannot report the
+# launcher being down. These tests pin that it can.
+
+
+def _health_service(tmp_path, monkeypatch, launcher_probe):
+    from fastapi.testclient import TestClient
+
+    from deploy import panda_health_service as svc
+    from dify_launcher import canary as canary_mod
+
+    state = tmp_path / "status.json"
+    monkeypatch.setattr(canary_mod, "state_path", lambda: state)
+    monkeypatch.setattr(svc, "probe_launcher", lambda *a, **k: launcher_probe)
+    return TestClient(svc.app), state
+
+
+def test_service_liveness_does_no_io():
+    """Its own /health must not depend on anything it reports on."""
+    from fastapi.testclient import TestClient
+
+    from deploy import panda_health_service as svc
+
+    body = TestClient(svc.app).get("/health").json()
+    assert body["status"] == "ok"
+    assert body["service"] == "panda-health"
+
+
+def test_service_reports_launcher_down_with_a_healthy_stored_canary(tmp_path, monkeypatch):
+    """The case the main launcher structurally cannot report about itself.
+
+    Cron's stored verdict is a fresh PASS, but the launcher is down right now. Overall
+    status must be `failed` — a report that said `ok` here would be describing a machine
+    that is not currently serving anything.
+    """
+    down = {"ok": False, "code": "LAUNCHER_DOWN", "detail": "ConnectionRefusedError"}
+    client, state = _health_service(tmp_path, monkeypatch, down)
+    state.write_text(json.dumps({
+        "healthy": True, "checked_at": datetime.now(timezone.utc).isoformat(),
+        "codes": ["HIGGSFIELD_OK"], "results": [],
+    }), encoding="utf-8")
+
+    body = client.get("/health/canary").json()
+    assert body["status"] == "failed"
+    assert body["launcher_live"]["code"] == "LAUNCHER_DOWN"
+    assert body["canary_status"] == "ok"      # the deep check itself was fine...
+    assert body["healthy"] is True            # ...and its verdict is preserved
+
+
+def test_service_reports_ok_only_when_live_and_fresh(tmp_path, monkeypatch):
+    up = {"ok": True, "code": "LAUNCHER_OK", "runner": "claude"}
+    client, state = _health_service(tmp_path, monkeypatch, up)
+    state.write_text(json.dumps({
+        "healthy": True, "checked_at": datetime.now(timezone.utc).isoformat(),
+        "codes": ["HIGGSFIELD_OK"], "results": [],
+    }), encoding="utf-8")
+    body = client.get("/health/canary").json()
+    assert body["status"] == "ok"
+    assert body["launcher_live"]["runner"] == "claude"
+
+
+def test_service_reports_stale_even_while_the_launcher_is_up(tmp_path, monkeypatch):
+    """A live launcher must not launder a dead cron job into a green report."""
+    up = {"ok": True, "code": "LAUNCHER_OK", "runner": "claude"}
+    client, state = _health_service(tmp_path, monkeypatch, up)
+    old = (datetime.now(timezone.utc) - timedelta(hours=30)).isoformat()
+    state.write_text(json.dumps({"healthy": True, "checked_at": old, "codes": []}),
+                     encoding="utf-8")
+    body = client.get("/health/canary").json()
+    assert body["status"] == "stale"
+
+
+def test_service_and_launcher_agree_on_the_same_file(tmp_path, monkeypatch):
+    """Both ports must give the same verdict; they share dify_launcher/canary.py.
+
+    If these ever diverge, the same box reports two different answers depending on which
+    port Dify happened to ask.
+    """
+    from fastapi.testclient import TestClient
+
+    from deploy import panda_health_service as svc
+    from dify_launcher import app as app_module
+    from dify_launcher import canary as canary_mod
+
+    state = tmp_path / "status.json"
+    state.write_text(json.dumps({
+        "healthy": False, "checked_at": datetime.now(timezone.utc).isoformat(),
+        "codes": ["HIGGSFIELD_AUTH_FAILED"], "results": [{"component": "higgsfield_mcp"}],
+    }), encoding="utf-8")
+    monkeypatch.setattr(canary_mod, "state_path", lambda: state)
+    monkeypatch.setattr(svc, "probe_launcher",
+                        lambda *a, **k: {"ok": True, "code": "LAUNCHER_OK"})
+
+    from_launcher = TestClient(app_module.app).get("/health/canary").json()
+    from_service = TestClient(svc.app).get("/health/canary").json()
+    for field in ("status", "healthy", "checked_at", "codes", "results", "stale"):
+        assert from_launcher[field] == from_service[field], field
+
+
+def test_probe_launcher_never_raises_on_a_dead_port():
+    """Real socket call, nothing listening: it must return a verdict, not an exception."""
+    from deploy import panda_health_service as svc
+
+    result = svc.probe_launcher("http://127.0.0.1:1/health", timeout=1)
+    assert result["ok"] is False
+    assert result["code"] == "LAUNCHER_DOWN"
