@@ -97,25 +97,20 @@ stages:
       - Every required_asset is feasible with the tools available in the assets stage
       - Panda identity / character-consistency (Element ids + character_actions) / composition are specified as plan requirements
 
-  # ---- GATES 3, 3.5 & 4 : the ASSETS stage runs in up to THREE human-reviewed phases ----
+  # ---- GATES 2.5, 3, 3.5 & 4 : the ASSETS stage runs in human-reviewed phases ----
   # Best-of-both: upstream's single asset-generation stage, PLUS Panda cost gates. The stage
-  # pauses up to 3× (all status='awaiting_human', stage='assets'), distinguished by the
-  # checkpoint's partial_progress.phase:
+  # pauses (all status='awaiting_human', stage='assets'), distinguished by
+  # checkpoint partial_progress.phase:
+  #   PHASE 0  partial_progress.phase="hero_still"    -> 🚦 GATE 2.5 approve_hero_still
+  #            (default ON; opt out with job option hero_still:false)
+  #            generate ONE hero still (look lock) before the full storyboard.
   #   PHASE 1  partial_progress.phase="stills"        -> 🚦 GATE 3 approve_stills
-  #            generate ONLY the stills (cheap). Approve the LOOK (on-model panda, composition)
-  #            BEFORE any expensive image->video spend. NO video generated yet.
+  #            remaining stills (or all when hero_still off). NO video yet.
   #   PHASE 2  partial_progress.phase="motion_sample" -> 🚦 GATE 3.5 approve_motion_sample
   #            (only when job option motion_sample is on — DEFAULT OFF; pass true to opt in)
-  #            animate ONE hero still into a single sample clip. Approve the MOTION/animation
-  #            BEFORE batching all clips.
   #   PHASE 3  (no phase marker)                       -> 🚦 GATE 4 approve_assets
-  #            animate the remaining stills into motion clips + narration + music, recorded
-  #            canonically in asset_manifest. Approve the full media set (per-shot revisable).
   #   BUDGET   partial_progress.phase="budget_hold"    -> 🚦 budget_exceeded (CONDITIONAL)
-  #            only when a generation would exceed the job's max_higgsfield_credits cap: the agent
-  #            HARD-BLOCKS before spending and pauses; human raises the cap / revises / cancels.
-  # The assets stage is gated (framework assets-gate-flip: a gated stage cannot complete
-  # without human approval). See dify_launcher/runner.py (_sync/_motion_sample_prompt).
+  # The assets stage is gated (framework assets-gate-flip). See dify_launcher/runner.py.
   - name: assets
     skill: pipelines/panda-video/asset-director
     required_artifacts_in:
@@ -124,14 +119,15 @@ stages:
     produces:
       - asset_manifest
     tools_available:
-      - image_selector           # PHASE 1: stills per scene (still-gen via the Higgsfield MCP bridge)
+      - image_selector           # PHASE 0/1: stills per scene (still-gen via the Higgsfield MCP bridge)
       - higgsfield_mcp_video     # PHASE 2/3: OUR MCP bridge (image_to_video motion clips)
       - seedance_video
       - elevenlabs_tts           # PHASE 3: narration
       - music_gen                # PHASE 3: background music (ElevenLabs Music)
     checkpoint_required: true
-    human_approval_default: true       # 🚦 GATES 3, 3.5 & 4 (stills, motion sample, full media)
+    human_approval_default: true       # 🚦 GATES 2.5, 3, 3.5 & 4
     review_focus:
+      - "PHASE 0 (hero still): one look-lock still approved before the full storyboard (default on; hero_still:false skips)"
       - "PHASE 1 (stills): one still per scene, on-brand (styles/panda.yaml) and character-consistent (panda Elements), before any video is generated"
       - "PHASE 2 (motion sample): one hero clip approves the motion/animation before the full batch (only if motion_sample:true; default off)"
       - "PHASE 3 (media): every required asset exists on disk and is listed in asset_manifest (path + scene_id)"

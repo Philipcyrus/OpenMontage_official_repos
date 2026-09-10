@@ -1,14 +1,16 @@
 # Asset Director — Panda Carousel Pipeline
 
-> Stills only. GATE 3 is **terminal** — approving the stills completes the job.
-> No motion sample, no clips, no TTS, no music, no edit, no compose.
+> Stills only. GATE 3 (`approve_stills`) is **terminal** — approving the stills completes the job.
+> Optional GATE 2.5 (`approve_hero_still`) look-locks one slide first (default on;
+> `hero_still:false` skips). No motion sample, no clips, no TTS, no music, no edit, no compose.
 
 ## When To Use
 
 You have an approved `scene_plan` (one scene per slide, stills-only `required_assets`,
-bilingual `captions`) and the approved `script`. Generate **one still per slide**, record
-them in `asset_manifest`, then STOP for human approval. After approval the launcher
-marks the assets stage `completed` and the job is `done`.
+bilingual `captions`) and the approved `script`. When `hero_still` is on (default): generate
+**one hero still**, STOP; after approval generate **remaining** stills under LOOK LOCK, STOP.
+When off: generate all stills in one pass. After stills approval the launcher marks assets
+`completed` and the job is `done`.
 
 ## Prerequisites
 
@@ -27,10 +29,16 @@ Walk every scene. Each `required_assets` entry of type `image` is one still task
 (`scene_id`, description, Element ids, captions, aspect ratio from
 `scene_plan.metadata.aspect_ratio` — default `4:5`).
 
-### 2. Generate STILLS ONLY, then STOP (GATE 3, approve_stills)
-Generate ONE still per slide. **Follow the binding rules in
+### 2. PHASE 0 — ONE HERO STILL, then STOP (GATE 2.5) when `hero_still` is on (default)
+Generate ONE still for `hero_moment` (else slide 1). Checkpoint top-level
+`partial_progress={"phase":"hero_still","hero_scene_id":"…","look_notes":[]}` and STOP.
+
+### 3. Generate STILLS, then STOP (GATE 3, approve_stills)
+After hero approve (or immediately when `hero_still` is off): keep approved hero if any;
+generate remaining (or all) slides. **Follow the binding rules in
 `skills/meta/higgsfield-mcp-bridge.md`:** **CHARACTER LOCK**, **STILLS 2-TAKE HARD RULE**,
-and **2D MEDIUM LOCK**. Summary:
+and **2D MEDIUM LOCK**. LOOK LOCK: import approved hero as style/look reference + bake
+`look_notes`. Summary:
 
 - Attach `customer_reference_element_id` / `panda_reference_element_id` from
   `config/panda-elements.json` in the MCP media / `image_references` slot whenever that

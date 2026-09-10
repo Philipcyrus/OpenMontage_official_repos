@@ -1,6 +1,7 @@
 # Asset Director — Panda Image Pipeline
 
-> One still. GATE 2 is **terminal** — approving the still completes the job.
+> One still. GATE 2 (`approve_stills`) is **terminal** — approving the still completes the job.
+> There is **no** separate `approve_hero_still` gate — this single stills gate *is* the look-lock.
 > No motion sample, no clips, no TTS, no music, no edit, no compose.
 
 ## When To Use

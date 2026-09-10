@@ -125,6 +125,13 @@ Do **not** use `student_ugc_element_id` (still TODO).
 5. A still or clip of a human or panda **without** that Element in `medias` is a
    defect; do not ship it. Log the IDs on the `asset_manifest` row.
 
+## LOOK LOCK (after approve_hero_still)
+
+When remaining storyboard stills follow an approved hero PNG: `media_import` that hero as a
+**style/look** reference (palette, character rendering, lighting, medium, wardrobe). Confirm the
+live media role with `models_explore` — do **not** pass it as a start-frame that copies
+composition onto every scene. Bake `look_notes` from hero revises into every remaining prompt.
+
 ## STILLS 2-TAKE HARD RULE (binding)
 
 Per scene, per stills round (first GATE 3 pass, or a later human `revise` on that scene):

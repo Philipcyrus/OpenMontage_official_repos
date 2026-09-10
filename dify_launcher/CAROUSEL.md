@@ -16,6 +16,7 @@ in [`CAROUSEL_TEST.md`](CAROUSEL_TEST.md); the recorded walks are below.
 POST /jobs  { "pipeline": "panda-carousel", "brief": "…", "options": { … } }
    → approve_script          (skip with options.gates: ["scene_plan","stills"])
    → approve_scene_plan      TEXT plan + bilingual captions; no media yet
+   → approve_hero_still      ONE look-lock PNG (default on; options.hero_still:false skips)
    → approve_stills          one PNG per slide (UGC)
    → approve_brand           approve stamps BGC copies; skip keeps UGC; revise stays
    → done

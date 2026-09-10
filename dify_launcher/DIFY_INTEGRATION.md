@@ -165,7 +165,7 @@ loop: GET again … repeat for each gate
 
 ## 5. The gate sequence (state machine)
 
-Upstream's text `scene_plan` + Panda **cost gates**: the `assets` stage pauses up to **three times** — stills first (cheap), then one motion sample (approve the motion before batching), then the full media.
+Upstream's text `scene_plan` + Panda **cost gates**: the `assets` stage pauses up to **four times** — hero look-lock (one still), full stills, then one motion sample (approve the motion before batching), then the full media.
 
 ```
 POST /jobs
@@ -176,6 +176,10 @@ approve_script         artifacts: script                    approve│revise
    ▼
 approve_scene_plan     artifacts: scene_plan (TEXT plan)     approve│revise        ← no media here
    │
+   ▼
+approve_hero_still     artifacts: stills[1] (ONE PNG)        approve│revise        ← look-lock
+   │                                                          (**default on**; opt out with
+   │                                                           options.hero_still:false)
    ▼
 approve_stills         artifacts: stills[]  (NO video yet)   approve│revise (per-scene)
    │                                                          ↑ approve the look BEFORE paying
@@ -209,6 +213,9 @@ approve_script         artifacts: script                    (skippable via optio
 approve_scene_plan     artifacts: scene_plan + captions     approve│revise
    │
    ▼
+approve_hero_still     artifacts: stills[1] (look-lock)     approve│revise  ← default on; hero_still:false skips
+   │
+   ▼
 approve_stills         artifacts: stills[] (UGC)            approve│revise
    │
    ▼
@@ -239,7 +246,7 @@ done                   (+ branded_stills if approved)
 
 `status` values: `running` (working, keep polling) · `awaiting_human` (a gate — act) · `done` (finished) · `failed` (see `question`).
 
-> **The assets stage surfaces up to FOUR pauses.** `approve_stills`, `approve_motion_sample`, `budget_exceeded`, and `approve_assets` are `awaiting_human` pauses of the **same** `assets` stage (`stage:"assets"` at all of them). `approve_stills` shows **stills only** (no video — a rejection costs nothing). `approve_motion_sample` shows **one sample clip** so you approve the motion before the full batch — appears only when the `motion_sample` option is on (**default off**; pass `true` to opt in). `budget_exceeded` is **conditional** — it appears only if a generation would push cumulative Higgsfield spend past `max_higgsfield_credits`; the agent blocks *before* spending and you raise the cap / revise / cancel. `approve_assets` shows the full media set. **Tell them apart by the `gate` field — do not rely on `stage` alone.**
+> **The assets stage surfaces up to FIVE pauses.** `approve_hero_still`, `approve_stills`, `approve_motion_sample`, `budget_exceeded`, and `approve_assets` are `awaiting_human` pauses of the **same** `assets` stage (`stage:"assets"` at all of them). `approve_hero_still` shows **one look-lock still** (**default on** for video/carousel; opt out with `options.hero_still:false`; never for panda-image). `approve_stills` shows **stills only** (no video — a rejection costs nothing). `approve_motion_sample` shows **one sample clip** so you approve the motion before the full batch — appears only when the `motion_sample` option is on (**default off**; pass `true` to opt in). `budget_exceeded` is **conditional** — it appears only if a generation would push cumulative Higgsfield spend past `max_higgsfield_credits`; the agent blocks *before* spending and you raise the cap / revise / cancel. `approve_assets` shows the full media set. **Tell them apart by the `gate` field — do not rely on `stage` alone.** User-facing “X is ready” copy in Mochi/Dify **must** branch on `gate` (hero still / stills / motion sample / clips), never on `stage:"assets"` alone — otherwise a hero look-lock or storyboard pause is mislabeled as “clips are ready.” Storyboard `preview` is built **only** at `approve_stills`; approving the hero must **not** complete the assets stage.
 
 ---
 
@@ -252,8 +259,8 @@ Plain-language description of the video. **Be specific** — duration, what happ
 
 ### `pipeline` (optional, default `"panda-video"`)
 Which manifest to run. `"panda-video"` is the full video (content gates + `approve_brand`). `"panda-carousel"` is the
-stills-only sibling: `approve_script` → `approve_scene_plan` → `approve_stills` → `approve_brand` → `done`.
-`"panda-image"` is a single still: `approve_scene_plan` → `approve_stills` → `approve_brand` → `done` (no script).
+stills-only sibling: `approve_script` → `approve_scene_plan` → `approve_hero_still` → `approve_stills` → `approve_brand` → `done`.
+`"panda-image"` is a single still: `approve_scene_plan` → `approve_stills` → `approve_brand` → `done` (no script; no separate hero gate).
 Persist this per job — mixed video + carousel + image on one launcher is supported.
 
 ### `profile` (optional, default `"ugc"`)
@@ -264,12 +271,13 @@ after the last content gate — a post-cut overlay, never in generation. `skip` 
 ### `options` (optional) — per-job control
 | key | values | meaning |
 |---|---|---|
-| `language` | `"en"` \| `"zh"` | narration language (video) / primary on-slide language (carousel) |
+| `language` | `"en"` \| `"zh"` | narration language (video) / primary on-slide language (carousel). **Mandarin briefs with `language:"en"` (or omitted) are coerced to `zh` by the launcher** so VOICE LOCK matches the brief — the agent must not stop to re-ask. Explicit `voice_id` skips coerce. |
 | `narrator` | `"panda"` \| `"customer"` \| `"narrator"` | who speaks (video). `panda` = the mascot, `customer` = the human, `narrator` = the off-screen background voice-over. Note the overlap: the option is named `narrator` and its *value* names the speaker, so a voice-over job is `"narrator": "narrator"` |
 | `voice_id` | ElevenLabs voice id (string) | **explicit override** — use this exact voice, ignore the default |
 | `music` | mood string, or `false` | background music via ElevenLabs (`"upbeat, light"`), or `false` to skip |
 | `render_runtime` | `"auto"` \| `"ffmpeg"` \| `"remotion"` \| `"hyperframes"` | which render engine composes the video. Default `"auto"` |
 | `motion_sample` | `false` (default) \| `true` | insert the `approve_motion_sample` gate (video only; default off) |
+| `hero_still` | `true` (default) \| `false` | insert `approve_hero_still` look-lock (video + carousel; default on). Never for panda-image |
 | `max_higgsfield_credits` | integer, or unset | **hard credit ceiling** for the run |
 | `aspect_ratio` | string | stills canvas, passed through to `generate_image`. Carousel default `"4:5"`; **panda-image** default `"1:1"`. Also `9:16`, `WIDTHxHEIGHT`, … |
 | `gates` | e.g. `["scene_plan", "stills"]` | carousel only — omit `script` to auto-approve GATE 1 |
@@ -335,8 +343,8 @@ Returned under `artifacts` in every state; grouped by kind:
 | `scene_plan` | **inline JSON object** (the text plan — show it, don't fetch) | at the scene_plan gate |
 | `scene_plan_md` | relative URL to `scene_plan.md` | at the scene_plan gate (and later, if the plan is still on the job) |
 | `preview` | list of **one** relative URL — the current text gate’s `.md` | **`approve_script`** → `script.md`; **`approve_scene_plan`** → `scene_plan.md`. Absent at stills/clips/final. Bind this for Dify’s file-preview slot. |
-| `stills` | list of image paths | at the **stills** gate (UGC originals; kept after `/brand`) |
-| `preview` | list of **one** relative URL | at **`approve_stills`** → `storyboard.png` (shot grid + descriptions). Absent at later gates. Bind Dify’s file-preview slot here. After a per-shot revise, poll again — the PNG is rebuilt. |
+| `stills` | list of image paths | at **`approve_hero_still`** (exactly one) and **`approve_stills`** (UGC originals; kept after `/brand`) |
+| `preview` | list of **one** relative URL | at **`approve_hero_still`** → the single hero PNG; at **`approve_stills`** → `storyboard.png` (shot grid + descriptions). Absent at later gates. Bind Dify’s file-preview slot here. After a per-shot revise, poll again — the PNG is rebuilt. |
 | `storyboard_html` | relative URL to `storyboard.html` | same grid as HTML (sibling still filenames). |
 | `branded_stills` | list of image paths | after `approve_brand` approve, or later `POST /jobs/{id}/brand` (BGC wordmark copies) |
 | `clips` | list of video paths | at the **assets** gate (video pipeline) |
