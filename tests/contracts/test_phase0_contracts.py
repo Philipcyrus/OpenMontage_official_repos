@@ -8,6 +8,7 @@ pipeline manifests + stage director skills + meta skills.
 
 import importlib
 import json
+import re
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -587,6 +588,81 @@ class TestAgentContextFiles:
             contents = (PROJECT_ROOT / path).read_text(encoding="utf-8")
             assert "Do NOT read AGENT_GUIDE.md" in contents, f"{path} lost the leg carve-out"
             assert "MANDATORY" in contents, f"{path} lost the interactive mandate"
+
+    def test_launcher_start_prompts_do_not_countermand_the_carveout(self):
+        """The carve-out lives in the auto-loaded files, but the leg prompt is a stronger
+        channel than either of them.
+
+        Same failure shape as the test above: exempting one channel leaves the order standing
+        from another. While `_start_prompt` / `_carousel_start_prompt` / `_image_start_prompt`
+        still said "Follow AGENT_GUIDE.md", every job's FIRST leg was told to read the 46KB
+        guide that CLAUDE.md had just told it to skip — so the 2026-08-29 exemption never
+        reached leg 1 of any pipeline. Route legs to their manifest and stage director instead.
+        """
+        contents = (PROJECT_ROOT / "dify_launcher" / "runner.py").read_text(encoding="utf-8")
+        assert "Follow AGENT_GUIDE.md" not in contents, (
+            "a launcher start prompt orders AGENT_GUIDE.md again — the leg carve-out in "
+            "CLAUDE.md and AGENTS.md cannot override the prompt that starts the leg"
+        )
+
+
+class TestLegPromptDirectorRouting:
+    """A start prompt must give the leg a route to EVERY stage director its pipeline uses.
+
+    The carve-out test above proves "Follow AGENT_GUIDE.md" is gone. It cannot prove the
+    replacement route is complete — and once it was not: the video prompt advertised
+    `skills/pipelines/panda-video/*-director.md`, but panda-video.yaml routes `script` to
+    `pipelines/hybrid/script-director` and `edit` to `pipelines/hybrid/edit-director`.
+    Neither lives in that directory, so leg 1 — the most-run leg in the system — was sent
+    to a folder that did not hold its director. Every suite passed anyway, because they
+    only ever asked whether a string was present.
+
+    The rule: do not advertise a directory that does not hold them all. A prompt may name
+    the manifest instead (it maps every stage to its director), but a glob it does name
+    must cover the whole pipeline.
+    """
+
+    PIPELINES = ("panda-video", "panda-carousel", "panda-image")
+
+    @staticmethod
+    def _start_prompt(pipeline: str) -> str:
+        from dify_launcher.runner import ClaudeCodeRunner
+
+        return ClaudeCodeRunner()._start_prompt("job_contract", "a brief", {}, pipeline)
+
+    @staticmethod
+    def _manifest_directors(pipeline: str) -> set:
+        text = (PROJECT_ROOT / "pipeline_defs" / f"{pipeline}.yaml").read_text(encoding="utf-8")
+        return set(re.findall(r"^\s*skill:\s*(pipelines/\S+-director)\s*$", text, re.M))
+
+    @pytest.mark.parametrize("pipeline", PIPELINES)
+    def test_named_skill_files_exist(self, pipeline):
+        """Every concrete skills/... path a start prompt names must be a real file."""
+        prompt = self._start_prompt(pipeline)
+        for rel in sorted(set(re.findall(r"skills/[\w./-]+\.md", prompt))):
+            assert (PROJECT_ROOT / rel).is_file(), (
+                f"{pipeline} start prompt names a skill file that does not exist: {rel}"
+            )
+
+    @pytest.mark.parametrize("pipeline", PIPELINES)
+    def test_director_route_covers_every_manifest_stage(self, pipeline):
+        prompt = self._start_prompt(pipeline)
+        globs = re.findall(r"skills/(pipelines/[\w./-]*)\*-director\.md", prompt)
+        if not globs:
+            assert f"pipeline_defs/{pipeline}.yaml" in prompt, (
+                f"{pipeline} start prompt names neither a director glob nor its manifest — "
+                "the leg has no route to its stage director"
+            )
+            return
+        covered = set()
+        for g in globs:
+            covered |= {f"{g}{f.stem}" for f in (PROJECT_ROOT / "skills" / g).glob("*-director.md")}
+        missing = self._manifest_directors(pipeline) - covered
+        assert not missing, (
+            f"{pipeline} start prompt advertises {globs}, but the manifest routes to "
+            f"{sorted(missing)} — the leg is pointed at a directory that does not hold "
+            "its stage director. Name the manifest instead, or widen the route."
+        )
 
 
 class TestCheckpointProtocolDoc:
