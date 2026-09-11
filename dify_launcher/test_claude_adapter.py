@@ -31,6 +31,7 @@ run = R.ClaudeCodeRunner()
 
 # 1) gate <-> stage mapping ------------------------------------------------
 # both assets sub-gates reverse-map to the single `assets` stage
+assert run._gate_stage("approve_hero_still") == "assets"
 assert run._gate_stage("approve_stills") == "assets"
 assert run._gate_stage("approve_motion_sample") == "assets"
 assert run._gate_stage("budget_exceeded") == "assets"
@@ -39,6 +40,7 @@ assert run._gate_stage("approve_scene_plan") == "scene_plan"
 assert run._gate_stage("approve_script") == "script"
 assert run._gate_stage("approve_brand") == "brand"
 assert "approve_brand" in R.GATES
+assert "approve_hero_still" in R.GATES
 assert R._STAGE_GATE["compose"] == "approve_final"
 assert R._STAGE_GATE["scene_plan"] == "approve_scene_plan"
 assert "assets" not in R._STAGE_GATE          # assets is phase-resolved, not a 1:1 map entry
@@ -47,6 +49,13 @@ assert R._motion_sample_enabled({"options": {}}) is False
 assert R._motion_sample_enabled({"options": {"motion_sample": True}}) is True
 assert R._motion_sample_enabled({"options": {"motion_sample": "true"}}) is True
 assert R._motion_sample_enabled({"options": {"motion_sample": False}}) is False
+assert R._hero_still_enabled({}) is True
+assert R._hero_still_enabled({"options": {}}) is True
+assert R._hero_still_enabled({"options": {"hero_still": False}}) is False
+assert R._hero_still_enabled({"pipeline": "panda-image"}) is False
+assert R._hero_scene_index({"scenes": [
+    {"id": "scene-1"}, {"id": "scene-2", "hero_moment": True}, {"id": "scene-3"}
+]}) == 1
 print("[ok] gate<->stage mapping")
 print("[ok] motion_sample default off; true opts in")
 
@@ -265,6 +274,54 @@ _fake_latest.cp = {"stage": "assets", "status": "awaiting_human", "artifacts": {
 st = run._sync({"job_id": "jX"})
 assert st["status"] == "awaiting_human" and st["gate"] == "approve_stills"
 
+# assets stage, HERO STILL phase -> approve_hero_still
+_fake_latest.cp = {"stage": "assets", "status": "awaiting_human", "artifacts": {},
+                   "partial_progress": {"phase": "hero_still", "hero_scene_id": "scene-2",
+                                        "look_notes": ["warmer"]}}
+st = run._sync({"job_id": "jX"})
+assert st["status"] == "awaiting_human" and st["gate"] == "approve_hero_still"
+assert st.get("look_notes") == ["warmer"]
+assert st["artifacts"].get("hero_scene_id") == "scene-2"
+
+# nested metadata.stage_phase fallback -> stills
+_fake_latest.cp = {"stage": "assets", "status": "awaiting_human", "artifacts": {
+    "asset_manifest": {"version": "1.0", "assets": [],
+                       "metadata": {"stage_phase": "stills"}}}}
+st = run._sync({"job_id": "jNested"})
+assert st["gate"] == "approve_stills"
+
+# completed assets with stills-only media -> recover to approve_stills (not skip storyboard)
+JOBREC = "jStillsOnlyRecover"
+projrec = run._projects_dir / JOBREC
+(projrec / "assets" / "images").mkdir(parents=True, exist_ok=True)
+(projrec / "artifacts").mkdir(parents=True, exist_ok=True)
+from PIL import Image as _ImageRec
+_ImageRec.new("RGB", (40, 40), (1, 2, 3)).save(projrec / "assets" / "images" / "still_0.png")
+_fake_latest.cp = {"stage": "assets", "status": "completed", "artifacts": {
+    "stills": ["still_0.png"]}}
+st = run._sync({"job_id": JOBREC, "pipeline": "panda-video"})
+assert st["gate"] == "approve_stills", st
+
+# in_progress assets + stills-only must NOT reopen approve_stills (clips still rendering)
+JOBIP = "jInProgressStills"
+projip = run._projects_dir / JOBIP
+(projip / "assets" / "images").mkdir(parents=True, exist_ok=True)
+(projip / "artifacts").mkdir(parents=True, exist_ok=True)
+_ImageRec.new("RGB", (40, 40), (4, 5, 6)).save(projip / "assets" / "images" / "scene_1.png")
+_fake_latest.cp = {
+    "stage": "assets", "status": "in_progress", "artifacts": {},
+    "metadata": {"partial_progress": {
+        "phase": "motion_and_audio_in_flight",
+        "motion_jobs": {"scene_1": {"job_id": "abc"}},
+    }},
+}
+st = run._sync({"job_id": JOBIP, "pipeline": "panda-video"})
+assert st["status"] == "running", st
+assert st.get("gate") is None, st
+assert "approve_stills" != st.get("gate")
+assert "in progress" in (st.get("question") or "").lower()
+print("[ok] _sync in_progress stills-only → running (not approve_stills)")
+
 # assets stage, MOTION SAMPLE phase -> approve_motion_sample
 _fake_latest.cp = {"stage": "assets", "status": "awaiting_human", "artifacts": {},
                    "partial_progress": {"phase": "motion_sample"}}
@@ -349,6 +406,105 @@ html_sb = store.artifact_path(JOBSB, "storyboard.html").read_text(encoding="utf-
 assert "SC 01" in html_sb and "Wave" in html_sb
 print("[ok] _sync stills dual-surface: storyboard.png preview, not listed as a still")
 
+# 3c) hero gate: preview is the single PNG (not storyboard); look_notes carry
+JOBH = "jPreviewHero"
+projh = run._projects_dir / JOBH
+(projh / "assets" / "images").mkdir(parents=True, exist_ok=True)
+(projh / "artifacts").mkdir(parents=True, exist_ok=True)
+_Image.new("RGB", (80, 120), (200, 10, 10)).save(projh / "assets" / "images" / "hero_scene-2.png")
+_fake_latest.cp = {"stage": "assets", "status": "awaiting_human",
+                   "partial_progress": {"phase": "hero_still", "hero_scene_id": "scene-2",
+                                        "look_notes": ["warmer light"]},
+                   "artifacts": {}}
+st = run._sync({"job_id": JOBH})
+assert st["gate"] == "approve_hero_still"
+assert st["artifacts"].get("stills") == ["hero_scene-2.png"]
+assert st["artifacts"].get("preview") == ["hero_scene-2.png"]
+assert st["artifacts"].get("hero_scene_id") == "scene-2"
+assert st.get("look_notes") == ["warmer light"]
+assert "HERO" in (st.get("question") or ""), st.get("question")
+assert "Approve assets" not in (st.get("question") or "")
+print("[ok] _sync hero_still: single PNG preview, not storyboard")
+
+# 3c2) stills-only with NO phase → approve_stills + storyboard (never approve_assets)
+JOBSO = "jStillsOnlyNoPhase"
+projso = run._projects_dir / JOBSO
+(projso / "assets" / "images").mkdir(parents=True, exist_ok=True)
+(projso / "artifacts").mkdir(parents=True, exist_ok=True)
+_Image.new("RGB", (40, 40), (9, 9, 9)).save(projso / "assets" / "images" / "scene-1.png")
+_Image.new("RGB", (40, 40), (8, 8, 8)).save(projso / "assets" / "images" / "scene-2.png")
+_fake_latest.cp = {"stage": "assets", "status": "awaiting_human", "artifacts": {},
+                   "pipeline_type": "panda-video"}
+st = run._sync({"job_id": JOBSO, "pipeline": "panda-video"})
+assert st["gate"] == "approve_stills", st
+assert st["artifacts"].get("preview") == ["storyboard.png"], st["artifacts"].get("preview")
+assert store.artifact_path(JOBSO, "storyboard.png").is_file()
+assert "stills" in (st.get("question") or "").lower()
+assert "clips + audio" not in (st.get("question") or "")
+print("[ok] _sync stills-only no phase → approve_stills + storyboard")
+
+# 3c3) metadata.partial_progress.phase=stills (agent nest mistake) → approve_stills
+_fake_latest.cp = {"stage": "assets", "status": "awaiting_human", "artifacts": {},
+                   "metadata": {"partial_progress": {"phase": "stills", "hero_scene_id": "scene-3"}},
+                   "pipeline_type": "panda-video"}
+st = run._sync({"job_id": JOBSO, "pipeline": "panda-video"})
+assert st["gate"] == "approve_stills", st
+assert st["artifacts"].get("hero_scene_id") == "scene-3"
+print("[ok] _sync metadata.partial_progress.phase fallback")
+
+# 3c4) completed assets + stills-only recover → approve_stills + stills question
+JOBREC2 = "jCompletedStillsRecover"
+projrec2 = run._projects_dir / JOBREC2
+(projrec2 / "assets" / "images").mkdir(parents=True, exist_ok=True)
+(projrec2 / "artifacts").mkdir(parents=True, exist_ok=True)
+_Image.new("RGB", (40, 40), (3, 3, 3)).save(projrec2 / "assets" / "images" / "still_0.png")
+_fake_latest.cp = {"stage": "assets", "status": "completed", "artifacts": {},
+                   "pipeline_type": "panda-video"}
+# stub write so backfill does not require a real project marker
+_bf = []
+_real_write = cp.write_checkpoint
+def _capture_write(*a, **kw):
+    _bf.append(kw.get("partial_progress"))
+    try:
+        return _real_write(*a, **kw)
+    except Exception:
+        return None
+cp.write_checkpoint = _capture_write
+st = run._sync({"job_id": JOBREC2, "pipeline": "panda-video"})
+cp.write_checkpoint = _real_write
+assert st["gate"] == "approve_stills", st
+assert st["artifacts"].get("preview") == ["storyboard.png"]
+assert "HERO" not in (st.get("question") or "")
+assert "stills" in (st.get("question") or "").lower()
+print("[ok] completed stills-only → approve_stills + storyboard question")
+
+# 3d) ordered_still_basenames: hero named hero_scene-3 must not sort before scene-1
+from dify_launcher.storyboard_preview import ordered_still_basenames
+_ord_arts = {
+    "stills": ["hero_scene-3.png", "still_scene-1.png", "still_scene-2.png"],
+    "scene_plan": {"version": "1.0", "scenes": [
+        {"id": "scene-1"}, {"id": "scene-2"}, {"id": "scene-3", "hero_moment": True},
+    ]},
+}
+assert ordered_still_basenames(_ord_arts) == [
+    "still_scene-1.png", "still_scene-2.png", "hero_scene-3.png",
+], ordered_still_basenames(_ord_arts)
+print("[ok] ordered_still_basenames matches scene_plan order")
+
+# 3e) hero-approved prompt keeps PNG + look ref + look_notes + top-level phase=stills
+hap = run._hero_approved_prompt("jH", {"look_notes": ["warmer"], "artifacts": {
+    "hero_scene_id": "scene-2"}})
+assert "KEEP the approved hero PNG" in hap
+assert "style/look" in hap.lower() or "LOOK LOCK" in hap
+assert "warmer" in hap
+assert "hero_scene_id=scene-2" in hap
+assert '"phase":"stills"' in hap
+assert "top-level" in hap
+phases = run._assets_phases_text(False, hero_still=True)
+assert "hero_still" in phases and "PHASE 0" in phases
+assert "hero_still" not in run._assets_phases_text(False, hero_still=False)
+print("[ok] hero-approved prompt + assets phases text")
+
 
 # 4) _approve_stage writes completed + human_approved ----------------------
 captured = {}
@@ -359,6 +515,105 @@ cp.write_checkpoint = _fake_write
 run._approve_stage("jX", "assets")
 assert captured == {"stage": "assets", "status": "completed", "approved": True}, captured
 print("[ok] _approve_stage flips checkpoint to completed + human_approved")
+
+# 4b) _approve_stage is a no-op for stills-only video (must not skip storyboard)
+JOBGUARD = "jApproveGuard"
+projg = run._projects_dir / JOBGUARD
+(projg / "assets" / "images").mkdir(parents=True, exist_ok=True)
+(projg / "artifacts").mkdir(parents=True, exist_ok=True)
+_Image.new("RGB", (20, 20), (1, 1, 1)).save(projg / "assets" / "images" / "scene-1.png")
+captured.clear()
+cp.read_checkpoint = lambda _pd, _jid, stage: {"artifacts": {}}
+run._approve_stage(JOBGUARD, "assets", "panda-video")
+assert captured == {}, f"must not complete stills-only assets: {captured}"
+# carousel stills-terminal may complete
+captured.clear()
+run._approve_stage(JOBGUARD, "assets", "panda-carousel")
+assert captured.get("status") == "completed", captured
+print("[ok] _approve_stage refuses stills-only video; carousel still completes")
+
+# 4c) hero resume never calls _approve_stage
+_approve_calls = []
+_real_approve = run._approve_stage
+run._approve_stage = lambda *a, **k: _approve_calls.append((a, k))  # type: ignore[method-assign]
+_agent_calls_h = []
+run._run_agent = lambda *a, **k: _agent_calls_h.append((a, k))  # type: ignore[method-assign]
+_fake_latest.cp = {"stage": "assets", "status": "awaiting_human",
+                   "partial_progress": {"phase": "stills"}, "artifacts": {}}
+_fake_next.val = "edit"
+st_h = run.resume(
+    {"job_id": JOBH, "gate": "approve_hero_still", "status": "awaiting_human",
+     "pipeline": "panda-video", "artifacts": {"stills": ["hero_scene-2.png"],
+                                              "hero_scene_id": "scene-2"},
+     "look_notes": []},
+    {"decision": "approve"})
+run._approve_stage = _real_approve  # type: ignore[method-assign]
+assert not _approve_calls, _approve_calls
+assert _agent_calls_h and "stills" in str(_agent_calls_h[0]), _agent_calls_h
+print("[ok] hero approve resume: no _approve_stage; runs stills leg")
+
+# 4c2) after hero approve, stale hero_still checkpoint triggers continue (not UI loop)
+_labels_ah = []
+_round_ah = {"n": 0}
+_real_sync2 = run._sync
+_real_run2 = run._run_agent
+
+def _sync_stale_hero(state):
+    _round_ah["n"] += 1
+    # first sync after initial stills leg + each continue until n>=3 → stills
+    if _round_ah["n"] < 3:
+        return {**state, "status": "awaiting_human", "gate": "approve_hero_still",
+                "stage": "assets", "question": "Approve this HERO still", "artifacts": {}}
+    return {**state, "status": "awaiting_human", "gate": "approve_stills",
+            "stage": "assets", "question": "Approve the stills", "artifacts": {}}
+
+run._sync = _sync_stale_hero  # type: ignore[method-assign]
+run._run_agent = (lambda prompt, job_id="", label="":
+                  _labels_ah.append(label))  # type: ignore[method-assign]
+os.environ["CLAUDE_STILLS_AFTER_HERO_MAX"] = "5"
+st_ah = run._run_after_hero_approved(
+    {"job_id": "jAfterHero", "pipeline": "panda-carousel", "options": {},
+     "artifacts": {"hero_scene_id": "slide-2"}, "look_notes": []})
+run._sync = _real_sync2  # type: ignore[method-assign]
+run._run_agent = _real_run2  # type: ignore[method-assign]
+assert st_ah["gate"] == "approve_stills", st_ah
+assert "stills" in _labels_ah[0]
+assert any("stills_after_hero" in str(x) for x in _labels_ah), _labels_ah
+cont = run._stills_after_hero_continue_prompt("jAfterHero", {"pipeline": "panda-carousel"})
+assert "ALREADY APPROVED" in cont and "Do NOT ask" in cont
+assert "Do NOT stop to ask" in run._hero_approved_prompt("jH", {})
+print("[ok] _run_after_hero_approved continues past stale hero_still")
+
+# 4d) _run_until_assets_gate continues while assets stay in_progress
+_cont_labels = []
+_real_sync = run._sync
+_real_run = run._run_agent
+_real_ip = run._assets_cp_in_progress
+_round = {"n": 0}
+
+def _sync_cont(state):
+    _round["n"] += 1
+    if _round["n"] < 3:
+        return {**state, "status": "running", "gate": None, "stage": "assets",
+                "question": "in progress", "artifacts": {}}
+    return {**state, "status": "awaiting_human", "gate": "approve_assets", "stage": "assets",
+            "question": "Approve the generated media", "artifacts": {"clips": ["c1.mp4"]}}
+
+run._sync = _sync_cont  # type: ignore[method-assign]
+run._run_agent = (lambda prompt, job_id="", label="":
+                  _cont_labels.append(label))  # type: ignore[method-assign]
+run._assets_cp_in_progress = (lambda jid: _round["n"] < 3)  # type: ignore[method-assign]
+os.environ["CLAUDE_IN_PROGRESS_MAX"] = "5"
+st_c = run._run_until_assets_gate(
+    {"job_id": "jCont", "pipeline": "panda-video", "options": {}}, label="assets_media")
+run._sync = _real_sync  # type: ignore[method-assign]
+run._run_agent = _real_run  # type: ignore[method-assign]
+run._assets_cp_in_progress = _real_ip  # type: ignore[method-assign]
+assert st_c["gate"] == "approve_assets", st_c
+assert st_c["status"] == "awaiting_human"
+assert any("continue" in str(x) for x in _cont_labels), _cont_labels
+assert "IN PROGRESS" in run._assets_in_progress_prompt("jCont")
+print("[ok] _run_until_assets_gate re-invokes continue while in_progress")
 
 # 5) legacy gate on resume -> clear migration message (no agent run) --------
 mig = run.resume({"job_id": "jLegacy", "gate": "approve_storyboard", "artifacts": {}},
@@ -441,6 +696,34 @@ ovr = run._start_prompt("jV", "a video", {"voice_id": "OVERRIDE123"}, "panda-vid
 assert "OVERRIDE123" in ovr
 print("[ok] VOICE LOCK: literal id in start + media legs; unresolvable pair blocks")
 
+# Mandarin brief wins over stale language:en
+_zh_brief = ("买哪个套餐才能在中国和美国都能用啊？用 Panda Mobile 就好啦，有 OnePool，"
+             "一个流量池，中美通用。限时闪购。")
+assert R._brief_looks_mandarin(_zh_brief)
+assert not R._brief_looks_mandarin("Panda Mobile eSIM before you fly")
+opts_c, coerced = R._coerce_language_from_brief({"language": "en", "narrator": "panda"}, _zh_brief)
+assert coerced and opts_c["language"] == "zh"
+assert "MI36FIkp9wRP7cpWKPTl" in R._voice_line(opts_c)
+opts_en, coerced_en = R._coerce_language_from_brief(
+    {"language": "en", "narrator": "panda"}, "Panda waves at the airport")
+assert not coerced_en and opts_en["language"] == "en"
+assert "hMSPJ6ja4HIrFHhCGCMl" in R._voice_line(opts_en)
+opts_vid, coerced_vid = R._coerce_language_from_brief(
+    {"language": "en", "voice_id": "KEEP_ME"}, _zh_brief)
+assert not coerced_vid and opts_vid.get("voice_id") == "KEEP_ME"
+opts_zh, coerced_zh = R._coerce_language_from_brief({"language": "zh"}, _zh_brief)
+assert not coerced_zh and opts_zh["language"] == "zh"
+st_coerce = {"brief": _zh_brief, "options": {"language": "en", "narrator": "panda"}}
+assert R._apply_language_coerce(st_coerce) is True
+assert st_coerce["options"]["language"] == "zh" and st_coerce.get("language_coerced_from_brief")
+sp_zh = run._start_prompt("jZh", _zh_brief, st_coerce["options"], "panda-video",
+                          language_coerced=True)
+assert "language: zh" in sp_zh
+assert "MI36FIkp9wRP7cpWKPTl" in sp_zh
+assert "Do NOT stop to re-ask language" in sp_zh
+assert "stale language:en" in sp_zh
+print("[ok] Mandarin brief coerces language:en → zh; VOICE LOCK + start prompt note")
+
 # 7) _pipeline_of / gate-collapse helpers -----------------------------------
 assert R._pipeline_of({}) == "panda-video"
 assert R._pipeline_of({"pipeline": "panda-carousel"}) == "panda-carousel"
@@ -502,5 +785,32 @@ p_other = run._revise_prompt("jS", "script", {"answer": "shorter"},
                              state={"gate": "approve_script"})
 assert "MODE=" not in p_other
 print("[ok] stills revise prompt: EDIT vs FRESH + still path")
+
+import subprocess as _subprocess
+from types import SimpleNamespace as _SimpleNamespace
+
+_real_subprocess_run = _subprocess.run
+
+# stdin must be DEVNULL (avoids Claude's 3s empty-pipe warning masking real errors)
+_stdin_run = R.ClaudeCodeRunner()
+_stdin_kwargs = []
+def _fake_run_check_stdin(cmd, **kwargs):
+    _stdin_kwargs.append(kwargs)
+    return _SimpleNamespace(returncode=0, stdout="ok", stderr="")
+_subprocess.run = _fake_run_check_stdin
+try:
+    _stdin_run._run_agent("ping", "job_stdin", "stdin_check")
+finally:
+    _subprocess.run = _real_subprocess_run
+assert _stdin_kwargs and _stdin_kwargs[0].get("stdin") is _subprocess.DEVNULL, _stdin_kwargs
+fail_txt = _stdin_run._agent_failure_text(_SimpleNamespace(
+    stdout="Failed to authenticate: OAuth session expired and could not be refreshed",
+    stderr="Warning: no stdin data received in 3s, proceeding without it. "
+           "If piping from a slow command, redirect stdin explicitly: < /dev/null to skip, "
+           "or wait longer.\n",
+))
+assert "OAuth session expired" in fail_txt
+assert "no stdin data received" not in fail_txt.lower()
+print("[ok] Claude stdin=DEVNULL; auth errors not masked by stdin warning")
 
 print("\n[PASS] ClaudeCodeRunner adapter: mapping, mirroring, sync, approval, migration")

@@ -2,7 +2,8 @@ name: panda-carousel
 version: "1.0"
 description: >
   Panda Mobile stills-only carousel pipeline. Truncated sibling of panda-video:
-  idea → script (GATE 1) → scene_plan (GATE 2) → assets stills only (GATE 3) → done.
+  idea → script (GATE 1) → scene_plan (GATE 2) → [hero still GATE 2.5] → assets stills (GATE 3) → done.
+  Hero look-lock default on (`hero_still:false` to skip). GATE 3 is **terminal**.
   No motion_sample, clips, TTS, music, edit, or compose. The job reaches `done`
   once stills are approved. Branding (UGC → BGC wordmark) is a separate on-demand
   POST /jobs/{id}/brand pass after approval — never baked into generation.
@@ -83,8 +84,9 @@ stages:
       - Copy hierarchy (hook / content / CTA) is specified via narrative_role
       - Panda identity / Element ids / composition are specified as plan requirements
 
-  # ---- GATE 3 : STILLS ONLY — terminal. Approving this completes the job. ----
-  # partial_progress.phase="stills" -> approve_stills. No motion_sample, no clips.
+  # ---- GATES 2.5 & 3 : STILLS — hero look-lock (default) then full stills; GATE 3 terminal ----
+  # PHASE 0 partial_progress.phase="hero_still" -> approve_hero_still (opt out: hero_still:false)
+  # PHASE 1 partial_progress.phase="stills" -> approve_stills. No motion_sample, no clips.
   # BUDGET hold (phase="budget_hold") still applies if a stills batch would exceed
   # max_higgsfield_credits. On approval the launcher completes the assets stage
   # and the job is done (get_next_stage is None). Branding is POST /jobs/{id}/brand.

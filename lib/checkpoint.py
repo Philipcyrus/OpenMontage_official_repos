@@ -434,6 +434,7 @@ def write_checkpoint(
     cost_snapshot: Optional[dict] = None,
     error: Optional[str] = None,
     metadata: Optional[dict] = None,
+    partial_progress: Optional[dict] = None,
 ) -> Path:
     """Write a checkpoint file for a pipeline stage."""
     # Backfill identity fields from the project marker so omitted kwargs
@@ -522,6 +523,8 @@ def write_checkpoint(
         checkpoint["error"] = error
     if metadata is not None:
         checkpoint["metadata"] = metadata
+    if partial_progress is not None:
+        checkpoint["partial_progress"] = partial_progress
 
     # Merge decision_log: if this checkpoint carries new decisions,
     # append them to the project-level decision log file, then write the

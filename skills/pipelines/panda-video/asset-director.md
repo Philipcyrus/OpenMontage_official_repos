@@ -1,16 +1,18 @@
 # Asset Director — Panda Video Pipeline
 
 > Best-of-both: upstream's single asset-generation stage (everything recorded in
-> `asset_manifest`), PLUS a Panda **cost gate**. This stage runs in **TWO human-reviewed
-> phases** — STILLS FIRST (approve the look before any expensive video), then the full media.
+> `asset_manifest`), PLUS Panda **cost gates**. Human-reviewed phases — optional
+> HERO STILL look-lock, then STILLS, then optional motion sample, then full media.
 
 ## When To Use
 
 You have an approved `scene_plan` (with `required_assets` per scene) and the approved `script`.
 Your job is to generate all media — stills, motion clips, narration, music — honoring Panda
-brand + character consistency, recording everything in `asset_manifest`. You do it in **two
-phases with a human gate at each**:
-- **PHASE 1 (GATE 3 — approve_stills):** generate ONLY the stills, then STOP. No video yet.
+brand + character consistency, recording everything in `asset_manifest`. Phases:
+- **PHASE 0 (GATE 2.5 — approve_hero_still):** when the job option `hero_still` is on
+  (**default on**; pass `false` to opt out), generate ONLY ONE hero still, then STOP.
+- **PHASE 1 (GATE 3 — approve_stills):** generate remaining stills under LOOK LOCK from the
+  approved hero (or all stills when `hero_still` is off), then STOP. No video yet.
 - **PHASE 2 (GATE 3.5 — approve_motion_sample):** when the job option `motion_sample` is on
   (default **off**; pass `true` to opt in), animate ONE hero still into a single sample clip so
   the motion/animation is approved before the full batch, then STOP. Skipped when `motion_sample`
@@ -36,49 +38,35 @@ Walk every scene in `scene_plan`. For each `required_assets` entry create an ass
 Expect **one image** `required_asset` per scene that needs a still — no base-plate + restack
 chain as separate generates.
 
-### 2. PHASE 1 — generate STILLS ONLY, then STOP (GATE 3, approve_stills)
-Generate ONE keyframe still per scene that needs an image — on-brand (`styles/panda.yaml`) and
-character-consistent. **Follow the binding rules in `skills/meta/higgsfield-mcp-bridge.md`:**
-**CHARACTER LOCK**, **STILLS 2-TAKE HARD RULE**, and **2D MEDIUM LOCK**. Summary:
+### 2. PHASE 0 — generate ONE HERO STILL, then STOP (GATE 2.5, approve_hero_still)
+**Only when the `hero_still` job option is on (default on; pass `false` to opt out).**
+Generate ONE still for the `hero_moment` scene (else scene 1). CHARACTER LOCK + 2D MEDIUM +
+STILLS 2-TAKE on that still only. Write the assets checkpoint `status='awaiting_human'` with
+**top-level** `partial_progress={"phase":"hero_still","hero_scene_id":"<id>","look_notes":[]}`
+(not nested under `asset_manifest.metadata`) and STOP. Preview is the single PNG (not the
+storyboard grid). On revise: update the one still + append the note to `look_notes`; re-checkpoint
+with `phase:"hero_still"` and STOP. Do **not** generate remaining stills or video yet.
 
-- Attach `customer_reference_element_id` / `panda_reference_element_id` from
-  `config/panda-elements.json` in the MCP media / `image_references` slot whenever that
-  role appears. Never invent a new human or panda. Never put Element UUIDs in the prompt
-  sentence. Log the IDs used on each `asset_manifest` row.
-- Max **2 paid `generate_image` calls per scene** this round. Take 1 = shipped still
-  (both characters in one T2I if needed). If unusable, take 2 = **i2i of take 1**
-  (one change), never a fresh T2I. Then STOP and gate — ship take 2 if it exists, else
-  take 1. Flag remaining defects in the gate question; do not generate a third time.
-- Default medium is **2D flat** per `styles/panda.yaml`. Do not mix 3D human + 2D panda.
-- Archive a rejected take 1 as `rejected_*` if take 2 ships.
+### 3. PHASE 1 — generate remaining STILLS under LOOK LOCK, then STOP (GATE 3, approve_stills)
+After the hero is approved (or immediately when `hero_still` is off):
+- When coming from an approved hero: **KEEP** the approved hero PNG. Generate only the other
+  scenes. Import the hero as a **style/look** reference (not a start-frame that copies composition).
+  Bake accumulated `look_notes` into every remaining prompt.
+- When `hero_still` is off: generate one still per scene as before.
+- Per remaining scene: same CHARACTER LOCK + 2D MEDIUM + STILLS 2-TAKE.
 
-**Generate NO video and NO audio yet.** Then write the
-assets checkpoint with `status='awaiting_human'` **and `partial_progress={"phase": "stills"}`**
-and STOP (end your turn). The launcher surfaces this as the **approve_stills** gate.
-Optionally also write a **contact sheet** of the stills as a **review aid only** (never a scene
-still, never in `scene_plan`).
+**Generate NO video and NO audio yet.** Then write the assets checkpoint with
+`status='awaiting_human'` **and top-level `partial_progress={"phase": "stills"}`**
+(not nested under `asset_manifest.metadata`) and STOP.
+The launcher surfaces this as the **approve_stills** gate (storyboard grid preview).
+Do **not** mark the assets stage `completed` at this point — that skips the storyboard gate.
 
-> Why stills-first: image generation is cheap; image→video is expensive. Approving the look
-> (on-model panda, composition) here prevents wasted video spend on a bad still.
+On "request revision" at this gate, honor `mode` (`fresh` | `edit`). Each flagged shot gets a
+**new** 2-take budget; still honor LOOK LOCK from the approved hero. Replace only flagged
+files + `asset_manifest` rows. Re-checkpoint with **top-level**
+`partial_progress={"phase":"stills"}`. Do **not** proceed to video until the stills are approved.
 
-On "request revision" at this gate, honor `mode` (`fresh` | `edit`; infer if
-omitted — see `skills/meta/higgsfield-mcp-bridge.md`). Each flagged shot gets a **new**
-2-take budget under the same hard rule:
-
-- **fresh:** `generate_image` from text + Element IDs only (media slot). Do not pass the old PNG.
-- **edit:** load the flagged still from disk, `media_import` it (not
-  `media_import_url` — localhost artifact URLs are not fetchable), then
-  `generate_image` with that `media_id` and a preservation prompt (keep
-  composition / character / layout / type; apply only the note). Same aspect
-  ratio. If the model rejects the source still, surface a blocker — do not
-  silently switch to fresh.
-
-Regenerate only the flagged scenes (`shots`). Replace those files + their
-`asset_manifest` rows; leave other slides untouched. Re-checkpoint with
-**top-level** `partial_progress={"phase":"stills"}` (not nested under
-`metadata`). Do **not** proceed to video until the stills are approved.
-
-### 3. PHASE 2 — MOTION SAMPLE (one hero clip), then STOP (GATE 3.5, approve_motion_sample)
+### 4. PHASE 2 — MOTION SAMPLE (one hero clip), then STOP (GATE 3.5, approve_motion_sample)
 **Only when the `motion_sample` job option is on (default off; pass `true` to opt in).** After the stills are approved,
 animate ONE representative **hero** still (the most important scene, else scene 1) into a **single**
 sample clip via the Higgsfield MCP bridge (`higgsfield_mcp_video`, image_to_video). The i2v
@@ -96,7 +84,7 @@ the rest until the motion is approved (max ~3 sample iterations, then escalate).
 
 > If `motion_sample` is off, skip this phase entirely — go straight from approved stills to PHASE 3.
 
-### 4. PHASE 3 — animate remaining stills + audio, then STOP (GATE 4, approve_assets)
+### 5. PHASE 3 — animate remaining stills + audio, then STOP (GATE 4, approve_assets)
 After the motion sample is approved (or straight after the stills when `motion_sample` is off):
 - **Motion clips**: animate the remaining approved stills into clips via the Higgsfield MCP bridge
   (`higgsfield_mcp_video`, image_to_video), reusing the **same motion approach** (model + motion
