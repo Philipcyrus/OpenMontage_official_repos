@@ -1942,7 +1942,7 @@ class ClaudeCodeRunner(Runner):
             "skills/meta/higgsfield-mcp-bridge.md (CHARACTER LOCK, STILLS 2-TAKE HARD RULE, "
             "2D MEDIUM LOCK).\n"
             f"{voice_line}\n{lang_note}{music_line}\n{runtime_line}\n{budget_line}\n\n"
-            "Follow pipeline_defs/panda-video.yaml, skills/pipelines/panda-video/*-director.md, "
+            "Follow pipeline_defs/panda-video.yaml (it names each stage's director skill) "
             "and skills/meta/checkpoint-protocol.md. Execute stages in "
             "order. At every stage whose manifest sets human_approval_default: true, write the "
             "checkpoint with status='awaiting_human' and STOP (end your turn) — do NOT "
