@@ -588,6 +588,22 @@ class TestAgentContextFiles:
             assert "Do NOT read AGENT_GUIDE.md" in contents, f"{path} lost the leg carve-out"
             assert "MANDATORY" in contents, f"{path} lost the interactive mandate"
 
+    def test_launcher_start_prompts_do_not_countermand_the_carveout(self):
+        """The carve-out lives in the auto-loaded files, but the leg prompt is a stronger
+        channel than either of them.
+
+        Same failure shape as the test above: exempting one channel leaves the order standing
+        from another. While `_start_prompt` / `_carousel_start_prompt` / `_image_start_prompt`
+        still said "Follow AGENT_GUIDE.md", every job's FIRST leg was told to read the 46KB
+        guide that CLAUDE.md had just told it to skip — so the 2026-08-29 exemption never
+        reached leg 1 of any pipeline. Route legs to their manifest and stage director instead.
+        """
+        contents = (PROJECT_ROOT / "dify_launcher" / "runner.py").read_text(encoding="utf-8")
+        assert "Follow AGENT_GUIDE.md" not in contents, (
+            "a launcher start prompt orders AGENT_GUIDE.md again — the leg carve-out in "
+            "CLAUDE.md and AGENTS.md cannot override the prompt that starts the leg"
+        )
+
 
 class TestCheckpointProtocolDoc:
     """`skills/meta/checkpoint-protocol.md` must carry the REAL signatures.
