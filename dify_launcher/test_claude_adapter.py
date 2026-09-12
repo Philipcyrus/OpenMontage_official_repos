@@ -615,6 +615,92 @@ assert any("continue" in str(x) for x in _cont_labels), _cont_labels
 assert "IN PROGRESS" in run._assets_in_progress_prompt("jCont")
 print("[ok] _run_until_assets_gate re-invokes continue while in_progress")
 
+# 4e) _run_until_final_gate: stuck running → continue → fail (never hung running)
+_fc_labels = []
+_real_sync_fc = run._sync
+_real_run_fc = run._run_agent
+_real_stuck = run._stuck_before_final_gate
+_round_fc = {"n": 0}
+
+def _sync_stuck_forever(state):
+    # Always "stage assets completed; next: edit" — the hang from job_84e41f0738fc
+    return {**state, "status": "running", "gate": None, "stage": "assets",
+            "question": "stage assets completed; next: edit", "artifacts": {}}
+
+run._sync = _sync_stuck_forever  # type: ignore[method-assign]
+run._run_agent = (lambda prompt, job_id="", label="":
+                  _fc_labels.append(label))  # type: ignore[method-assign]
+run._stuck_before_final_gate = (lambda st: True)  # type: ignore[method-assign]
+os.environ["CLAUDE_EDIT_COMPOSE_MAX"] = "2"
+st_fail = run._run_until_final_gate(
+    {"job_id": "jEditHang", "pipeline": "panda-video", "options": {}, "artifacts": {}})
+run._sync = _real_sync_fc  # type: ignore[method-assign]
+run._run_agent = _real_run_fc  # type: ignore[method-assign]
+run._stuck_before_final_gate = _real_stuck  # type: ignore[method-assign]
+assert st_fail["status"] == "failed", st_fail
+assert st_fail.get("gate") is None
+assert "approve_final" in (st_fail.get("question") or "")
+assert _fc_labels[0] == "edit", _fc_labels
+assert any("edit_continue_" in str(x) for x in _fc_labels), _fc_labels
+assert len([x for x in _fc_labels if str(x).startswith("edit_continue_")]) == 2
+aap = run._assets_approved_prompt("jEditHang", "panda-video")
+assert "Do NOT ask" in aap or "Do NOT stop to ask" in aap, aap
+assert "extend" in aap.lower() and ("hold" in aap.lower() or "PACING" in aap)
+assert "Do NOT ask" in run._edit_compose_continue_prompt("jEditHang", "panda-video")
+cont_vid = run._continue_prompt("jEditHang", "panda-video")
+assert "ungated" in cont_vid.lower() or "Do NOT" in cont_vid
+print("[ok] _run_until_final_gate fails instead of hung running")
+
+# 4f) _run_until_final_gate stops when approve_final appears
+_fc2_labels = []
+_real_sync_fc2 = run._sync
+_real_run_fc2 = run._run_agent
+_real_stuck2 = run._stuck_before_final_gate
+_round_fc2 = {"n": 0}
+
+def _sync_then_final(state):
+    _round_fc2["n"] += 1
+    if _round_fc2["n"] < 2:
+        return {**state, "status": "running", "gate": None, "stage": "assets",
+                "question": "stage assets completed; next: edit", "artifacts": {}}
+    return {**state, "status": "awaiting_human", "gate": "approve_final", "stage": "compose",
+            "question": "Approve the finished (unbranded) video", "artifacts": {"final": "final.mp4"}}
+
+def _stuck_until_final(st):
+    return st.get("status") == "running" and st.get("gate") is None
+
+run._sync = _sync_then_final  # type: ignore[method-assign]
+run._run_agent = (lambda prompt, job_id="", label="":
+                  _fc2_labels.append(label))  # type: ignore[method-assign]
+run._stuck_before_final_gate = _stuck_until_final  # type: ignore[method-assign]
+os.environ["CLAUDE_EDIT_COMPOSE_MAX"] = "5"
+st_ok = run._run_until_final_gate(
+    {"job_id": "jEditOk", "pipeline": "panda-video", "options": {}, "artifacts": {}})
+run._sync = _real_sync_fc2  # type: ignore[method-assign]
+run._run_agent = _real_run_fc2  # type: ignore[method-assign]
+run._stuck_before_final_gate = _real_stuck2  # type: ignore[method-assign]
+assert st_ok["status"] == "awaiting_human" and st_ok["gate"] == "approve_final", st_ok
+assert _fc2_labels[0] == "edit"
+assert any("edit_continue_" in str(x) for x in _fc2_labels), _fc2_labels
+print("[ok] _run_until_final_gate stops at approve_final")
+
+# 4g) approve_assets resume routes through _run_until_final_gate (not bare continue)
+_final_gate_calls = []
+_real_final = run._run_until_final_gate
+_real_approve_aa = run._approve_stage
+run._approve_stage = lambda *a, **k: None  # type: ignore[method-assign]
+run._run_until_final_gate = (lambda st: (_final_gate_calls.append(st) or
+    {**st, "status": "awaiting_human", "gate": "approve_final", "stage": "compose"}))  # type: ignore[method-assign]
+st_aa = run.resume(
+    {"job_id": "jAA", "gate": "approve_assets", "status": "awaiting_human",
+     "pipeline": "panda-video", "stage": "assets", "artifacts": {"clips": ["c.mp4"]}},
+    {"decision": "approve"})
+run._run_until_final_gate = _real_final  # type: ignore[method-assign]
+run._approve_stage = _real_approve_aa  # type: ignore[method-assign]
+assert _final_gate_calls, "approve_assets must call _run_until_final_gate"
+assert st_aa["gate"] == "approve_final"
+print("[ok] approve_assets resume uses _run_until_final_gate")
+
 # 5) legacy gate on resume -> clear migration message (no agent run) --------
 mig = run.resume({"job_id": "jLegacy", "gate": "approve_storyboard", "artifacts": {}},
                  {"decision": "approve"})

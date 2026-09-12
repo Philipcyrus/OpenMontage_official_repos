@@ -32,14 +32,14 @@ extensions:
   custom_tools: true               # we add montage_svc_compose + the higgsfield_mcp bridge
 
 required_skills:
-  # NOTE: idea/script/edit reuse hybrid's directors (functional in production). Panda-specific
-  # versions are a future specialization, not a blocker.
+  # NOTE: idea/script reuse hybrid's directors where noted. Edit is panda-video-specific
+  # (ungated → compose; VO overrun default) — not hybrid footage-led edit.
   - pipelines/hybrid/executive-producer
   - pipelines/panda-video/idea-director          # OUR internal idea (no gate); replaces hybrid's gated one
   - pipelines/hybrid/script-director
   - pipelines/panda-video/scene-plan-director    # OUR text-only scene planner (no media)
   - pipelines/panda-video/asset-director         # OUR asset generator (all media -> asset_manifest)
-  - pipelines/hybrid/edit-director
+  - pipelines/panda-video/edit-director          # OUR ungated edit → compose (not hybrid footage edit)
   - pipelines/panda-video/compose-director       # OUR runtime-routed compose (ffmpeg/remotion/hyperframes)
   - meta/higgsfield-mcp-bridge                   # OUR bridge protocol (ported from OpenMontage-main)
   - meta/reviewer
@@ -141,7 +141,7 @@ stages:
   # on-box availability). Compose reads it and routes. Carry it forward UNCHANGED unless a
   # render_runtime_selection decision is logged (silent swap = governance violation).
   - name: edit
-    skill: pipelines/hybrid/edit-director
+    skill: pipelines/panda-video/edit-director
     required_artifacts_in:
       - scene_plan
       - asset_manifest

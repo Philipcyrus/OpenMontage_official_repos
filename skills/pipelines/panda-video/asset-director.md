@@ -101,6 +101,10 @@ Then write the assets checkpoint `status='awaiting_human'` **without** any phase
 The launcher surfaces this as the **approve_assets** gate. On "request revision" here, regenerate
 only the flagged shots (`response.shots`).
 
+Approving GATE 4 **implies** the VO-overrun default for compose: if narration still overruns a
+scene slot (PACING RISK), extend that scene's on-screen hold so locked CTA copy finishes — do
+not treat approval as leaving an open a/b/c question for the edit leg.
+
 ### 5. Character and voice consistency
 The panda mascot must look identical across every still/clip. Always attach the panda master
 Element id from `config/panda-elements.json` in the **media slot**; use the customer Element
