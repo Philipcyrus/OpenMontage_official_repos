@@ -1376,6 +1376,14 @@ class ClaudeCodeRunner(Runner):
                 job_id, "motion_sample_revise")
             return self._run_until_assets_gate(state, label="motion_sample_revise")
 
+        # Approving full media must run edit (ungated) → compose and land on approve_final.
+        # A single continue leg that asks a question and exits leaves status=running/gate=null
+        # (Dify "Agent Door sent no reply"). Cap retries then fail clearly — same pattern as
+        # _run_after_hero_approved.
+        if gate == "approve_assets" and decision == "approve":
+            self._approve_stage(job_id, stage, _pipeline_of(state))
+            return self._run_until_final_gate(state)
+
         if decision == "approve":
             self._approve_stage(job_id, stage, _pipeline_of(state))
             # Approving the LAST gate finishes the job — there is no next stage to run, so do
@@ -1544,6 +1552,44 @@ class ClaudeCodeRunner(Runner):
                           "has phase=hero_still after "
                           f"{max_extra} continue attempt(s). The agent stopped without writing "
                           "partial_progress.phase=stills — start a new job or retry respond."),
+            )
+        return state
+
+    def _stuck_before_final_gate(self, state: dict[str, Any]) -> bool:
+        """True when clip approve left us running with no gate (edit/compose not yet awaiting_human)."""
+        if state.get("status") != "running" or state.get("gate") is not None:
+            return False
+        from lib import checkpoint as cp
+        nxt = cp.get_next_stage(self._projects_dir, state["job_id"], _pipeline_of(state))
+        return nxt in ("edit", "compose")
+
+    def _run_until_final_gate(self, state: dict[str, Any]) -> dict[str, Any]:
+        """After approve_assets: run edit → compose until approve_final (or fail).
+
+        Seen on job_84e41f0738fc: the edit leg asked about a VO overrun and exited without a
+        checkpoint. _sync then left status=running / gate=null / \"stage assets completed; next:
+        edit\" — Dify cannot /respond and shows \"Agent Door sent no reply\". Cap via
+        CLAUDE_EDIT_COMPOSE_MAX (default 3); never leave a dead running poll state.
+        """
+        job_id = state["job_id"]
+        pipeline = _pipeline_of(state)
+        self._run_agent(self._assets_approved_prompt(job_id, pipeline), job_id, "edit")
+        max_extra = int(os.environ.get("CLAUDE_EDIT_COMPOSE_MAX", "3"))
+        state = self._sync(state)
+        n = 0
+        while self._stuck_before_final_gate(state) and n < max_extra:
+            n += 1
+            self._run_agent(
+                self._edit_compose_continue_prompt(job_id, pipeline),
+                job_id, f"edit_continue_{n}")
+            state = self._sync(state)
+        if self._stuck_before_final_gate(state):
+            state.update(
+                status="failed", gate=None,
+                question=("edit/compose after clip approve did not reach approve_final: the agent "
+                          "stopped on an ungated stage without writing edit_decisions / "
+                          f"compose after {max_extra} continue attempt(s). Do not leave the job "
+                          "polling — start a new job or retry respond after fixing the hang."),
             )
         return state
 
@@ -2167,10 +2213,63 @@ class ClaudeCodeRunner(Runner):
         elif p == "panda-image":
             extra = (" This is a SINGLE still — do NOT generate video, TTS, music, or compose. "
                      "There is no script stage. After the one still the pipeline is complete.")
+        elif p == "panda-video":
+            extra = (
+                " On panda-video, `edit` is ungated (human_approval_default:false) — write "
+                "edit_decisions completed and continue into compose in the SAME leg. Do NOT "
+                "stop to ask clarifying questions and do NOT invent a gate. If asset_manifest "
+                "flags a VO/slot overrun (known_issues / PACING RISK), DEFAULT: extend that "
+                "scene's on-screen hold so locked CTA copy finishes; log it in decision_log; "
+                "do NOT shorten locked copy. Mute Kling's baked AAC on clips; all-top crop "
+                "off-spec 1076x1928 → 1080x1920. The next human gate is approve_final "
+                "(compose awaiting_human + final.mp4)."
+            )
         return (
             f"Continue the `{p}` pipeline for project_id: {job_id}. Read the latest "
             "checkpoint, proceed from the next stage, and STOP at the next human_approval gate "
             f"(status='awaiting_human', end your turn). If the pipeline is complete, finish.{extra}"
+        )
+
+    def _assets_approved_prompt(self, job_id: str, pipeline: Optional[str] = None) -> str:
+        """Prompt after GATE 4 (approve_assets): run ungated edit then compose → approve_final."""
+        p = pipeline or _DEFAULT_PIPELINE
+        return (
+            f"For project_id: {job_id}, the FULL MEDIA phase of the `assets` stage "
+            f"(GATE 4 / approve_assets) is APPROVED on the `{p}` pipeline. "
+            "Do NOT stop to ask the human a question. Do NOT invent a gate. "
+            "`edit` is ungated (human_approval_default:false) — the next human pause is "
+            "compose's approve_final only.\n\n"
+            "1. Read skills/pipelines/panda-video/edit-director.md and "
+            "skills/meta/checkpoint-protocol.md. Build edit_decisions from scene_plan + "
+            "asset_manifest (cut points, caption bands, render_runtime carried UNCHANGED). "
+            "Mute/discard the native AAC track baked into Higgsfield/Kling i2v clips before "
+            "mixing narration+music. Pre-conform off-spec 1076x1928 clips to 1080x1920 via "
+            "an all-top crop (not a centred cover-crop).\n"
+            "2. If asset_manifest.metadata.known_issues (or similar) still flags a VO/slot "
+            "overrun / PACING RISK: DEFAULT is extend that scene's on-screen hold so the "
+            "locked CTA narration finishes (total runtime may exceed the brief's nominal "
+            "seconds). Log the choice in decision_log. Do NOT shorten locked copy. Do NOT "
+            "wait for an a/b/c answer — GATE 4 approve already meant proceed.\n"
+            "3. Write the edit checkpoint status='completed' (ungated), then immediately "
+            "run compose per skills/pipelines/panda-video/compose-director.md "
+            "(panda_render for ffmpeg / render_runtime already locked). Verify final.mp4, "
+            "write render_report, checkpoint compose status='awaiting_human' for "
+            "approve_final, and END YOUR TURN.\n"
+            "Stdout questions are invisible to Dify — ending without an awaiting_human "
+            "checkpoint leaves the job stuck."
+        )
+
+    def _edit_compose_continue_prompt(self, job_id: str,
+                                      pipeline: Optional[str] = None) -> str:
+        """Re-nudge after a continue leg that asked/exited without reaching approve_final."""
+        p = pipeline or _DEFAULT_PIPELINE
+        return (
+            f"For project_id: {job_id} (`{p}`), clip/media approval ALREADY happened. You "
+            "previously stopped without reaching compose's approve_final gate. Do NOT ask "
+            "the human a question — decide and proceed. "
+            "If edit_decisions is missing, write it now (VO overrun → extend hold; mute "
+            "native clip audio; all-top crop). Then compose to final.mp4 and checkpoint "
+            "compose status='awaiting_human'. Do NOT leave status running with no gate."
         )
 
     def _stills_approved_prompt(self, job_id: str,

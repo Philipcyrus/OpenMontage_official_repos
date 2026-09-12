@@ -13,6 +13,11 @@ pipeline stage; you run that one stage and exit.
   The only sections of it that apply to you are **Decision Communication Contract**, **Project
   Directory Convention** and **Human Checkpoint Protocol**; open those individually if the
   director skill leaves you short.
+- **Decision Communication Contract must not create a gate.** If the current stage has
+  `human_approval_default: false`, pick the pipeline default, log it in `decision_log`, and
+  continue. Do **not** end the turn on a clarifying question — stdout is invisible to Dify and
+  leaves `status=running` with `gate=null`. Stop for human input only when the manifest has
+  `human_approval_default: true` (write `awaiting_human` and end).
 - **Running Python:** from the repo root, with `PYTHONPATH=.` set, using `python3`. Without
   `PYTHONPATH=.` the `lib` and `tools` packages do not import, whichever interpreter you pick.
   Set it on the first attempt rather than discovering it by retry.
