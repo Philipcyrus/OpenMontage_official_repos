@@ -18,7 +18,10 @@ brand + character consistency, recording everything in `asset_manifest`. Phases:
   the motion/animation is approved before the full batch, then STOP. Skipped when `motion_sample`
   is off (the default).
 - **PHASE 3 (GATE 4 — approve_assets):** after the motion sample is approved (or straight after
-  the stills when `motion_sample` is off), animate the remaining stills + add audio, then STOP.
+  the stills when `motion_sample` is off), **TTS-first** then duration-driven i2v for remaining
+  scenes (+ music), then STOP. When **AUDIO LIPSYNC** is on (default), customer/panda speaking
+  clips use Seedance `audio_references` so mouths follow the ElevenLabs VO; narrator/text_card
+  stay HOLD/static. Compose still lays the same VO bed.
 
 ## Prerequisites
 
@@ -28,7 +31,8 @@ brand + character consistency, recording everything in `asset_manifest`. Phases:
 | Prior artifacts | `scene_plan`, `script` | What to generate + narration text |
 | Style | `styles/panda.yaml` | On-brand look (image prompt prefix, negatives, anchors) |
 | Elements | `config/panda-elements.json` | Panda/customer Element ids + narration voice ids |
-| Tools | `image_selector`, `higgsfield_mcp_video`, `seedance_video`, `elevenlabs_tts`, `music_gen` | Generation |
+| Helper | `lib/i2v_duration.py` (`snap_i2v_duration`) | Map measured VO seconds → Higgsfield `duration` + hold extend |
+| Tools | `image_selector`, `higgsfield_mcp_video`, `seedance_video`, `elevenlabs_tts`, `audio_probe`, `music_gen` | Generation + VO duration probe |
 
 ## Process
 
@@ -68,70 +72,130 @@ files + `asset_manifest` rows. Re-checkpoint with **top-level**
 
 ### 4. PHASE 2 — MOTION SAMPLE (one hero clip), then STOP (GATE 3.5, approve_motion_sample)
 **Only when the `motion_sample` job option is on (default off; pass `true` to opt in).** After the stills are approved,
-animate ONE representative **hero** still (the most important scene, else scene 1) into a **single**
-sample clip via the Higgsfield MCP bridge (`higgsfield_mcp_video`, image_to_video). The i2v
-prompt must **hold the 2D still** and the same locked characters — do not ask Kling to invent
-a new person or make the clip 3D / photoreal. This is the
-motion cost gate: the reviewer approves the motion/animation feel (camera, movement, how the panda
-moves) **before** committing to the whole batch. Record the sample's Higgsfield **credits** on that
-asset (`credits`, `credits_source: "actual"`). Then write the assets checkpoint
-`status='awaiting_human'` **AND `partial_progress={"phase": "motion_sample"}`** and STOP. Generate
-**no other clips and no audio yet.**
+pick ONE representative **hero** still (the most important scene, else scene 1).
+
+**TTS-first for the sample scene when it is narrated.** Before calling Higgsfield:
+1. Generate that scene’s narration via `elevenlabs_tts` (VOICE CAST ids; one file per speaking
+   section bound to the sample scene).
+2. Probe each file with `audio_probe` (or `ffprobe`); sum section durations for the scene.
+3. Confirm allowed durations with MCP `models_explore`, then call
+   `snap_i2v_duration(vo_seconds, allowed=…)` from `lib/i2v_duration.py` (or apply the same
+   rules: shortest allowed duration ≥ ceil(VO); if VO exceeds model max, use max and note
+   `hold_extend_seconds`).
+4. Pass that integer as Higgsfield `duration`.
+
+If the sample scene has **no** narration, use the scene-plan slot length snapped the same way
+(plan estimate only).
+
+Then animate the hero still into a **single** sample clip via the Higgsfield MCP bridge.
+**Motion path depends on AUDIO LIPSYNC** (job option `audio_lipsync`, default **on**):
+
+- **Eligible sample** (speaker `customer`|`panda`, video clip, not `text_card`): model
+  `seedance_2_0`; MCP-upload still + VO; `generate_video` with `start_image`,
+  `audio_references`=VO, `generate_audio:false`, snapped `duration`. Prompt: 2D + Element LOCK;
+  lip-sync mouth/jaw to the attached audio; subtle idle — no walking, no new person, no
+  photoreal/3D. Do **not** mouth-freeze. Confirm `models_explore` lists `audio_references`.
+  On failure: fall back to HOLD LOCK i2v (below), log in `decision_log`.
+- **Ineligible / lipsync off:** HOLD LOCK the 2D still — mouth/face frozen; tiny idle only —
+  same locked characters; do not invent a new person or make the clip 3D / photoreal.
+
+This is the motion cost gate: the reviewer approves the motion feel (and lipsync when on)
+**before** committing to the whole batch. Record the sample's Higgsfield **credits** on that
+asset (`credits`, `credits_source: "actual"`), plus `duration` / narration `duration_seconds`
+when TTS ran; set clip metadata `audio_lipsync: true` when that path was used. Then write the
+assets checkpoint `status='awaiting_human'` **AND `partial_progress={"phase": "motion_sample"}`**
+and STOP. Generate **no other clips** yet. Sample-scene VO files already on disk are reused in
+PHASE 3 (do not re-TTS unless revising that line).
 
 On "request revision" here, regenerate ONLY the sample clip per the feedback (adjust motion prompt /
-model / motion params), keep `partial_progress.phase="motion_sample"`, and STOP again. Do not batch
-the rest until the motion is approved (max ~3 sample iterations, then escalate).
+model / motion params; keep the same measured `duration` unless VO was revised), keep
+`partial_progress.phase="motion_sample"`, and STOP again. Do not batch the rest until the motion
+is approved (max ~3 sample iterations, then escalate).
 
 > If `motion_sample` is off, skip this phase entirely — go straight from approved stills to PHASE 3.
 
-### 5. PHASE 3 — animate remaining stills + audio, then STOP (GATE 4, approve_assets)
-After the motion sample is approved (or straight after the stills when `motion_sample` is off):
-- **Motion clips**: animate the remaining approved stills into clips via the Higgsfield MCP bridge
-  (`higgsfield_mcp_video`, image_to_video), reusing the **same motion approach** (model + motion
-  params) as the approved sample — see `skills/meta/higgsfield-mcp-bridge.md`. i2v from the
-  on-Element still; hold 2D medium and the locked customer/panda — do not invent a new person
-  or make the clip 3D / photoreal.
-- **Narration**: `elevenlabs_tts` per script section using the **exact `voice_id` named in
-  the VOICE LOCK line of this leg's prompt**. The launcher resolves it from
-  `config/panda-elements.json` `voices` by narrator+language and puts the literal id in the
-  prompt — you do not look it up, and you do not choose. Narration generated with any other
-  voice is a defect; do not ship it.
-- **Music** (if requested): `music_gen` (ElevenLabs Music), kept under the VO.
+### 5. PHASE 3 — TTS-first, then duration-driven i2v (+ audio lipsync) + music, then STOP (GATE 4)
+After the motion sample is approved (or straight after the stills when `motion_sample` is off).
+**Order is mandatory for speaking scenes: narration → probe → snap duration → i2v.** Do not
+generate motion clips before the VO that drives their length (and mouths) exists.
+
+1. **Narration (all remaining script sections):** `elevenlabs_tts` **per script section** using
+   the voice id from the **VOICE CAST** map in this leg's prompt. Resolve id by
+   `section.speaker` (or the cast's default speaker when `speaker` is omitted). Output one file
+   per section, e.g. `vo-{section_id}-{speaker}.mp3`. Do not merge multi-speaker dialogue into a
+   single TTS call. Skip sections already generated for the motion-sample scene unless revising.
+   Narration generated with any id not in the cast map is a defect; do not ship it.
+2. **Probe + map per scene:** for each scene with narration, sum probed VO durations
+   (`audio_probe` / `ffprobe`). Call `snap_i2v_duration` (allowed list from `models_explore`).
+   Record per scene in `decision_log` and/or `asset_manifest.metadata.vo_duration_map`:
+   `{scene_id, vo_seconds, i2v_duration, hold_extend_seconds}`. When
+   `hold_extend_seconds > 0`, note a PACING / hold-extend so edit extends on-screen hold past
+   the clip. Prefer updating effective scene slot length in metadata for edit rather than
+   rewriting the approved `scene_plan` JSON.
+3. **Motion clips:** animate remaining approved stills via Higgsfield MCP. Reuse the approved
+   sample’s approach when it matches; **lipsync-eligible shots always use `seedance_2_0`** even
+   if the sample was HOLD-only.
+
+   **AUDIO LIPSYNC eligible** (`audio_lipsync` on — default — and scene speaker is
+   `customer`|`panda`, produces video, not `text_card`):
+   - MCP-upload still + VO (if multi-speaker on one clip: concat VO files in timeline order into
+     one temp bed for `audio_references`; keep original section files for compose
+     `voice_tracks`).
+   - `generate_video`: `start_image`, `audio_references`, `generate_audio:false`, snapped
+     `duration`, aspect from the job.
+   - Prompt: 2D + Element LOCK; lip-sync mouth/jaw to the attached audio; no walking / new
+     person / photoreal.
+   - Manifest: `audio_lipsync: true`, `model: seedance_2_0`, VO path / media ids.
+   - On failure: HOLD LOCK fallback (next bullet), log in `decision_log`.
+
+   **HOLD / ineligible** (`narrator`-only, `text_card`, non-speaking, or `audio_lipsync:false`):
+   - i2v with **HOLD LOCK** (mouth frozen); 2D + locked characters; snapped `duration`.
+
+   Non-speaking / `text_card` scenes: no TTS; use plan timings or static cards.
+4. **Music** (if requested): `music_gen` (ElevenLabs Music), kept under the VO.
+
 Then write the assets checkpoint `status='awaiting_human'` **without** any phase marker and STOP.
 The launcher surfaces this as the **approve_assets** gate. On "request revision" here, regenerate
-only the flagged shots (`response.shots`).
+only the flagged shots (`response.shots`) — if a speaking shot’s VO changes, re-probe and
+re-snap `duration` (and re-upload `audio_references`) before re-running i2v.
 
 Approving GATE 4 **implies** the VO-overrun default for compose: if narration still overruns a
-scene slot (PACING RISK), extend that scene's on-screen hold so locked CTA copy finishes — do
-not treat approval as leaving an open a/b/c question for the edit leg.
+scene slot (PACING RISK — e.g. hold extend not applied, or music-only pad), extend that scene's
+on-screen hold so locked CTA copy finishes — do not treat approval as leaving an open a/b/c
+question for the edit leg. With TTS-first, most slots should already fit; overrun extend is the
+safety net. Compose still **lays the same ElevenLabs VO** under lipsync clips (`generate_audio:false`
+→ silent clip; mouths already match that VO).
 
-### 5. Character and voice consistency
+### 6. Character and voice consistency
 The panda mascot must look identical across every still/clip. Always attach the panda master
 Element id from `config/panda-elements.json` in the **media slot**; use the customer Element
 for the customer. Never invent a new panda or human. See CHARACTER LOCK in
 `skills/meta/higgsfield-mcp-bridge.md`.
 
-**VOICE LOCK — the same rule for narration.** A voice is chosen exactly the way a face is: from
-`config/panda-elements.json`, never improvised. The launcher resolves `voices[narrator][language]`
-and interpolates the **literal `voice_id`** into every prompt whose leg can call ElevenLabs, so
-the id is in front of you at the moment you generate — you never look it up and never pick one.
+**VOICE CAST — the narration counterpart of CHARACTER LOCK.** Voices are chosen from
+`config/panda-elements.json`, never improvised. The launcher resolves all three brand speakers
+for the job language and interpolates the **literal voice ids** into every prompt whose leg can
+call ElevenLabs.
 
-- Use that id verbatim. Narration in any other voice is a defect, exactly as a still without the
-  Element attached is a defect.
-- If the prompt says **VOICE LOCK — BLOCKER**, that narrator/language pair has no configured
-  voice. Do **not** improvise, do **not** borrow a neighbouring language, and do **not** fall back
-  to Higgsfield `seed_audio` to get past it — that swaps the brand voice for a generic preset and
-  nobody hears it until the assets gate. Generate everything else, then stop at the gate and name
-  the unconfigured pair in the question.
+- Use the cast map: `section.speaker` → id. Untagged sections use the default speaker named in
+  the cast line (`options.narrator`).
+- If the prompt says **VOICE CAST — OVERRIDE**, use that single `voice_id` for every line.
+- If the prompt says **VOICE CAST — BLOCKER**, one or more speaker/language pairs have no
+  configured voice. Do **not** improvise, do **not** borrow a neighbouring language, and do **not**
+  fall back to Higgsfield `seed_audio` to get past it. Generate everything else, then stop at the
+  gate and name the unconfigured pair(s) in the question.
 - The one permitted fallback is ElevenLabs **itself** being unavailable — an infrastructure
   failure, never a missing id — and it must be recorded in `decision_log`.
 
-### 6. Build the asset_manifest (in PHASE 3)
+### 7. Build the asset_manifest (in PHASE 3)
 Record EVERY generated file canonically: per asset `id`, `type` (`image|video|audio|narration|
 music|...`), `path` (relative to the project dir), `source_tool`, `scene_id` (bind each asset to
-its scene), plus optional `prompt`/`model`/`cost_usd`/`duration_seconds`. Persist a schema-valid
-`asset_manifest` (`version: "1.0"`) as part of the PHASE 2 checkpoint. On approval the stage
-completes and the pipeline proceeds to edit/compose.
+its scene), plus optional `prompt`/`model`/`cost_usd`/`duration_seconds`. For narration assets
+also record `speaker` and the script `section` id in metadata when multi-voice, and always set
+`duration_seconds` from the probe. For video clips set `duration` / `duration_seconds` to the
+Higgsfield `duration` used. Persist `metadata.vo_duration_map` (per-scene snap results) when
+TTS-first ran. Persist a schema-valid `asset_manifest` (`version: "1.0"`) as part of the PHASE 3
+checkpoint. On approval the stage completes and the pipeline proceeds to edit/compose.
 
 **Record Higgsfield credits (for the per-project cost report).** For every Higgsfield-generated
 asset (stills via `generate_image`, clips via image_to_video), you already run the `get_cost:true`
@@ -149,5 +213,10 @@ Branding is a separate, on-demand `panda_brand` step applied only after final ap
 ## Success criteria
 - Every required asset exists on disk and appears in `asset_manifest` with `path` + `scene_id`
 - Stills/clips on-brand and character-consistent (panda Elements attached as media)
+- For speaking scenes: narration exists **before** i2v; clip `duration` came from
+  `snap_i2v_duration` (or equivalent); `hold_extend_seconds` noted when VO exceeds model max
 - Narration covers all script sections; music (if any) sits under the VO
 - Checkpoint left in `awaiting_human` for the gate
+- When AUDIO LIPSYNC is on: customer/panda video clips used `seedance_2_0` + `audio_references`
+  + `generate_audio:false` (or logged HOLD fallback); metadata `audio_lipsync: true` on success
+- No Kling/Wav2Lip post-hoc; no `generate_audio:true` invented speech for brand VO

@@ -40,10 +40,30 @@ From `asset_manifest.metadata.edit_decisions_for_compose` (or equivalent notes):
 - **All-top crop** off-spec deliveries (e.g. 1076×1928 → 1080×1920), not a centred
   cover-crop (preserves caption-band clearance).
 
+### 2b. Multi-voice narration bed
+
+Do **not** assume a single narration file. For every narration asset / script section:
+
+1. Add an `audio.narration.segments[]` entry with `asset_id`, `start_seconds` (from the
+   section), optional `end_seconds`, and `speaker` when known.
+2. At compose, pass **all** VO files as `panda_render` `audio.voice_tracks`:
+   `[{ "path": "<vo file>", "at_s": <start_seconds> }, …]` under the music bed.
+3. Prefer sequential timing inside a shot; overlapping `at_s` windows mix (true multi-track).
+4. If only one VO file exists (legacy single-speaker jobs), `audio.voice_path` alone is fine.
+
 ### 3. VO / slot overrun (PACING RISK)
 
-If `asset_manifest.metadata.known_issues` (or the assets checkpoint review) flags narration
-that overruns its visual slot:
+Prefer **TTS-first pre-aligned slots** from assets: read
+`asset_manifest.metadata.vo_duration_map` (per scene `vo_seconds`, `i2v_duration`,
+`hold_extend_seconds`). When `hold_extend_seconds > 0`, extend that scene's on-screen hold by
+at least that amount so the full VO plays after the i2v clip ends. Mute native clip AAC and lay
+the ElevenLabs bed as today — do not keep Higgsfield native audio. **AUDIO LIPSYNC clips**
+(`metadata.audio_lipsync: true` / Seedance with `generate_audio:false`) are silent or discardable
+AAC; mouths were driven by the same VO file you lay here — still mute + lay VO (do not skip the
+bed thinking native audio carries brand voice).
+
+If `known_issues` / PACING RISK still flags narration that overruns its visual slot (map missing
+or incomplete):
 
 - **DEFAULT:** extend that scene's on-screen hold so the **locked** CTA / VO copy finishes
   (total runtime may exceed the brief's nominal seconds).
@@ -66,6 +86,9 @@ clips here.
 ## Success criteria
 
 - `edit_decisions` validates; `render_runtime` unchanged from prior lock
-- VO overrun resolved by extending hold (or N/A if all VO fits)
+- Every narration asset is listed in `audio.narration.segments` with `start_seconds` (and
+  `speaker` when multi-voice)
+- VO overrun resolved by extending hold (or N/A if all VO fits); prefer
+  `vo_duration_map` hold extends from TTS-first assets when present
 - Native clip audio muted in the edit plan; frame pre-conform noted for compose
 - Same headless turn reaches compose `awaiting_human` — never a bare question exit

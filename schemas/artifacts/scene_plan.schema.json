@@ -110,7 +110,16 @@
               "properties": {
                 "type": { "type": "string" },
                 "description": { "type": "string" },
-                "source": { "type": "string", "enum": ["generate", "source", "provided", "record"] }
+                "source": { "type": "string", "enum": ["generate", "source", "provided", "record"] },
+                "speaker": {
+                  "type": "string",
+                  "enum": ["customer", "panda", "narrator"],
+                  "description": "Brand speaker for a narration asset. Required when type is narration/voiceover and the shot has multiple VO beats."
+                },
+                "script_section_id": {
+                  "type": "string",
+                  "description": "Script section this asset fulfils. One scene may list multiple narration assets, each tied to a different section/speaker."
+                }
               },
               "required": ["type", "description", "source"]
             }

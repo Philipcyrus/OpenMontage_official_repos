@@ -49,6 +49,43 @@ assert R._motion_sample_enabled({"options": {}}) is False
 assert R._motion_sample_enabled({"options": {"motion_sample": True}}) is True
 assert R._motion_sample_enabled({"options": {"motion_sample": "true"}}) is True
 assert R._motion_sample_enabled({"options": {"motion_sample": False}}) is False
+
+# audio_lipsync defaults ON; explicit false/off restores HOLD-only wording
+assert R._audio_lipsync_enabled({}) is True
+assert R._audio_lipsync_enabled(None) is True
+assert R._audio_lipsync_enabled({"audio_lipsync": True}) is True
+assert R._audio_lipsync_enabled({"audio_lipsync": None}) is True
+assert R._audio_lipsync_enabled({"audio_lipsync": ""}) is True
+assert R._audio_lipsync_enabled({"audio_lipsync": False}) is False
+assert R._audio_lipsync_enabled({"audio_lipsync": "false"}) is False
+assert R._audio_lipsync_enabled({"audio_lipsync": "off"}) is False
+assert "AUDIO LIPSYNC — ON" in R._audio_lipsync_line({})
+assert "audio_references" in R._audio_lipsync_line({})
+assert "generate_audio:false" in R._audio_lipsync_line({})
+assert "seedance_2_0" in R._audio_lipsync_line({})
+_off = R._audio_lipsync_line({"audio_lipsync": False})
+assert "AUDIO LIPSYNC — OFF" in _off
+assert "HOLD" in _off
+assert "Do NOT pass" in _off and "audio_references" in _off
+_sp_on = run._start_prompt("jLips", "a video about eSIM", {}, "panda-video")
+assert "AUDIO LIPSYNC — ON" in _sp_on and "audio_references" in _sp_on
+_sp_off = run._start_prompt(
+    "jLipsOff", "a video about eSIM", {"audio_lipsync": False}, "panda-video")
+assert "AUDIO LIPSYNC — OFF" in _sp_off
+assert "HOLD" in _sp_off
+_stills_on = run._stills_approved_prompt("jLips", {})
+assert "AUDIO LIPSYNC — ON" in _stills_on
+_stills_off = run._stills_approved_prompt("jLips", {"audio_lipsync": False})
+assert "AUDIO LIPSYNC — OFF" in _stills_off
+# Materialize true onto panda-video options when omitted
+_st = {"brief": "eSIM ad", "pipeline": "panda-video", "options": {}}
+R._apply_language_coerce(_st)
+assert _st["options"].get("audio_lipsync") is True
+_st_off = {"brief": "eSIM ad", "pipeline": "panda-video",
+           "options": {"audio_lipsync": False}}
+R._apply_language_coerce(_st_off)
+assert _st_off["options"].get("audio_lipsync") is False
+print("[ok] audio_lipsync default-on; blank/omit stay on; opt-out restores HOLD-only wording")
 assert R._hero_still_enabled({}) is True
 assert R._hero_still_enabled({"options": {}}) is True
 assert R._hero_still_enabled({"options": {"hero_still": False}}) is False
@@ -748,39 +785,53 @@ assert "4c01c8f9-6cfb-4d8c-9eb9-74cb61462103" in vid
 assert "STILLS 2-TAKE" in vid
 assert "2D flat" in vid or "2D MEDIUM" in vid
 assert "PHASE 2 (motion sample)" not in vid, "default motion_sample=off must skip sample phase"
-assert "PHASE 2 (media)" in vid
+assert "PHASE 3 (media)" in vid
+assert "TTS-FIRST" in vid
 vid_ms = run._start_prompt("jV", "a video", {"motion_sample": True}, "panda-video")
 assert "PHASE 2 (motion sample)" in vid_ms
+assert "TTS-FIRST" in vid_ms
 print("[ok] start prompts: carousel/image stills-only vs video")
 
-# 6b) VOICE LOCK — the narration counterpart of CHARACTER LOCK. Parity is three things: the
-# LITERAL id sits in the prompt (not an instruction to go look it up), it is present on the legs
-# that actually call ElevenLabs (every leg is a cold `claude -p`, so naming it once at start does
-# not reach them), and an unresolvable narrator/language BLOCKS instead of silently downgrading
-# to a generic preset.
+# 6b) VOICE CAST — the narration counterpart of CHARACTER LOCK. Parity is three things: the
+# LITERAL brand ids sit in the prompt (not an instruction to go look them up), they are present
+# on the legs that actually call ElevenLabs (every leg is a cold `claude -p`, so naming them once
+# at start does not reach them), and an unresolvable speaker/language BLOCKS instead of silently
+# downgrading to a generic preset.
 assert R._resolve_voice_id("panda", "en") == "hMSPJ6ja4HIrFHhCGCMl"
 assert R._resolve_voice_id("customer", "zh") == "BqljjWyTnrioXPCNkCd4"
 assert R._resolve_voice_id("narrator", "zh") == "JZLpE3AGwpKYZI2X65hN"
 assert R._resolve_voice_id("robot", "en") is None
 assert R._resolve_voice_id("panda", "fr") is None
 
+cast_en = R._resolve_voice_cast("en")
+assert cast_en["panda"] == "hMSPJ6ja4HIrFHhCGCMl"
+assert cast_en["customer"] == "cgSgspJ2msm6clMCkdW9"
+assert cast_en["narrator"] == "8Ln42OXYupYsag45MAUy"
+
 _vopts = {"narrator": "panda", "language": "en"}
 vz = run._start_prompt("jV", "a video", _vopts, "panda-video")
-assert "VOICE LOCK" in vz and "hMSPJ6ja4HIrFHhCGCMl" in vz, "start prompt must carry the literal id"
+assert "VOICE CAST" in vz and "hMSPJ6ja4HIrFHhCGCMl" in vz, "start prompt must carry the cast"
+assert "cgSgspJ2msm6clMCkdW9" in vz and "8Ln42OXYupYsag45MAUy" in vz, "all three brand ids"
+assert "default speaker=panda" in vz
 assert "`voices` matching narrator" not in vz, "must be the id itself, not a lookup instruction"
 
 for _p in (run._stills_approved_prompt("jV", _vopts), run._motion_approved_prompt("jV", _vopts)):
-    assert "VOICE LOCK" in _p and "hMSPJ6ja4HIrFHhCGCMl" in _p, "media leg must carry the voice id"
-assert "VOICE LOCK" in run._stills_approved_prompt("jV")        # no options must not crash
-assert "VOICE LOCK" in run._motion_approved_prompt("jV")
+    assert "VOICE CAST" in _p and "hMSPJ6ja4HIrFHhCGCMl" in _p, "media leg must carry the cast"
+assert "VOICE CAST" in run._stills_approved_prompt("jV")        # no options must not crash
+assert "VOICE CAST" in run._motion_approved_prompt("jV")
 
-blk = run._start_prompt("jV", "a video", {"narrator": "robot", "language": "en"}, "panda-video")
-assert "BLOCKER" in blk, "an unresolvable pair must block"
+blk = run._start_prompt("jV", "a video", {"narrator": "robot", "language": "fr"}, "panda-video")
+assert "BLOCKER" in blk, "an unresolvable language must block (missing cast ids)"
 assert "may you fall back to Higgsfield" not in blk, "a missing id must NOT offer the fallback"
 
+# Unknown default speaker with valid language still emits the full cast (default falls to panda note)
+vl_robot_en = R._voice_line({"narrator": "robot", "language": "en"})
+assert "VOICE CAST" in vl_robot_en and "BLOCKER" not in vl_robot_en
+assert "hMSPJ6ja4HIrFHhCGCMl" in vl_robot_en
+
 ovr = run._start_prompt("jV", "a video", {"voice_id": "OVERRIDE123"}, "panda-video")
-assert "OVERRIDE123" in ovr
-print("[ok] VOICE LOCK: literal id in start + media legs; unresolvable pair blocks")
+assert "OVERRIDE123" in ovr and "OVERRIDE" in ovr
+print("[ok] VOICE CAST: three brand ids in start + media legs; unresolvable language blocks")
 
 # Mandarin brief wins over stale language:en
 _zh_brief = ("买哪个套餐才能在中国和美国都能用啊？用 Panda Mobile 就好啦，有 OnePool，"
@@ -790,6 +841,8 @@ assert not R._brief_looks_mandarin("Panda Mobile eSIM before you fly")
 opts_c, coerced = R._coerce_language_from_brief({"language": "en", "narrator": "panda"}, _zh_brief)
 assert coerced and opts_c["language"] == "zh"
 assert "MI36FIkp9wRP7cpWKPTl" in R._voice_line(opts_c)
+assert "BqljjWyTnrioXPCNkCd4" in R._voice_line(opts_c)
+assert "JZLpE3AGwpKYZI2X65hN" in R._voice_line(opts_c)
 opts_en, coerced_en = R._coerce_language_from_brief(
     {"language": "en", "narrator": "panda"}, "Panda waves at the airport")
 assert not coerced_en and opts_en["language"] == "en"
@@ -808,7 +861,7 @@ assert "language: zh" in sp_zh
 assert "MI36FIkp9wRP7cpWKPTl" in sp_zh
 assert "Do NOT stop to re-ask language" in sp_zh
 assert "stale language:en" in sp_zh
-print("[ok] Mandarin brief coerces language:en → zh; VOICE LOCK + start prompt note")
+print("[ok] Mandarin brief coerces language:en → zh; VOICE CAST + start prompt note")
 
 # 7) _pipeline_of / gate-collapse helpers -----------------------------------
 assert R._pipeline_of({}) == "panda-video"

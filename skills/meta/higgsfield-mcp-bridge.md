@@ -168,8 +168,29 @@ and panda turnaround sheets — same medium for people, mascot, props, and set. 
 
 For each scene/clip the `scene_plan` requires:
 
+0. **TTS-first duration (panda-video speaking scenes)** — generate that scene’s ElevenLabs VO
+   and probe it **before** step 1. Set `duration` from `lib.i2v_duration.snap_i2v_duration`
+   (allowed values from `models_explore`). See `skills/pipelines/panda-video/asset-director.md`.
+
+### Audio lip-sync (panda-video)
+
+When job option `audio_lipsync` is on (**default**), on-screen `customer`/`panda` speaking clips
+use **`seedance_2_0`** with:
+
+- `medias` role **`start_image`** = approved still
+- `medias` role **`audio_references`** = that scene’s ElevenLabs VO (MCP-uploaded)
+- **`generate_audio: false`** — do not invent a second audio bed
+- Prompt: 2D + Element LOCK; animate mouth/jaw to lip-sync the attached audio (no mouth HOLD)
+
+`kling3_0` has **no** audio input role — do not use it for lipsync shots. Narrator / text_card /
+lipsync-off jobs keep HOLD LOCK (mouth frozen) with duration-only alignment.
+
+Compose still **mutes** native AAC (noop when silent) and **lays the same ElevenLabs VO** so
+picture and brand voice stay matched. On `audio_references` failure: fall back to HOLD +
+duration-only and log it.
+
 1. **Preflight cost** — call `generate_video` with
-   `{model, prompt, duration, aspect_ratio, count:1, get_cost:true}`. Sum the
+   `{model, prompt, duration, aspect_ratio, count:1, get_cost:true}` (plus medias when lipsync). Sum the
    credits across all clips and check against `balance`. Report the total to the
    user against the budget before committing to a batch. **Retain the per-clip
    credit number** — it must be written into that asset's `asset_manifest` entry

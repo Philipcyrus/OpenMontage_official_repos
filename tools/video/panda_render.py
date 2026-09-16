@@ -53,6 +53,86 @@ def _safe_id(s: str) -> str:
     return out or "run"
 
 
+def _premix_voice_tracks(
+    tracks: list[dict[str, Any]],
+    out_path: Path,
+    *,
+    voice_db: float = 0.0,
+) -> Path:
+    """Mix N VO clips (path + at_s) into one stereo bed via adelay+amix.
+
+    Used so montage_svc's single voice_media_id can carry multi-speaker casting without
+    rewriting the vendored AudioSpec. voice_db here is relative within the premix (usually 0);
+    panda_render still applies audio.voice_db on the final mix.
+    """
+    import subprocess
+
+    if not tracks:
+        raise ValueError("voice_tracks is empty")
+
+    from montage_svc.render.ffmpeg_ops import probe_duration
+
+    prepared: list[tuple[Path, float]] = []
+    for i, tr in enumerate(tracks):
+        p = Path(tr["path"])
+        if not p.is_file():
+            raise FileNotFoundError(f"voice_tracks[{i}] not found: {p}")
+        prepared.append((p, float(tr.get("at_s", 0) or 0)))
+
+    if len(prepared) == 1 and prepared[0][1] <= 0:
+        # Single track at t=0 — no delay/mix needed, but still transcode into
+        # out_path's own container (a raw byte copy would mislabel e.g. mp3
+        # source bytes under a .wav name).
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        cmd = ["ffmpeg", "-y", "-i", str(prepared[0][0]), "-c:a", "pcm_s16le", str(out_path)]
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0 or not out_path.is_file():
+            raise RuntimeError(
+                f"voice_tracks premix failed (rc={proc.returncode}): "
+                f"{(proc.stderr or proc.stdout or '')[-800:]}"
+            )
+        return out_path
+
+    # Bound the mix explicitly: a bare trailing `apad` has no stop condition,
+    # so ffmpeg never signals EOF on [aout] and the process hangs forever.
+    total = max(at_s + probe_duration(path) for path, at_s in prepared)
+
+    inputs: list[str] = []
+    parts: list[str] = []
+    labels: list[str] = []
+    for i, (path, at_s) in enumerate(prepared):
+        inputs += ["-i", str(path)]
+        delay_ms = max(0, int(round(at_s * 1000)))
+        parts.append(
+            f"[{i}:a]adelay={delay_ms}|{delay_ms},volume={voice_db}dB,"
+            f"aformat=sample_fmts=fltp:channel_layouts=stereo[av{i}]"
+        )
+        labels.append(f"[av{i}]")
+
+    if len(labels) == 1:
+        mix = f"{labels[0]}apad,atrim=0:{total:.3f}[aout]"
+    else:
+        mix = (
+            f"{''.join(labels)}amix=inputs={len(labels)}:duration=longest:"
+            f"normalize=0,apad,atrim=0:{total:.3f}[aout]"
+        )
+    filter_complex = ";".join(parts + [mix])
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        "ffmpeg", "-y", *inputs,
+        "-filter_complex", filter_complex,
+        "-map", "[aout]", "-c:a", "pcm_s16le",
+        str(out_path),
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0 or not out_path.is_file():
+        raise RuntimeError(
+            f"voice_tracks premix failed (rc={proc.returncode}): "
+            f"{(proc.stderr or proc.stdout or '')[-800:]}"
+        )
+    return out_path
+
+
 class PandaRender(BaseTool):
     name = "panda_render"
     version = "0.1.0"
@@ -117,7 +197,30 @@ class PandaRender(BaseTool):
                 "type": "object",
                 "properties": {
                     "music_path": {"type": "string"},
-                    "voice_path": {"type": "string"},
+                    "voice_path": {
+                        "type": "string",
+                        "description": "Single VO bed (legacy / single-speaker). Ignored when voice_tracks is set.",
+                    },
+                    "voice_tracks": {
+                        "type": "array",
+                        "description": (
+                            "Multi-speaker VO: each entry is placed at at_s (seconds) and premixed "
+                            "into one voice bed before montage mix. Prefer this when the script "
+                            "has multiple section.speaker lines."
+                        ),
+                        "items": {
+                            "type": "object",
+                            "required": ["path"],
+                            "properties": {
+                                "path": {"type": "string"},
+                                "at_s": {"type": "number", "default": 0},
+                                "speaker": {
+                                    "type": "string",
+                                    "enum": ["customer", "panda", "narrator"],
+                                },
+                            },
+                        },
+                    },
                     "sfx": {"type": "array", "items": {
                         "type": "object",
                         "properties": {"path": {"type": "string"}, "at_s": {"type": "number"}, "db": {"type": "number"}},
@@ -152,6 +255,8 @@ class PandaRender(BaseTool):
 
         output_path = Path(inputs["output_path"])
         run_id = _safe_id(inputs.get("run_id") or output_path.stem or "panda-render")
+        audio_in: dict[str, Any] = inputs.get("audio") or {}
+        voice_tracks: list = list(audio_in.get("voice_tracks") or [])
 
         try:
             # --- 1) stage every media file into the run's media/ dir ----------
@@ -172,7 +277,6 @@ class PandaRender(BaseTool):
                     overlays=sc.get("overlays", []),
                 ))
 
-            audio_in = inputs.get("audio") or {}
             def _stage(path: str | None, label: str) -> str | None:
                 if not path:
                     return None
@@ -183,7 +287,14 @@ class PandaRender(BaseTool):
                 return label
 
             music_id = _stage(audio_in.get("music_path"), "music")
-            voice_id = _stage(audio_in.get("voice_path"), "voice")
+
+            if voice_tracks:
+                premix_path = st.run_dir(run_id) / "voice_premix.wav"
+                _premix_voice_tracks(voice_tracks, premix_path)
+                voice_id = _stage(str(premix_path), "voice")
+            else:
+                voice_id = _stage(audio_in.get("voice_path"), "voice")
+
             sfx_models: list[Sfx] = []
             for j, s in enumerate(audio_in.get("sfx", [])):
                 sid = _stage(s["path"], f"sfx{j:02d}")
@@ -243,6 +354,7 @@ class PandaRender(BaseTool):
                 "output": str(output_path),
                 "output_path": str(output_path),
                 "format": "mp4",
+                "voice_track_count": len(voice_tracks) if voice_tracks else (1 if audio_in.get("voice_path") else 0),
                 **probed,
             },
             artifacts=[str(output_path)],

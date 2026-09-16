@@ -32,10 +32,16 @@ delight, reassurance, urgency, CTA), the enhancement cues the writer embedded, a
 available (`end_seconds - start_seconds`).
 
 ### 2. Decompose into scenes
-Transform each script section into **1–3 scenes** (a distinct visual moment each — avoid one
-static scene per long section). Set `id`, `type` (one of the 9 canonical types: `talking_head`,
-`broll`, `animation`, `character_scene`, `diagram`, `text_card`, `transition`, `generated`,
-`screen_recording`), `description`, `start_seconds`/`end_seconds`, and `script_section_id`.
+Transform script sections into scenes (a distinct visual moment each — avoid one static scene
+per long section). Set `id`, `type` (one of the 9 canonical types: `talking_head`, `broll`,
+`animation`, `character_scene`, `diagram`, `text_card`, `transition`, `generated`,
+`screen_recording`), `description`, `start_seconds`/`end_seconds`, and primary
+`script_section_id`.
+
+**Multi-voice shots:** several script sections (different `speaker`s) may share one scene's time
+window. Keep one visual scene; list a separate narration `required_assets` entry per speaking
+beat (see §7). Map `character_actions.dialogue` to the matching brand speaker
+(`customer` / `panda`; off-screen lines → `narrator`).
 
 ### 3. The 5-aspect scene spec (MANDATORY — every scene, all five)
 Silent omission is the top failure mode — it produces brittle prompts and reviewer churn. For
@@ -81,8 +87,10 @@ If the video is narrated, the narration MUST fit the runtime:
 2. Target narration at **85–90%** of duration (breathing room at intro/outro).
 3. Budget **2.0–2.5 words/sec** (calm/reassuring) or **2.5–3.0 words/sec** (energetic).
 4. Allocate words per scene proportional to its seconds; keep opening/closing scenes light.
-Validate: total words within budget; no scene's narration overflows its slot. (The assets stage's
-TTS returns an audio duration — a large overrun means trim the script or extend the closing scene.)
+Validate: total words within budget; no scene's narration overflows its slot. (Word budget is a
+**prior** only. In assets, measured ElevenLabs duration is the **authority** for Higgsfield i2v
+`duration` and any hold extend — see TTS-first in `asset-director.md`. A large overrun after TTS
+means extend the scene hold at edit, or revise the script — do not expect prompt-only lip sync.)
 
 ### 7. Declare `required_assets` per scene
 For each scene that needs a still, list **exactly one** `{type: "image", description: "...",
@@ -93,9 +101,16 @@ as needed. Descriptions must be actionable and name Element IDs (not
 on-model"). Every `source: "generate"` asset must be feasible with the assets
 tools (`image_selector`, `higgsfield_mcp_video`, `seedance_video`, `elevenlabs_tts`, `music_gen`).
 
+For **each speaking beat**, declare a narration asset with `speaker` (`customer`|`panda`|`narrator`)
+and `script_section_id` pointing at that section. One scene may have up to three narration
+entries (one per brand speaker). Do not collapse multi-speaker dialogue into a single VO asset.
+
 ### 8. Coverage, variety & feasibility checks (before submitting)
 - [ ] Scenes span the FULL duration (first at 0s, last at total), no gaps > 1s (unless a beat)
-- [ ] Every script section maps to ≥ 1 scene; every enhancement cue is addressed
+- [ ] Every script section maps to ≥ 1 scene (or is covered as a multi-voice beat on a scene);
+      every enhancement cue is addressed
+- [ ] Multi-voice scenes list one narration `required_asset` per speaking section (`speaker` +
+      `script_section_id`)
 - [ ] No more than 3 consecutive scenes of the same `type`; ≥ 2 types used
 - [ ] Exactly one `hero_moment`; pacing alternates high-info and breathing-room scenes
 - [ ] Every scene with a still has **exactly one** image `required_asset` (no plate chains)
@@ -108,12 +123,12 @@ tools (`image_selector`, `higgsfield_mcp_video`, `seedance_video`, `elevenlabs_t
 | Criterion | Question |
 |---|---|
 | Visual storytelling | Does each scene advance the message, not just decorate? |
-| Script alignment | Does each scene match what the narrator says at that moment? |
+| Script alignment | Does each scene match what each speaker says at that moment? |
 | Brand fidelity | Would every scene look like the same Panda video (style, on-model panda)? |
 | Character consistency | Are panda/customer Element ids + actions specified so they stay on-model? |
 | Asset feasibility | Can every `required_asset` actually be generated with the tools? |
 | Pacing | Natural rhythm? Hero moment placed well? VO fits the runtime? |
-
+| Voice casting | Are multi-speaker beats declared as separate narration assets with `speaker`? |
 ### 10. Write the scene_plan artifact + STOP for approval (GATE 2)
 Persist a schema-valid `scene_plan` (`version: "1.0"`, `style_playbook`, `scenes: [...]`).
 Checkpoint `status = awaiting_human`. Surface the **scene list as text** (timings, types,

@@ -42,6 +42,11 @@
           "text": { "type": "string" },
           "start_seconds": { "type": "number", "minimum": 0 },
           "end_seconds": { "type": "number", "minimum": 0 },
+          "speaker": {
+            "type": "string",
+            "enum": ["customer", "panda", "narrator"],
+            "description": "Brand speaker for this line. Omit to use options.narrator (job default). Multiple sections may share a scene time window for multi-voice shots."
+          },
           "speaker_directions": { "type": "string" },
           "delivery_cues": {
             "type": "object",

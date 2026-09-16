@@ -106,7 +106,12 @@
                 "properties": {
                   "asset_id": { "type": "string" },
                   "start_seconds": { "type": "number", "minimum": 0 },
-                  "end_seconds": { "type": "number", "minimum": 0 }
+                  "end_seconds": { "type": "number", "minimum": 0 },
+                  "speaker": {
+                    "type": "string",
+                    "enum": ["customer", "panda", "narrator"],
+                    "description": "Brand speaker for this VO segment (informational; compose places by start_seconds)."
+                  }
                 },
                 "additionalProperties": false
               }

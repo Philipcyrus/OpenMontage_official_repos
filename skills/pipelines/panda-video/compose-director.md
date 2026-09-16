@@ -35,9 +35,14 @@ Rules (upstream governance — do NOT break):
 ## Process
 
 1. **Route** on `edit_decisions.render_runtime` (table above). For `ffmpeg`, call `panda_render`
-   with the approved clips (+ VO/music) at the `ugc` profile (CLEAN, no branding). For
-   `remotion`/`hyperframes`, call `video_compose` with the matching runtime; pass `proposal_packet`
-   if present so the tool's swap-detection runs.
+   with the approved clips (+ VO/music) at the `ugc` profile (CLEAN, no branding). Pass every
+   narration segment as `audio.voice_tracks` (`path` + `at_s` from `edit_decisions.audio.narration.segments`);
+   single-VO jobs may still use `audio.voice_path`. Mute / discard native AAC on Higgsfield clips
+   (TTS-first VO is the dialogue bed; AUDIO LIPSYNC Seedance clips use `generate_audio:false` so
+   mouths match that VO while the clip stays silent — still lay the same ElevenLabs files).
+   Honor any hold extends from `edit_decisions` / `vo_duration_map`. For `remotion`/`hyperframes`, call
+   `video_compose` with the matching runtime; pass `proposal_packet` if present so the tool's
+   swap-detection runs.
 2. **Verify** the output exists and passes ffprobe (correct duration, resolution, has audio).
 3. **Write `render_report`** (which runtime + tool was used, output path, checks) and checkpoint
    `awaiting_human` for the final gate (approve_final).
