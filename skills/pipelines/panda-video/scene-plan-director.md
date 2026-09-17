@@ -146,6 +146,18 @@ coordinates. You decide the layout, following the user's `instruction`:
     zone clear of the character and the captions.
 - `camera`: `"locked"`.
 
+Also write the scene's `captions` (`{"zh": ..., "en": ...}`) for every scene that carries a
+screenshot. The launcher measures the caption with the real renderer to work out how far up the
+frame it reaches — a long bilingual caption wraps to three lines and climbs well above the one-line
+strip in the prompt facts — and warns when it would cover the screenshot. Without `captions` it can
+only assume one line, so the warning arrives later, at the stills or final gate.
+
+`show`, `enter`, `exit` and every `at_s` are checked again at compose against the duration the scene
+is really **cut** to. A screenshot placed at 4–5 s in a scene the edit shortens to 3 s never appears,
+so compose refuses to render rather than move what the user asked for: keep the timing inside the
+shortest the scene could become, or leave `show` out to mean "the whole scene, however long it ends
+up". If you shorten a scene on a revise, re-check the layouts in it.
+
 The screenshot is the user's exact text, so the `text_card` rule in §8 does not apply to it. On a
 revise that moves a screenshot ("move 4 to scene 6"), update `inputs/requests.json` **and** the layouts.
 

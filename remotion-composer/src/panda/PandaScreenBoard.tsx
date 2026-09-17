@@ -13,6 +13,14 @@ export type BoardCell = {
   label: string;
   canvas: { width: number; height: number };
   sceneDuration?: number;
+  /**
+   * Scene-local second to draw this cell at. Set it for a cell that shows ONE display window of a
+   * scene that has several: the layers are then drawn as they really are at that moment (a layer
+   * whose show window has not opened is not drawn), so a later screenshot cannot hide an earlier
+   * one. Left out, every layer passed is drawn settled, which is what a still or a set of
+   * screenshots shown together should look like.
+   */
+  atSeconds?: number;
   background?: ScreenBackground;
   layers: ScreenLayerSpec[];
   subjectZones?: Box[];
@@ -120,9 +128,9 @@ export const PandaScreenBoard: React.FC<PandaScreenBoardProps> = (props) => {
                     spec={spec}
                     width={W}
                     height={H}
-                    t={0}
+                    t={cell.atSeconds ?? 0}
                     sceneDuration={cell.sceneDuration ?? 5}
-                    preview
+                    preview={cell.atSeconds === undefined}
                     language={props.language || "zh"}
                   />
                 ))}

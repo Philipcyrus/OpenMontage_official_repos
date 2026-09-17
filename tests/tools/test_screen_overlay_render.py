@@ -232,3 +232,57 @@ def test_still_mode_handles_jpeg_rotated_and_high_bit_depth_stills(tmp_path):
     with Image.open(out16) as got:
         val = got.convert("L").getpixel((10, 10))
     assert 100 < val < 140, f"16-bit still flattened to {val} (30000/257 = 117)"
+
+
+def test_board_shows_sequential_screenshots_in_separate_previews(tmp_path):
+    """Two screenshots in the same place, one after the other: BOTH must be reviewable.
+
+    Drawn on one preview the later one simply covers the earlier one, and the gate shows a layout
+    nobody can check. Each display window gets its own cell, rendered at a moment inside it.
+    """
+    from PIL import Image, ImageDraw
+
+    proj = tmp_path / "job_board_seq"
+    for sub in ("inputs", "assets/video", "artifacts"):
+        (proj / sub).mkdir(parents=True)
+    for iid, colour in (("in_01", "#1a73e8"), ("in_02", "#0f9d58")):
+        shot = Image.new("RGB", (400, 800), "#ffffff")
+        ImageDraw.Draw(shot).rectangle([20, 20, 380, 780], fill=colour)
+        shot.save(proj / "inputs" / f"{iid}.png")
+    (proj / "inputs" / "inputs.json").write_text(json.dumps([
+        {"n": 1, "input_id": "in_01", "name": "a.png", "file": "in_01.png", "width": 400, "height": 800},
+        {"n": 2, "input_id": "in_02", "name": "b.png", "file": "in_02.png", "width": 400, "height": 800}]),
+        encoding="utf-8")
+    zone = {"x": 0.30, "y": 0.20, "w": 0.40, "h": 0.50}
+    a = {"zone": zone, "frame": "none", "enter": {"type": "none"}, "show": {"from_s": 0.0, "to_s": 2.0}}
+    b = {"zone": zone, "frame": "none", "enter": {"type": "none"}, "show": {"from_s": 2.0, "to_s": 5.0}}
+    plan = {"version": "1.0", "metadata": {"aspect_ratio": "9:16"}, "scenes": [
+        {"id": "s01", "type": "character_scene", "description": "x", "start_seconds": 0,
+         "end_seconds": 5, "required_assets": [
+             {"type": "image", "source": "provided", "input_id": "in_01", "description": "d",
+              "layout": a},
+             {"type": "image", "source": "provided", "input_id": "in_02", "description": "d",
+              "layout": b}]}]}
+    (proj / "checkpoint_scene_plan.json").write_text(
+        json.dumps({"artifacts": {"scene_plan": plan}}), encoding="utf-8")
+
+    out = tmp_path / "board.png"
+    res = ScreenOverlay().execute({"mode": "board", "project_dir": str(proj), "kind": "layouts",
+                                   "output_path": str(out)})
+    assert res.success, res.error
+    assert res.data["cells"] == 2, res.data
+
+    # Both cells are drawn side by side at the same scale: the left one must be blue (screenshot 1)
+    # where the right one is green (screenshot 2).
+    img = Image.open(out).convert("RGB")
+    W, H = img.size
+    colours = []
+    for cell in (0, 1):
+        # cell centre: the board lays cells out left to right with equal widths
+        cx = int(W * (0.25 + 0.5 * cell))
+        strip = [img.getpixel((cx, y)) for y in range(int(H * 0.15), int(H * 0.55))]
+        blue = sum(1 for r, g, bb in strip if bb > 120 and bb > r + 40 and bb > g + 20)
+        green = sum(1 for r, g, bb in strip if g > 100 and g > r + 30 and g > bb + 20)
+        colours.append((blue, green))
+    assert colours[0][0] > 20 and colours[0][1] < 5, colours   # first window: screenshot 1 only
+    assert colours[1][1] > 20 and colours[1][0] < 5, colours   # second window: screenshot 2 only

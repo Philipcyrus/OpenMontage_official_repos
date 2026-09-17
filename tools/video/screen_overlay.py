@@ -4,7 +4,8 @@ Screenshots are never sent to Higgsfield (a video model redraws an image, so UI 
 Instead the scene-plan director writes a layout per placement (see lib/screen_layout.py) and
 this tool renders it deterministically, 0 credits:
 
-  mode "board"    one PNG preview sheet for a gate
+  mode "board"    one PNG preview sheet for a gate (one cell per set of screenshots on screen
+                  together, so one shown after another is not hidden under it)
                    kind "uploads"  numbered thumbnails of every upload + the user's scene
                    kind "layouts"  each screenshot scene on a blank frame, Panda area marked
                    kind "stills"   each screenshot scene over its generated still
@@ -13,7 +14,13 @@ this tool renders it deterministically, 0 credits:
                   render <project>/overlay/<scene_id>.mp4 = the scene's clip (from 0 s, exactly
                   duration_s, cover-cropped like panda_render) with the screenshot layers on top,
                   and return the same list with those media_paths swapped. Call it right
-                  before panda_render and pass panda_render the returned list.
+                  before panda_render and pass panda_render the returned list. A placement whose
+                  timing does not fit the duration the scene is CUT to fails the call — a shorter
+                  cut is never answered by moving or trimming what the user asked for. It also
+                  writes overlay/timeline.json (scene order, offsets from the same xfade math
+                  panda_render uses, and each screenshot's window) so the launcher can check each
+                  screenshot in its own scene instead of anywhere in the video; pass the same
+                  `transition` you pass panda_render.
   mode "still"    carousel / image: place one scene's screenshots onto its generated still, at the
                   still's own size, every layer and step in its settled state. Called by the
                   launcher, not by the agent.
@@ -145,6 +152,9 @@ class ScreenOverlay(BaseTool):
             "notes": {"type": "object", "description": "board only: {scene_number or n: note}"},
             "scenes": {"type": "array", "description": "compose only: the exact panda_render scene list; "
                                                       "add scene_id to each item"},
+            "transition": {"type": "object", "description": "compose only: the SAME transition you "
+                                                            "pass panda_render, so the recorded "
+                                                            "timeline matches the assembled video"},
             "scene_id": {"type": "string", "description": "still only"},
             "still_path": {"type": "string", "description": "still only: the generated still"},
             "resolution": {"type": "string", "default": "1080x1920"},
@@ -272,16 +282,9 @@ class ScreenOverlay(BaseTool):
             title = {"layouts": "Layouts · Panda area marked",
                      "stills": "Over the stills",
                      "clips": "Over the clips"}.get(kind, "Screenshots")
+            still_pipeline = sl.is_still_pipeline(pipeline)
             for scene_id, group in sl.items_by_scene(items).items():
                 n = group[0]["scene_number"]
-                layers, subjects = [], []
-                for it in group:
-                    rec = by_id.get(it["input_id"])
-                    if rec is None or not sl.valid_box(it["layout"].get("zone")):
-                        continue
-                    layers.append(sl.layer_props(it, rec, sl.input_path(project, rec).name))
-                    if sl.valid_box(it["layout"].get("subject_zone")):
-                        subjects.append(sl.norm_box(it["layout"]["subject_zone"]))
                 background: dict[str, Any] = {"type": "color", "color": "#ffffff"}
                 cell_note = notes.get(str(n), "")
                 if kind == "stills":
@@ -300,18 +303,39 @@ class ScreenOverlay(BaseTool):
                         background = {"type": "image", "src": name}
                     else:
                         cell_note = cell_note or "no clip found for this scene"
-                names = ", ".join(str(by_id[it["input_id"]].get("n")) for it in group
-                                  if it["input_id"] in by_id)
                 unit = sl.unit_label(pipeline, n)
-                cells.append({
-                    "label": f"{unit[:1].upper()}{unit[1:]} · screenshot {names}",
-                    "canvas": {"width": W, "height": H},
-                    "sceneDuration": group[0]["duration"],
-                    "background": background,
-                    "layers": layers,
-                    "subjectZones": subjects if kind == "layouts" else [],
-                    "note": cell_note,
-                })
+                duration = float(group[0]["duration"])
+                # One cell per set of screenshots actually on screen together: a scene that shows
+                # one screenshot and then another gives two cells, so the later one cannot hide the
+                # earlier one. A still (or screenshots shown together) stays a single cell.
+                windows = ([(0.0, duration, group)] if still_pipeline
+                           else sl.display_windows(group, duration) or [(0.0, duration, group)])
+                for w_from, w_to, live in windows:
+                    layers, subjects = [], []
+                    for it in live:
+                        rec = by_id.get(it["input_id"])
+                        if rec is None or not sl.valid_box(it["layout"].get("zone")):
+                            continue
+                        layers.append(sl.layer_props(it, rec, sl.input_path(project, rec).name))
+                        if sl.valid_box(it["layout"].get("subject_zone")):
+                            subjects.append(sl.norm_box(it["layout"]["subject_zone"]))
+                    names = ", ".join(str(by_id[it["input_id"]].get("n")) for it in live
+                                      if it["input_id"] in by_id)
+                    label = f"{unit[:1].upper()}{unit[1:]} · screenshot {names}"
+                    cell: dict[str, Any] = {
+                        "label": label,
+                        "canvas": {"width": W, "height": H},
+                        "sceneDuration": duration,
+                        "background": background,
+                        "layers": layers,
+                        "subjectZones": subjects if kind == "layouts" else [],
+                        "note": cell_note,
+                    }
+                    if not still_pipeline and len(windows) > 1:
+                        at = sl.preview_time(live, duration, (w_from, w_to))
+                        cell["label"] = f"{label} · {w_from:g}–{w_to:g} s"
+                        cell["atSeconds"] = at        # draw the layers as they are at that moment
+                    cells.append(cell)
             columns, cell_w = (4, 300) if H >= W else (3, 420)
 
         props = {"title": title, "cells": cells, "columns": columns, "cellWidth": cell_w,
@@ -344,6 +368,11 @@ class ScreenOverlay(BaseTool):
         recs = {r["input_id"]: r for r in sl.load_inputs(project)}
         plan = self._scene_plan(project)
         grouped = sl.items_by_scene(sl.screenshot_items(plan))
+        # A timeline from an earlier compose describes a render that is about to be replaced; drop
+        # it now so a failed compose cannot leave one that looks current.
+        stale = sl.overlay_dir(project) / "timeline.json"
+        if stale.exists():
+            stale.unlink()
         if not grouped:
             return ToolResult(success=True, data={"scenes": scenes_in, "rendered": []},
                               duration_seconds=round(time.time() - start, 2))
@@ -367,6 +396,17 @@ class ScreenOverlay(BaseTool):
             if not media.is_file():
                 return ToolResult(success=False, error=f"scene {scene_id}: media not found: {media}")
             duration = float(sc.get("duration_s") or group[0]["duration"])
+            # The cut can be shorter than the scene the plan wrote, which would push a placement
+            # (or its steps) past the end of the composed scene. Say so and stop — never move or
+            # shorten what the user asked for, and never report success for a screenshot that
+            # would not be on screen.
+            bad = sl.timing_errors(group, duration, recs.values())
+            if bad:
+                return ToolResult(success=False, error=(
+                    f"scene {scene_id}: the screenshot timing does not fit this cut — "
+                    + "; ".join(bad)
+                    + ". Fix the scene plan or the cut and compose again; screen_overlay will not "
+                      "move a placement the user asked for."))
             try:
                 composite = self._render_scene(project, scene_id, group, recs, media, duration,
                                                W, H, language)
@@ -377,9 +417,54 @@ class ScreenOverlay(BaseTool):
             scenes_out.append(item)
             rendered.append({"scene_id": scene_id, "path": str(composite),
                              "layout_hash": sl.layout_hash(group, recs.values())})
-        return ToolResult(success=True, data={"scenes": scenes_out, "rendered": rendered},
+        timeline = self._write_timeline(project, scenes_out, grouped, recs,
+                                        inputs.get("transition"))
+        return ToolResult(success=True,
+                          data={"scenes": scenes_out, "rendered": rendered, "timeline": timeline},
                           artifacts=[r["path"] for r in rendered],
                           duration_seconds=round(time.time() - start, 2))
+
+    def _write_timeline(self, project: Path, scenes: list[dict[str, Any]],
+                        grouped: dict[str, list[dict[str, Any]]],
+                        recs: dict[str, dict[str, Any]],
+                        transition: Any) -> dict[str, Any]:
+        """Record where each scene — and each screenshot — lands in the assembled video.
+
+        Without this the launcher can only look for a screenshot somewhere in the final video,
+        which passes a screenshot that ended up in the wrong scene. The offsets are panda_render's
+        own xfade math (``expected_timeline_duration``): a transition overlaps its two scenes, so
+        every scene after the first starts earlier by the overlap. When the caller did not pass the
+        transition we record panda_render's default AND that we assumed it, and the launcher checks
+        the total against the real file before trusting any window.
+        """
+        tr = transition if isinstance(transition, dict) else {}
+        kind = str(tr.get("type") or "xfade")
+        overlap = max(0.0, float(tr.get("duration_s", 0.5))) if kind == "xfade" else 0.0
+        rows: list[dict[str, Any]] = []
+        t = 0.0
+        for i, sc in enumerate(scenes):
+            dur = float(sc.get("duration_s") or 0.0)
+            scene_id = str(sc.get("scene_id") or "")
+            shots = []
+            for it in grouped.get(scene_id, []):
+                rec = recs.get(it["input_id"]) or {}
+                frm, to = sl.show_window(it.get("layout") or {}, dur)
+                s_from, s_to = sl.settled_span(it.get("layout") or {}, dur, (frm, to))
+                shots.append({"input_id": it["input_id"], "n": rec.get("n"),
+                              "from_s": round(max(0.0, min(frm, dur)), 3),
+                              "to_s": round(max(0.0, min(to, dur)), 3),
+                              "settled_from_s": round(s_from, 3), "settled_to_s": round(s_to, 3)})
+            rows.append({"index": i, "scene_id": scene_id, "start_s": round(t, 3),
+                         "duration_s": round(dur, 3), "screenshots": shots})
+            t += dur - (overlap if i < len(scenes) - 1 else 0.0)
+        out = {"version": "1.0",
+               "transition": {"type": kind, "duration_s": overlap},
+               "transition_assumed": not isinstance(transition, dict),
+               "total_s": round(t, 3), "scenes": rows}
+        path = sl.overlay_dir(project) / "timeline.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
+        return out
 
     def _path_scene_index(self, project: Path) -> dict[str, str]:
         out: dict[str, str] = {}

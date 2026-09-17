@@ -46,6 +46,10 @@ ACCEPTED_FORMATS = ("PNG", "JPEG", "WEBP")
 CLEAR_MAX_BUSY = float(os.environ.get("SCREENSHOT_CLEAR_MAX_BUSY", "0.04"))
 # Final-video check: mean absolute difference (0-255) below which a frame "matches".
 FINAL_MATCH_MAX_DIFF = float(os.environ.get("SCREENSHOT_FINAL_MATCH_MAX_DIFF", "14"))
+# How far the finished video may run from the timeline compose recorded before each screenshot's
+# place in it stops being knowable (an edit after compose, a different transition). Beyond this the
+# check reports itself as unavailable instead of looking for the screenshot anywhere in the video.
+TIMELINE_TOLERANCE_S = float(os.environ.get("SCREENSHOT_TIMELINE_TOLERANCE_S", "0.75"))
 # Carousel / image: time allowed for STARTING still renders in one pass (renders are cached, so
 # each still is normally rendered once, ~7 s). Checked before each render, so a pass can run this
 # long plus the one render already under way (SCREEN_OVERLAY_BOARD_TIMEOUT_S at worst). Stills
@@ -413,37 +417,52 @@ def still_clear_notes(project_dir: Path, plan: Optional[dict[str, Any]],
     return notes
 
 
-def _frames(media: Path, times: list[float]) -> list[Any]:
-    from PIL import Image
+def _log_check(project_dir: Path, text: str) -> None:
+    """Why a check could not run, for whoever debugs it — never shown to the user verbatim.
 
-    out = []
-    for t in times:
-        proc = subprocess.run(["ffmpeg", "-loglevel", "error", "-ss", f"{max(0.0, t):.3f}", "-i",
-                               str(media), "-frames:v", "1", "-f", "image2pipe", "-vcodec", "png", "-"],
-                              capture_output=True, timeout=120, stdin=subprocess.DEVNULL)
-        if proc.returncode == 0 and proc.stdout:
-            out.append(Image.open(io.BytesIO(proc.stdout)).convert("RGB"))
-    return out
-
-
-def _frames_every(media: Path, step_s: float = 0.25, width: int = 360) -> list[Any]:
-    """Every step_s seconds of a video, downscaled, in ONE ffmpeg pass."""
-    from PIL import Image
-
-    tmp = Path(tempfile.mkdtemp(prefix="panda_frames_"))
+    ffmpeg's own message plus the file it was reading: no tokens, no URLs, no credentials.
+    """
     try:
-        proc = subprocess.run(["ffmpeg", "-loglevel", "error", "-i", str(media), "-vf",
-                               f"fps={1.0 / step_s:g},scale={width}:-2", str(tmp / "f_%05d.png")],
-                              capture_output=True, timeout=600, stdin=subprocess.DEVNULL)
-        if proc.returncode != 0:
-            return []
-        frames = []
-        for f in sorted(tmp.glob("f_*.png")):
-            with Image.open(f) as im:
-                frames.append(im.convert("RGB"))
-        return frames
-    finally:
-        shutil.rmtree(tmp, ignore_errors=True)
+        d = sl.overlay_dir(project_dir)
+        d.mkdir(parents=True, exist_ok=True)
+        with (d / "checks.log").open("a", encoding="utf-8") as fh:
+            fh.write(text.strip()[:2000] + "\n")
+    except OSError:
+        pass
+
+
+def _frames(media: Path, times: list[float]) -> tuple[list[Any], Optional[str]]:
+    """(frames, why one is missing). A frame that cannot be decoded is NOT a pass.
+
+    The caller must treat a non-empty reason as "could not be checked" and say so at the gate:
+    silently returning fewer frames made a broken extraction look like a clean check.
+    """
+    from PIL import Image
+
+    out: list[Any] = []
+    why: Optional[str] = None
+    for t in times:
+        try:
+            proc = subprocess.run(["ffmpeg", "-loglevel", "error", "-ss", f"{max(0.0, t):.3f}",
+                                   "-i", str(media), "-frames:v", "1", "-f", "image2pipe",
+                                   "-vcodec", "png", "-"],
+                                  capture_output=True, timeout=120, stdin=subprocess.DEVNULL)
+        except (OSError, subprocess.SubprocessError) as e:
+            why = why or f"{type(e).__name__} reading {media.name} at {t:.2f}s"
+            continue
+        if proc.returncode == 0 and proc.stdout:
+            try:
+                out.append(Image.open(io.BytesIO(proc.stdout)).convert("RGB"))
+                continue
+            except Exception as e:  # noqa: BLE001 — a truncated frame is an unavailable check
+                why = why or f"the frame of {media.name} at {t:.2f}s could not be decoded " \
+                             f"({type(e).__name__})"
+                continue
+        err = (proc.stderr or b"").decode("utf-8", "replace").strip().splitlines()
+        why = why or (f"ffmpeg on {media.name} at {t:.2f}s: {err[-1][:160]}" if err else
+                      f"ffmpeg returned {proc.returncode} for {media.name} at {t:.2f}s "
+                      "and no frame")
+    return out, why
 
 
 def _duration(media: Path) -> Optional[float]:
@@ -468,7 +487,15 @@ def clip_clear_notes(project_dir: Path, plan: Optional[dict[str, Any]],
         dur = _duration(clip) or group[0]["duration"]
         boxes = _device_boxes(group, by_id, W, H)
         worst = 0.0
-        for frame in _frames(clip, [dur * f for f in (0.05, 0.3, 0.5, 0.7, 0.95)]):
+        times = [dur * f for f in (0.05, 0.3, 0.5, 0.7, 0.95)]
+        frames, why = _frames(clip, times)
+        if len(frames) < len(times):
+            _log_check(project_dir, f"clip_clear_notes {scene_id}: {why}")
+            notes.append(f"scene {group[0]['scene_number']}: the screenshot area could not be "
+                         "checked — its clip could not be read here; look at the clip yourself "
+                         "before approving")
+            continue
+        for frame in frames:
             for box in boxes:
                 worst = max(worst, _busy_fraction(frame, box, W, H))
         if worst > CLEAR_MAX_BUSY:
@@ -496,43 +523,53 @@ def _mad(a: list[int], b: list[int]) -> float:
     return sum(abs(x - y) for x, y in zip(a, b)) / max(1, min(len(a), len(b)))
 
 
-def _settled_time(group: list[dict[str, Any]], duration: float) -> float:
-    """A moment when every enter / zoom / cursor / pop has finished (the screenshot is still)."""
-    t = 0.0
-    for it in group:
-        lay = it["layout"]
-        enter = lay.get("enter") if isinstance(lay.get("enter"), dict) else {}
-        t = max(t, float(enter.get("at_s") or 0) + float(enter.get("duration_s") or 0.35))
-        for st in lay.get("steps") or []:
-            if not isinstance(st, dict) or st.get("at_s") is None:
-                continue
-            at = float(st.get("at_s") or 0)
-            if st.get("kind") in ("zoom_to", "cursor_move"):
-                t = max(t, at + float(st.get("duration_s") or 0.8))
-            elif st.get("kind") in ("highlight_box", "card"):
-                t = max(t, at + 0.3)
-            elif st.get("kind") == "click_pulse":
-                t = max(t, at + float(st.get("duration_s") or 0.5))
-    return min(max(t + 0.2, duration * 0.3), duration * 0.9)
+def _safe_scene(scene_id: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in scene_id)[:60] or "scene"
+
+
+def _timeline(project_dir: Path) -> Optional[dict[str, Any]]:
+    """What compose recorded about the assembled video, or None if it did not record it."""
+    tl = sl._read_json(sl.overlay_dir(project_dir) / "timeline.json")
+    if not isinstance(tl, dict) or not isinstance(tl.get("scenes"), list):
+        return None
+    if not isinstance(_num(tl.get("total_s")), float):
+        return None
+    return tl
+
+
+def _num(v: Any) -> Optional[float]:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _cannot_check(reason: str) -> str:
+    return ("your screenshots could not be checked in the final video: " + reason
+            + " — please look at the preview yourself before approving")
 
 
 def final_notes(project_dir: Path, plan: Optional[dict[str, Any]], recs: list[dict[str, Any]],
                 final_path: Optional[Path]) -> list[str]:
+    """Is each screenshot really in the finished video, in ITS scene and while it should be?
+
+    Three outcomes, never two: it is there, something is wrong with it, or the check could not
+    run (no timeline from compose, the cut moved after compose, a frame that will not decode).
+    An unavailable check says so in plain words — it never reads as a pass, and it never blocks
+    the approval.
+    """
     W, H = sl.canvas_for(plan)
-    ko = sl.keep_out_for(W, H)
     by_id = {r["input_id"]: r for r in recs}
     notes: list[str] = []
     grouped = sl.items_by_scene(sl.screenshot_items(plan))
     if not grouped:
         return notes
-    final_frames: list[Any] = []
-    if final_path and final_path.is_file():
-        final_frames = _frames_every(final_path, 0.25)
+
+    # 1) every screenshot scene was composed, from the layout the plan holds now
     for scene_id, group in grouped.items():
         n = group[0]["scene_number"]
-        safe = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in scene_id)[:60] or "scene"
-        clip = sl.overlay_dir(project_dir) / f"{safe}.mp4"
-        meta = sl._read_json(sl.overlay_dir(project_dir) / f"{safe}.json")
+        clip = sl.overlay_dir(project_dir) / f"{_safe_scene(scene_id)}.mp4"
+        meta = sl._read_json(sl.overlay_dir(project_dir) / f"{_safe_scene(scene_id)}.json")
         if not clip.is_file() or not isinstance(meta, dict):
             notes.append(f"scene {n}: its screenshots were not rendered — compose must run "
                          "screen_overlay before panda_render")
@@ -540,33 +577,114 @@ def final_notes(project_dir: Path, plan: Optional[dict[str, Any]], recs: list[di
         if meta.get("layout_hash") != sl.layout_hash(group, recs):
             notes.append(f"scene {n}: the screenshot layout changed after it was rendered — "
                          "re-run compose")
-        if not final_frames:
+
+    # 2) each screenshot is where the assembled timeline says it should be
+    tl = _timeline(project_dir)
+    if tl is None:
+        notes.append(_cannot_check("compose did not record the timeline (overlay/timeline.json), "
+                                   "so where each screenshot belongs in the video is unknown"))
+        return notes
+    if final_path is None or not Path(final_path).is_file():
+        notes.append(_cannot_check("the final video file was not found"))
+        return notes
+    final_path = Path(final_path)
+    total = float(tl.get("total_s") or 0.0)
+    real = _duration(final_path)
+    if real is None:
+        _log_check(project_dir, f"final_notes: ffprobe could not read {final_path.name}")
+        notes.append(_cannot_check(f"{final_path.name} could not be read by ffprobe"))
+        return notes
+    assumed = " (compose was not told the transition, so the default was assumed)" \
+        if tl.get("transition_assumed") else ""
+    if abs(real - total) > max(TIMELINE_TOLERANCE_S, 0.03 * max(total, 1.0)):
+        notes.append(_cannot_check(f"the video is {real:.1f} s but compose recorded a "
+                                   f"{total:.1f} s timeline{assumed}, so each screenshot's place "
+                                   "in it is unknown; re-running compose would fix the check"))
+        return notes
+
+    overlap = float((tl.get("transition") or {}).get("duration_s") or 0.0)
+    items = {(it["scene_id"], it["input_id"]): it for it in sl.screenshot_items(plan)}
+    for row in tl.get("scenes") or []:
+        scene_id = str(row.get("scene_id") or "")
+        shots = row.get("screenshots") or []
+        if not shots or scene_id not in grouped:
             continue
-        boxes = _device_boxes(group, by_id, W, H)
-        if not boxes:
-            continue
-        x0 = min(b["x"] for b in boxes)
-        y0 = min(b["y"] for b in boxes)
-        x1 = max(b["x"] + b["w"] for b in boxes)
-        y1 = min(max(b["y"] + b["h"] for b in boxes), ko["captions"]["y"])   # captions are drawn later
-        if x1 - x0 < 0.02 or y1 - y0 < 0.02:
-            continue
-        box = {"x": x0, "y": y0, "w": x1 - x0, "h": y1 - y0}
-        dur = float(meta.get("duration_s") or group[0]["duration"])
-        t = _settled_time(group, dur)
-        probe = _frames(clip, [t])
+        n = grouped[scene_id][0]["scene_number"]
+        start_s = float(_num(row.get("start_s")) or 0.0)
+        scene_dur = float(_num(row.get("duration_s")) or grouped[scene_id][0]["duration"])
+        clip = sl.overlay_dir(project_dir) / f"{_safe_scene(scene_id)}.mp4"
         raw_src = sl.scene_media(project_dir, scene_id, "video")
-        raw = _frames(raw_src, [t]) if raw_src else []
-        if not probe or not raw:
-            continue
-        ref = _region_thumb(probe[0], box, W, H)
-        baseline = _mad(ref, _region_thumb(raw[0], box, W, H))
-        if baseline < 6:          # the screenshot looks like its background — nothing to prove
-            continue
-        best = min(_mad(ref, _region_thumb(f, box, W, H)) for f in final_frames)
-        if best > min(FINAL_MATCH_MAX_DIFF, 0.5 * baseline):
-            notes.append(f"scene {n}: its screenshot could not be found in the final video")
+        if not clip.is_file():
+            continue                      # already reported above
+        for shot in shots:
+            it = items.get((scene_id, str(shot.get("input_id"))))
+            rec = by_id.get(str(shot.get("input_id")))
+            if it is None or rec is None:
+                continue
+            label = f"scene {n} (screenshot {rec.get('n')})"
+            box = _shot_box(it, rec, W, H, grouped[scene_id][0].get("captions"))
+            if box is None:
+                continue
+            window = (float(_num(shot.get("from_s")) or 0.0),
+                      float(_num(shot.get("to_s")) or scene_dur))
+            # Sample several moments while it is on screen and settled, clear of the transition
+            # cross-fades at either end of the scene, so an entrance or an exit is not read as
+            # a missing screenshot.
+            times = sl.sample_times(it["layout"], scene_dur, window, 3, margin=overlap * 0.6)
+            shown = f"{start_s + window[0]:.1f}–{start_s + window[1]:.1f} s of the video"
+            ref_frames, why_ref = _frames(clip, times)
+            fin_frames, why_fin = _frames(final_path, [start_s + t for t in times])
+            if len(ref_frames) < len(times) or len(fin_frames) < len(times):
+                _log_check(project_dir, f"final_notes {scene_id}/{shot.get('input_id')}: "
+                                        f"{why_ref or why_fin}")
+                notes.append(f"{label}: could not be checked in the final video — a frame at "
+                             f"{shown} could not be decoded; look at the preview yourself")
+                continue
+            if raw_src is None:
+                notes.append(f"{label}: could not be checked in the final video — the scene's "
+                             "generated clip is not in the asset manifest, so there is nothing to "
+                             "compare against; look at the preview yourself")
+                continue
+            raw_frames, why_raw = _frames(raw_src, times)
+            if len(raw_frames) < len(times):
+                _log_check(project_dir, f"final_notes {scene_id} raw: {why_raw}")
+                notes.append(f"{label}: could not be checked in the final video — its generated "
+                             "clip could not be read here; look at the preview yourself")
+                continue
+            checked = matched = 0
+            for i in range(len(times)):
+                ref = _region_thumb(ref_frames[i], box, W, H)
+                baseline = _mad(ref, _region_thumb(raw_frames[i], box, W, H))
+                if baseline < 6:
+                    continue              # the screenshot looks like its background: unprovable
+                checked += 1
+                diff = _mad(ref, _region_thumb(fin_frames[i], box, W, H))
+                if diff <= min(FINAL_MATCH_MAX_DIFF, 0.5 * baseline):
+                    matched += 1
+            if checked == 0:
+                continue
+            if matched == 0:
+                notes.append(f"{label}: it is not in the final video at {shown}, where the plan "
+                             "puts it — check that compose used the overlay clips")
+            elif matched < checked:
+                notes.append(f"{label}: it is only there for part of {shown} "
+                             f"({matched} of {checked} checks found it) — check the video around "
+                             "that moment")
     return notes
+
+
+def _shot_box(item: dict[str, Any], rec: dict[str, Any], W: int, H: int,
+              captions: Any = None) -> Optional[dict[str, float]]:
+    """The frame area ONE screenshot covers, cut off above the caption (drawn after compose)."""
+    if not sl.valid_box((item.get("layout") or {}).get("zone")):
+        return None
+    dev = sl.device_box_fraction(item["layout"], W, H,
+                                 {"width": rec.get("width") or 1, "height": rec.get("height") or 1})
+    cap, _measured = sl.caption_keep_out(W, H, captions)
+    bottom = min(dev["y"] + dev["h"], cap["y"]) if cap else dev["y"] + dev["h"]
+    if dev["w"] < 0.02 or bottom - dev["y"] < 0.02:
+        return None
+    return {"x": dev["x"], "y": dev["y"], "w": dev["w"], "h": bottom - dev["y"]}
 
 
 # ---------------------------------------------------------------------------
@@ -996,10 +1114,15 @@ def apply_gate(projects_dir: Path, job_id: str, gate: Optional[str], arts: dict[
             notes += placement_notes(project, job_id, plan, arts, pipeline, "approve_stills")
         elif gate in ("approve_hero_still", "approve_stills"):
             notes += still_clear_notes(project, plan, recs)
+            # Re-measured here, not only at the plan gate: the captions (and the size the job is
+            # rendered at) can change after the plan was approved, and a longer caption wraps
+            # upward over a screenshot that was clear when it was placed.
+            notes += sl.caption_notes(plan, recs, pipeline=pipeline)
             kind = "stills" if sl.screenshot_items(plan) else None
             notes_map = _scene_note_map(notes)
         elif gate in ("approve_motion_sample", "approve_assets"):
             notes += clip_clear_notes(project, plan, recs)
+            notes += sl.caption_notes(plan, recs, pipeline=pipeline)
             kind = "clips" if sl.screenshot_items(plan) else None
             notes_map = _scene_note_map(notes)
         elif gate == "approve_final":
@@ -1007,6 +1130,7 @@ def apply_gate(projects_dir: Path, job_id: str, gate: Optional[str], arts: dict[
 
             final_name = arts.get("final")
             final_path = store.artifact_path(job_id, final_name) if isinstance(final_name, str) else None
+            notes += sl.caption_notes(plan, recs, pipeline=pipeline)
             notes += final_notes(project, plan, recs, final_path)
         if kind and render_boards:
             try:

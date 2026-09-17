@@ -21,6 +21,9 @@ Project files (all launcher-owned, never under ``assets/``):
     projects/<job>/inputs/job.json        {pipeline, language} — the job as the launcher runs it
     projects/<job>/inputs/requests.json   the user's guidance, written by the idea director
     projects/<job>/overlay/               boards, composite clips / stills, work files
+    projects/<job>/overlay/timeline.json  video: where every scene and screenshot lands in
+                                          the assembled video (written by compose)
+    projects/<job>/overlay/checks.log     why a check could not run (diagnostics only)
 """
 
 from __future__ import annotations
@@ -92,6 +95,17 @@ KEEP_OUT: dict[tuple[int, int], dict[str, dict[str, float]]] = {
 # tests/contracts/test_screen_layout.py re-measures both against the real draw_logo.
 LOGO_STAMP_PX = (384, 235)
 MIN_STILL_PIXELS = 960 * 960
+
+# The caption scrim in KEEP_OUT is ONE zh + ONE en line. A longer caption wraps and the scrim
+# grows upward from the same bottom margin, so the table alone would accept a screenshot that a
+# wrapped bilingual caption then covers. measure_caption() draws the scene's real caption with
+# panda_render's own renderer and profile and measures it; when that is not possible the table box
+# is grown upward to CAPTION_FALLBACK_LINES times its height as a documented conservative
+# fallback, and the caller says the area is an estimate. Video only — a carousel / image still
+# draws its copy into the still itself.
+CAPTION_PROFILE = "ugc"                 # the profile panda_render renders at (CLEAN, no brand)
+CAPTION_FALLBACK_LINES = 3.0
+_CAPTION_CACHE: dict[str, Optional[dict[str, float]]] = {}
 
 # Legibility: how much the screenshot is scaled on screen. Below MIN the text gets tiny,
 # above MAX it is upscaled and soft. Tune on real renders.
@@ -441,6 +455,93 @@ def keep_out_for(W: int, H: int, pipeline: Optional[str] = None) -> dict[str, di
     return {"logo": {"x": x, "y": 0.0, "w": 1.0 - x, "h": h}}
 
 
+def _caption_cache_key(W: int, H: int, captions: Any, profile: str) -> str:
+    zh, en = caption_text(captions)
+    return f"{W}x{H}|{profile}|{zh}|{en}"
+
+
+def caption_text(captions: Any) -> tuple[str, str]:
+    """The zh / en caption strings panda_render would draw for a scene."""
+    if not isinstance(captions, dict):
+        return "", ""
+    return str(captions.get("zh") or ""), str(captions.get("en") or "")
+
+
+def measure_caption(W: int, H: int, captions: Any,
+                    profile: str = CAPTION_PROFILE) -> Optional[dict[str, float]]:
+    """The pixels this scene's caption really covers on a W×H frame, as fractions — or None.
+
+    Drawn with the SAME renderer, profile, fonts, wrapping and frame size panda_render uses
+    (``vendor/montage_svc/render/overlays.py::draw_caption``), then measured, so a caption that
+    wraps to three lines reports the box it actually fills. None when the vendored renderer or
+    its fonts are not available here — the caller must then fall back and say so.
+    """
+    zh, en = caption_text(captions)
+    if not zh and not en:
+        return None
+    key = _caption_cache_key(W, H, captions, profile)
+    if key in _CAPTION_CACHE:
+        return _CAPTION_CACHE[key]
+    box: Optional[dict[str, float]] = None
+    try:
+        root = Path(__file__).resolve().parents[1]
+        vendor = root / "vendor"
+        import os
+        import sys
+
+        os.environ.setdefault("MONTAGE_BRAND_DIR", str(vendor / "brand"))
+        os.environ.setdefault("MONTAGE_DATA_DIR", str(vendor / "data"))
+        if str(vendor) not in sys.path:
+            sys.path.insert(0, str(vendor))
+        from PIL import Image
+        from montage_svc import storage as st
+        from montage_svc.render import overlays as ov
+
+        st.ensure_profiles()
+        prof = st.load_profile(profile)
+        img = Image.new("RGBA", (int(W), int(H)), (0, 0, 0, 0))
+        ov.draw_caption(img, prof, zh or None, en or None)
+        bbox = img.getbbox()
+        if bbox:
+            box = {"x": bbox[0] / W, "y": bbox[1] / H,
+                   "w": (bbox[2] - bbox[0]) / W, "h": (bbox[3] - bbox[1]) / H}
+    except Exception:  # noqa: BLE001 — measuring is an extra; the caller falls back and says so
+        box = None
+    _CAPTION_CACHE[key] = box
+    return box
+
+
+def caption_keep_out(W: int, H: int, captions: Any = None,
+                     pipeline: Optional[str] = None) -> tuple[Optional[dict[str, float]], bool]:
+    """(area the caption covers, measured?) for one scene. Stills pipelines get (None, True).
+
+    The KEEP_OUT table is one zh + one en line — the caption grows UPWARD as it wraps, so the
+    table alone accepts a screenshot that a wrapped bilingual caption then covers. With the real
+    caption text this measures it; without it (or with the renderer unavailable) the table box is
+    grown upward by CAPTION_FALLBACK_LINES lines, which is the documented conservative fallback.
+    """
+    if is_still_pipeline(pipeline):
+        return None, True                     # a still draws its own copy: no caption strip
+    table = keep_out_for(W, H, pipeline).get("captions")
+    if table is None:
+        return None, True
+    if caption_text(captions) == ("", ""):
+        # The plan does not say what this scene's caption is (it is optional for video), so there
+        # is nothing to measure: keep the one-line strip the table records and do not guess wider.
+        return table, True
+    real = measure_caption(W, H, captions)
+    if real is not None:
+        y = min(table["y"], real["y"])
+        bottom = max(table["y"] + table["h"], real["y"] + real["h"])
+        x = min(table["x"], real["x"])
+        right = max(table["x"] + table["w"], real["x"] + real["w"])
+        return {"x": x, "y": y, "w": min(1.0, right - x), "h": min(1.0 - y, bottom - y)}, True
+    grown = table["h"] * CAPTION_FALLBACK_LINES
+    y = max(0.0, table["y"] + table["h"] - grown)
+    return {"x": table["x"], "y": y, "w": table["w"],
+            "h": min(1.0 - y, table["y"] + table["h"] - y)}, False
+
+
 def scene_duration(scene: dict[str, Any]) -> float:
     s, e = _num(scene.get("start_seconds")), _num(scene.get("end_seconds"))
     if s is None or e is None or e <= s:
@@ -466,6 +567,8 @@ def screenshot_items(scene_plan: Optional[dict[str, Any]]) -> list[dict[str, Any
                 "description": str(ra.get("description") or ""),
                 "layout": ra.get("layout") if isinstance(ra.get("layout"), dict) else {},
                 "duration": scene_duration(scene),
+                # the scene's own caption text, so the caption area can be measured as rendered
+                "captions": scene.get("captions") if isinstance(scene.get("captions"), dict) else None,
             })
     return out
 
@@ -475,6 +578,172 @@ def items_by_scene(items: Iterable[dict[str, Any]]) -> dict[str, list[dict[str, 
     for it in items:
         grouped.setdefault(it["scene_id"], []).append(it)
     return grouped
+
+
+# ---------------------------------------------------------------------------
+# timing (video only — a carousel / image still shows everything at once)
+# ---------------------------------------------------------------------------
+
+def show_window(layout: dict[str, Any], duration: float,
+                still: bool = False) -> tuple[float, float]:
+    """The window the layout ASKS to be on screen for, as written — never clamped.
+
+    Unclamped on purpose: a window that falls outside the scene it is composed at is the defect
+    timing_errors() reports, and clamping it here would hide it.
+    """
+    if still:
+        return 0.0, float(duration)
+    show = layout.get("show") if isinstance(layout.get("show"), dict) else {}
+    frm = _num(show.get("from_s"))
+    to = _num(show.get("to_s"))
+    return (0.0 if frm is None else float(frm), float(duration) if to is None else float(to))
+
+
+def settled_span(layout: dict[str, Any], duration: float,
+                 window: Optional[tuple[float, float]] = None) -> tuple[float, float]:
+    """Scene-local span in which this layer is on screen AND every move has finished.
+
+    Enter / zoom / cursor / click / card animations are excluded at the front, the exit (explicit,
+    or the implicit fade when the window closes before the scene does) at the back. This is the
+    span a checker may sample and the moment a preview should show.
+    """
+    frm, to = window or show_window(layout, duration)
+    frm = max(0.0, min(frm, float(duration)))
+    to = max(frm, min(to, float(duration)))
+    enter = layout.get("enter") if isinstance(layout.get("enter"), dict) else {}
+    done = max(frm, float(_num(enter.get("at_s")) or frm)
+               + float(_num(enter.get("duration_s")) or 0.35))
+    for st in layout.get("steps") or []:
+        if not isinstance(st, dict) or _num(st.get("at_s")) is None:
+            continue
+        at = float(_num(st.get("at_s")) or 0.0)
+        kind = st.get("kind")
+        if kind in ("zoom_to", "cursor_move"):
+            done = max(done, at + float(_num(st.get("duration_s")) or 0.8))
+        elif kind == "click_pulse":
+            done = max(done, at + float(_num(st.get("duration_s")) or 0.5))
+        elif kind in ("highlight_box", "card"):
+            done = max(done, at + 0.3)
+    end = to
+    exit_ = layout.get("exit") if isinstance(layout.get("exit"), dict) else {}
+    if exit_:
+        end = min(end, float(_num(exit_.get("at_s")) or (to - float(
+            _num(exit_.get("duration_s")) or 0.3))))
+    elif to < float(duration) - 1e-3:
+        end = max(frm, to - 0.3)            # ScreenLayer fades a window that closes early
+    start = min(done + 0.15, end)
+    return max(frm, min(start, end)), max(frm, end)
+
+
+def sample_times(layout: dict[str, Any], duration: float,
+                 window: Optional[tuple[float, float]] = None,
+                 count: int = 3, margin: float = 0.0) -> list[float]:
+    """Up to `count` scene-local moments inside the settled span, `margin` s clear of its edges."""
+    a, b = settled_span(layout, duration, window)
+    if margin > 0 and b - a > 2 * margin + 0.1:
+        a, b = a + margin, b - margin
+    if b - a < 0.08 or count <= 1:
+        return [round(max(0.0, min((a + b) / 2, float(duration))), 3)]
+    return [round(a + (b - a) * f, 3) for f in (0.15, 0.5, 0.85)][:count]
+
+
+def display_windows(items: list[dict[str, Any]],
+                    duration: float) -> list[tuple[float, float, list[dict[str, Any]]]]:
+    """One entry per DISTINCT set of screenshots on screen together, in scene order.
+
+    Two screenshots shown at the same time stay in one window (an intentionally simultaneous
+    layout); one shown after another gives two, so a preview can show each of them.
+    """
+    spans = []
+    for it in items:
+        frm, to = show_window(it.get("layout") or {}, it.get("duration", duration))
+        frm, to = max(0.0, min(frm, duration)), max(0.0, min(to, duration))
+        if to - frm > 1e-3:
+            spans.append((frm, to, it))
+    if not spans:
+        return []
+    edges = sorted({v for frm, to, _ in spans for v in (frm, to)})
+    out: list[tuple[float, float, list[dict[str, Any]]]] = []
+    for a, b in zip(edges, edges[1:]):
+        if b - a <= 1e-3:
+            continue
+        mid = (a + b) / 2
+        live = [it for frm, to, it in spans if frm <= mid <= to]
+        if not live:
+            continue
+        if out and out[-1][2] == live:                 # same set: one window
+            out[-1] = (out[-1][0], b, live)
+        else:
+            out.append((a, b, live))
+    return out
+
+
+def preview_time(items: list[dict[str, Any]], duration: float,
+                 window: Optional[tuple[float, float]] = None) -> float:
+    """A scene-local moment at which every item in `items` is on screen and settled."""
+    starts, ends = [], []
+    for it in items:
+        a, b = settled_span(it.get("layout") or {}, it.get("duration", duration), window)
+        starts.append(a)
+        ends.append(b)
+    lo, hi = (max(starts) if starts else 0.0), (min(ends) if ends else float(duration))
+    return round(lo if lo <= hi else (min(starts) if starts else 0.0), 3)
+
+
+def timing_errors(items: Iterable[dict[str, Any]], duration: float,
+                  inputs: Iterable[dict[str, Any]] = (),
+                  pipeline: Optional[str] = None) -> list[str]:
+    """Placements whose timing does not fit a scene `duration` seconds long.
+
+    Called with the duration the scene is actually COMPOSED at, which is the edit's cut and not
+    necessarily the one the scene plan wrote: shortening a scene to 3 s makes a screenshot placed
+    at 4–5 s invisible. Naming the scene, the screenshot and the timing, so the caller can refuse
+    the render instead of quietly moving what the user asked for.
+    """
+    if is_still_pipeline(pipeline):
+        return []                            # a still has no timing
+    numbers = {r.get("input_id"): r.get("n") for r in inputs}
+    out: list[str] = []
+    for it in items:
+        layout = it.get("layout") or {}
+        n = numbers.get(it.get("input_id"))
+        who = f"screenshot {n}" if n is not None else f"screenshot {it.get('input_id')}"
+        label = f"{unit_label(pipeline, it.get('scene_number') or 0)} ({who})"
+        frm, to = show_window(layout, it.get("duration", duration))
+        # A layout with no show window asks for "the whole scene", so a shorter cut simply makes
+        # it shorter — only timing the plan WROTE can be violated by the cut.
+        show = layout.get("show") if isinstance(layout.get("show"), dict) else {}
+        if _num(show.get("to_s")) is None:
+            to = min(to, duration)
+        if to <= frm + 1e-3:
+            out.append(f"{label}: its show window {frm:g}–{to:g} s is empty")
+            continue
+        if frm >= duration - 1e-3:
+            out.append(f"{label}: it is placed at {frm:g}–{to:g} s but the scene is composed at "
+                       f"{duration:g} s, so it would never appear — move the placement into "
+                       f"0–{duration:g} s or keep the scene long enough for it")
+            continue
+        if to > duration + 0.05:
+            out.append(f"{label}: it is placed until {to:g} s but the scene is composed at "
+                       f"{duration:g} s, so {to - duration:g} s of it would be cut — shorten the "
+                       f"show window to 0–{duration:g} s or keep the scene long enough for it")
+        enter = layout.get("enter") if isinstance(layout.get("enter"), dict) else {}
+        at = _num(enter.get("at_s"))
+        if at is not None and at + float(_num(enter.get("duration_s")) or 0.35) > duration + 0.05:
+            out.append(f"{label}: its entrance ends at "
+                       f"{at + float(_num(enter.get('duration_s')) or 0.35):g} s, after the "
+                       f"{duration:g} s the scene is composed at")
+        for i, st in enumerate(layout.get("steps") or []):
+            if not isinstance(st, dict):
+                continue
+            s_at = _num(st.get("at_s"))
+            if s_at is None:
+                continue
+            ends = s_at + float(_num(st.get("duration_s")) or 0.0)
+            if s_at < -EPS or ends > duration + 0.05:
+                out.append(f"{label}: step {i + 1} ({st.get('kind')}) runs {s_at:g}–{ends:g} s, "
+                           f"outside the {duration:g} s the scene is composed at")
+    return out
 
 
 def layout_hash(items: Iterable[dict[str, Any]], inputs: Iterable[dict[str, Any]] = ()) -> str:
@@ -632,7 +901,8 @@ def validate_layouts(scene_plan: Optional[dict[str, Any]], inputs: list[dict[str
     unit = lambda s: unit_label(pipeline, s)  # noqa: E731
     scenes = (scene_plan or {}).get("scenes") or [] if isinstance(scene_plan, dict) else []
     W, H = canvas or canvas_for(scene_plan, pipeline=pipeline)
-    keep_out = keep_out_for(W, H, pipeline)
+    base_keep_out = keep_out_for(W, H, pipeline)
+    keep_out = base_keep_out
     known = {r["input_id"]: r for r in inputs}
     items = screenshot_items(scene_plan)
     number = {iid: known[iid].get("n") for iid in known}
@@ -672,8 +942,16 @@ def validate_layouts(scene_plan: Optional[dict[str, Any]], inputs: list[dict[str
 
     # --- each placement ------------------------------------------------------
     grouped = items_by_scene(items)
+    estimated = False
     for scene_id, group in grouped.items():
         shown: list[tuple[dict[str, float], float, float, str]] = []
+        # This scene's caption as panda_render will really draw it: a wrapped bilingual caption
+        # reaches above the one-line strip in the table (keep_out), so measure it per scene.
+        cap, measured = caption_keep_out(W, H, group[0].get("captions"), pipeline)
+        keep_out = {k: v for k, v in base_keep_out.items() if k != "captions"}
+        if cap is not None:
+            keep_out["captions"] = cap
+            estimated = estimated or not measured
         for it in group:
             rec = known.get(it["input_id"])
             label = unit(it["scene_number"])
@@ -710,7 +988,10 @@ def validate_layouts(scene_plan: Optional[dict[str, Any]], inputs: list[dict[str
                              f"({fmt_box(subject)})")
             if "captions" in keep_out and overlaps(dev, keep_out["captions"]):
                 notes.append(f"{label}: the screenshot overlaps the caption strip "
-                             f"({fmt_box(keep_out['captions'])})")
+                             f"({fmt_box(keep_out['captions'])}"
+                             + (f", this {word}'s caption as it wraps" if measured
+                                and caption_text(it.get('captions')) != ("", "") else "")
+                             + ")")
             if overlaps(dev, keep_out["logo"]):
                 notes.append(f"{label}: the screenshot reaches the corner where the Panda logo "
                              f"goes if the {deliverable_word(pipeline)} is branded "
@@ -738,6 +1019,49 @@ def validate_layouts(scene_plan: Optional[dict[str, Any]], inputs: list[dict[str
                     notes.append(f"{label} and {other_label} overlap on screen"
                                  + ("" if still else " at the same time"))
             shown.append((dev, s_from, s_to, label))
+    if estimated:
+        notes.append("the caption area could not be measured with the brand renderer here, so a "
+                     f"conservative estimate ({CAPTION_FALLBACK_LINES:g} lines) was used — check "
+                     "the preview by eye before approving")
+    return notes
+
+
+def caption_notes(scene_plan: Optional[dict[str, Any]], inputs: list[dict[str, Any]],
+                  canvas: Optional[tuple[int, int]] = None,
+                  pipeline: Optional[str] = None) -> list[str]:
+    """Only the caption-clearance part of validate_layouts, for the gates after the plan.
+
+    The captions and the output size can both change after the plan was approved (an edit rewrites
+    a caption, a job is re-rendered at another size), and a longer caption covers more of the
+    frame — so the clearance is measured again wherever the current plan is at hand.
+    """
+    if is_still_pipeline(pipeline):
+        return []
+    W, H = canvas or canvas_for(scene_plan, pipeline=pipeline)
+    known = {r["input_id"]: r for r in inputs}
+    notes: list[str] = []
+    estimated = False
+    for _scene_id, group in items_by_scene(screenshot_items(scene_plan)).items():
+        cap, measured = caption_keep_out(W, H, group[0].get("captions"), pipeline)
+        if cap is None:
+            continue
+        estimated = estimated or not measured
+        for it in group:
+            rec = known.get(it["input_id"])
+            layout = it.get("layout") or {}
+            if rec is None or not valid_box(layout.get("zone"), min_size=0.05):
+                continue
+            natural = {"width": rec.get("width") or 1, "height": rec.get("height") or 1}
+            dev = device_box_fraction(layout, W, H, natural)
+            if overlaps(dev, cap):
+                notes.append(
+                    f"{unit_label(pipeline, it['scene_number'])} (screenshot {rec.get('n')}): the "
+                    f"caption covers part of the screenshot ({fmt_box(cap)}) — shorten this "
+                    f"{unit_word(pipeline)}'s caption or move the screenshot up")
+    if notes and estimated:
+        notes.append("the caption area could not be measured with the brand renderer here, so a "
+                     f"conservative estimate ({CAPTION_FALLBACK_LINES:g} lines) was used — check "
+                     "the preview by eye before approving")
     return notes
 
 

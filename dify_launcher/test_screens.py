@@ -537,41 +537,151 @@ assert any("changed after upload" in n for n in screens.integrity_notes(shots, s
 print("[ok] a changed upload is reported at the gate")
 
 # ---------------------------------------------------------------------------
-# 8) final-video check: finds the screenshot when it is there, flags it when it is not (ffmpeg only)
+# 8) final-video check: each screenshot in ITS scene and window; unavailable says so (ffmpeg only)
 # ---------------------------------------------------------------------------
 if shutil.which("ffmpeg"):
+    FW, FH = 540, 960          # the real file; the checks measure the 1080x1920 canvas fractions
+
+    def _ff(args: list) -> None:
+        subprocess.run(["ffmpeg", "-y", "-loglevel", "error", *args], check=True)
+
+    def _box(layout, natural) -> str:
+        g = sl.device_box_fraction(layout, FW, FH, natural)
+        return (f"x={int(g['x'] * FW)}:y={int(g['y'] * FH)}:w={int(g['w'] * FW)}:"
+                f"h={int(g['h'] * FH)}")
+
+    def _blank(path: Path, seconds: float = 5.0) -> None:
+        _ff(["-f", "lavfi", "-i", f"color=c=white:s={FW}x{FH}:r=24:d={seconds}",
+             "-pix_fmt", "yuv420p", str(path)])
+
+    def _drawn(src: Path, out: Path, boxes: list) -> None:
+        """boxes: [(drawbox spec, colour, enable-expr or None)]"""
+        vf = ",".join(f"drawbox={b}:color={c}@1:t=fill" + (f":enable='{e}'" if e else "")
+                      for b, c, e in boxes)
+        _ff(["-i", str(src), "-vf", vf, "-pix_fmt", "yuv420p", str(out)])
+
+    def _concat(parts: list, out: Path, work: Path) -> None:
+        lst = work / "concat.txt"
+        lst.write_text("".join(f"file '{q.resolve().as_posix()}'\n" for q in parts),
+                       encoding="utf-8")
+        _ff(["-f", "concat", "-safe", "0", "-i", str(lst), "-c", "copy", str(out)])
+
+    def _timeline(project: Path, rows: list, *, total=None, assumed=False, overlap=0.0) -> None:
+        """rows: [(scene_id, start_s, duration_s, [(input_id, n, from_s, to_s)])]"""
+        scenes = []
+        for scene_id, start, dur, shots in rows:
+            scenes.append({"index": len(scenes), "scene_id": scene_id, "start_s": start,
+                           "duration_s": dur, "screenshots": [
+                               {"input_id": iid, "n": n, "from_s": f, "to_s": t,
+                                "settled_from_s": f, "settled_to_s": t} for iid, n, f, t in shots]})
+        (project / "overlay" / "timeline.json").write_text(json.dumps({
+            "version": "1.0", "transition": {"type": "cut", "duration_s": overlap},
+            "transition_assumed": assumed,
+            "total_s": total if total is not None else sum(r[2] for r in rows),
+            "scenes": scenes}), encoding="utf-8")
+
+    def _manifest(project: Path, rows: list) -> None:
+        (project / "artifacts" / "asset_manifest.json").write_text(json.dumps({
+            "version": "1.0", "assets": [
+                {"id": f"c{i}", "type": "video", "path": pth, "source_tool": "t", "scene_id": sid}
+                for i, (sid, pth) in enumerate(rows)]}), encoding="utf-8")
+
     fp = PROJECTS / "job_final"
     for sub in ("inputs", "overlay", "assets/video", "artifacts"):
         (fp / sub).mkdir(parents=True, exist_ok=True)
-    frecs = [dict(INPUTS[0], sha256="x")]
-    fplan = plan_with((1, "in_01", dict(GOOD_PHONE, steps=[])), n_scenes=1)
-    g = sl.device_box_fraction(GOOD_PHONE, 540, 960, {"width": 1170, "height": 2532})
-    box = f"x={int(g['x'] * 540)}:y={int(g['y'] * 960)}:w={int(g['w'] * 540)}:h={int(g['h'] * 960)}"
-    raw_clip = fp / "assets" / "video" / "s01.mp4"
-    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=white:s=540x960:r=24:d=5",
-                    "-pix_fmt", "yuv420p", str(raw_clip)], check=True)
-    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(raw_clip), "-vf",
-                    f"drawbox={box}:color=0x1a73e8@1:t=fill,drawbox=x=300:y=300:w=120:h=40:color=black@1:t=fill",
-                    "-pix_fmt", "yuv420p", str(fp / "overlay" / "s01.mp4")], check=True)
-    (fp / "artifacts" / "asset_manifest.json").write_text(json.dumps({"version": "1.0", "assets": [
-        {"id": "c", "type": "video", "path": "assets/video/s01.mp4", "source_tool": "t", "scene_id": "s01"}]}),
-        encoding="utf-8")
-    (fp / "overlay" / "s01.json").write_text(json.dumps(
-        {"layout_hash": sl.layout_hash(sl.screenshot_items(fplan), frecs), "duration_s": 5.0}), encoding="utf-8")
-    fplan["metadata"] = {"aspect_ratio": "9:16"}
-    canvas_plan = dict(fplan)
-    # the final is the overlay clip itself (what panda_render would carry) -> found
-    assert screens.final_notes(fp, canvas_plan, frecs, fp / "overlay" / "s01.mp4") == []
-    # a final rendered from the raw clip -> flagged
-    assert screens.final_notes(fp, canvas_plan, frecs, raw_clip) == [
-        "scene 1: its screenshot could not be found in the final video"]
-    # layout edited after the overlay was rendered -> flagged
-    edited = plan_with((1, "in_01", dict(GOOD_PHONE, steps=[], frame="card")), n_scenes=1)
-    assert any("layout changed" in n for n in screens.final_notes(fp, edited, frecs, fp / "overlay" / "s01.mp4"))
-    # compose never ran -> flagged
-    (fp / "overlay" / "s01.json").unlink()
-    assert any("were not rendered" in n for n in screens.final_notes(fp, canvas_plan, frecs, fp / "overlay" / "s01.mp4"))
-    print("[ok] final check: screenshot found when present; flagged when missing, stale or never rendered")
+    frecs = [dict(INPUTS[0], sha256="x"), dict(INPUTS[1], sha256="y")]
+    L1 = dict(GOOD_PHONE, steps=[])
+    L2 = dict(GOOD_WEB, zone={"x": 0.06, "y": 0.72, "w": 0.40, "h": 0.20})
+    nat1 = {"width": 1170, "height": 2532}
+    nat2 = {"width": 1440, "height": 900}
+
+    raw1, raw2 = fp / "assets/video/s01.mp4", fp / "assets/video/s02.mp4"
+    _blank(raw1)
+    _blank(raw2)
+    _manifest(fp, [("s01", "assets/video/s01.mp4"), ("s02", "assets/video/s02.mp4")])
+
+    # --- two scenes, one screenshot each -------------------------------------
+    plan2 = plan_with((1, "in_01", L1), (2, "in_02", L2), n_scenes=2)
+    items2 = sl.items_by_scene(sl.screenshot_items(plan2))
+    _drawn(raw1, fp / "overlay/s01.mp4", [(_box(L1, nat1), "0x1a73e8", None)])
+    _drawn(raw2, fp / "overlay/s02.mp4", [(_box(L2, nat2), "0x0f9d58", None)])
+    for sid, grp in items2.items():
+        (fp / "overlay" / f"{sid}.json").write_text(json.dumps(
+            {"layout_hash": sl.layout_hash(grp, frecs), "duration_s": 5.0}), encoding="utf-8")
+    _timeline(fp, [("s01", 0.0, 5.0, [("in_01", 1, 0.0, 5.0)]),
+                   ("s02", 5.0, 5.0, [("in_02", 2, 0.0, 5.0)])])
+
+    right = fp / "final_right.mp4"
+    _concat([fp / "overlay/s01.mp4", fp / "overlay/s02.mp4"], right, fp)
+    assert screens.final_notes(fp, plan2, frecs, right) == [], \
+        screens.final_notes(fp, plan2, frecs, right)
+
+    # screenshot 1 appears only in scene 2's slot -> its own scene is flagged
+    swapped = fp / "final_swapped.mp4"
+    _concat([raw1, fp / "overlay/s01.mp4"], swapped, fp)
+    _sw = screens.final_notes(fp, plan2, frecs, swapped)
+    assert any(n.startswith("scene 1 (screenshot 1): it is not in the final video at 0.0–5.0 s")
+               for n in _sw), _sw
+    assert not any("could not be checked" in n for n in _sw), _sw
+
+    # --- two screenshots one after the other in ONE scene --------------------
+    A = dict(GOOD_PHONE, steps=[], show={"from_s": 0.0, "to_s": 2.4})
+    B = dict(GOOD_WEB, zone={"x": 0.40, "y": 0.16, "w": 0.52, "h": 0.30},
+             show={"from_s": 2.6, "to_s": 5.0})
+    seq_plan = plan_with((1, "in_01", A), (1, "in_02", B), n_scenes=1)
+    sp = PROJECTS / "job_seq"
+    for sub in ("inputs", "overlay", "assets/video", "artifacts"):
+        (sp / sub).mkdir(parents=True, exist_ok=True)
+    _blank(sp / "assets/video/s01.mp4")
+    _manifest(sp, [("s01", "assets/video/s01.mp4")])
+    _drawn(sp / "assets/video/s01.mp4", sp / "overlay/s01.mp4",
+           [(_box(A, nat1), "0x1a73e8", "between(t,0,2.4)"),
+            (_box(B, nat2), "0x0f9d58", "between(t,2.6,5)")])
+    (sp / "overlay/s01.json").write_text(json.dumps({
+        "layout_hash": sl.layout_hash(sl.screenshot_items(seq_plan), frecs),
+        "duration_s": 5.0}), encoding="utf-8")
+    _timeline(sp, [("s01", 0.0, 5.0, [("in_01", 1, 0.0, 2.4), ("in_02", 2, 2.6, 5.0)])])
+    assert screens.final_notes(sp, seq_plan, frecs, sp / "overlay/s01.mp4") == [], \
+        screens.final_notes(sp, seq_plan, frecs, sp / "overlay/s01.mp4")
+
+    # the second one never drawn -> only IT is flagged (the first still passes)
+    _drawn(sp / "assets/video/s01.mp4", sp / "final_no_b.mp4",
+           [(_box(A, nat1), "0x1a73e8", "between(t,0,2.4)")])
+    _nb = screens.final_notes(sp, seq_plan, frecs, sp / "final_no_b.mp4")
+    assert [n for n in _nb if n.startswith("scene 1 (screenshot 2)")], _nb
+    assert not [n for n in _nb if n.startswith("scene 1 (screenshot 1)")], _nb
+
+    # --- could not be checked is never a pass --------------------------------
+    (fp / "overlay/timeline.json").unlink()
+    _no_tl = screens.final_notes(fp, plan2, frecs, right)
+    assert any("could not be checked" in n and "timeline" in n for n in _no_tl), _no_tl
+    _timeline(fp, [("s01", 0.0, 5.0, [("in_01", 1, 0.0, 5.0)]),
+                   ("s02", 5.0, 5.0, [("in_02", 2, 0.0, 5.0)])])
+
+    # the cut changed after compose: the windows are unknown, so nothing is "found"
+    short = fp / "final_short.mp4"
+    _ff(["-i", str(right), "-t", "6", "-c", "copy", str(short)])
+    _cut = screens.final_notes(fp, plan2, frecs, short)
+    assert any("could not be checked" in n and "timeline" in n for n in _cut), _cut
+
+    # a final that will not decode, and a missing reference clip
+    broken = fp / "final_broken.mp4"
+    broken.write_bytes(b"not a video" * 50)
+    assert any("could not be checked" in n for n in screens.final_notes(fp, plan2, frecs, broken))
+    assert any("could not be checked" in n for n in screens.final_notes(fp, plan2, frecs, None))
+    _manifest(fp, [("s02", "assets/video/s02.mp4")])
+    _miss = screens.final_notes(fp, plan2, frecs, right)
+    assert any("could not be checked" in n and "asset manifest" in n for n in _miss), _miss
+    _manifest(fp, [("s01", "assets/video/s01.mp4"), ("s02", "assets/video/s02.mp4")])
+
+    # layout edited after the overlay was rendered -> flagged; compose never ran -> flagged
+    edited = plan_with((1, "in_01", dict(L1, frame="card")), (2, "in_02", L2), n_scenes=2)
+    assert any("layout changed" in n for n in screens.final_notes(fp, edited, frecs, right))
+    (fp / "overlay/s01.json").unlink()
+    assert any("were not rendered" in n for n in screens.final_notes(fp, plan2, frecs, right))
+    print("[ok] final check: each screenshot verified in its own scene and window (sequential ones "
+          "independently); a wrong-scene screenshot flagged; no timeline / changed cut / unreadable "
+          "frames / missing reference reported as 'could not be checked', never as a pass")
 else:
     print("[skip] final check (ffmpeg not on PATH)")
 
@@ -930,6 +1040,114 @@ assert json.loads(_ejob.read_text(encoding="utf-8"))["language"] == "en", "no la
 assert screens._job_language(PROJECTS / "does-not-exist") == "en"
 print("[ok] canvas parsing matches the real stills, the logo keep-out covers the stamp on small "
       "stills, slide / image wording, the newest scene plan wins, job.json carries the job language")
+
+# ---------------------------------------------------------------------------
+# 11) timing against the COMPOSED duration, the caption as it really wraps, one preview per window
+# ---------------------------------------------------------------------------
+# a placement at 4-5 s in a scene the edit cut to 3 s never appears -> named, not quietly moved
+_late = dict(GOOD_PHONE, steps=[], show={"from_s": 4.0, "to_s": 5.0})
+_late_items = sl.screenshot_items(plan_with((1, "in_01", _late), n_scenes=1))
+assert sl.timing_errors(_late_items, 5.0, INPUTS) == []
+_te = sl.timing_errors(_late_items, 3.0, INPUTS)
+assert len(_te) == 1 and "scene 1 (screenshot 1)" in _te[0] and "4–5 s" in _te[0] \
+    and "composed at 3 s" in _te[0] and "never appear" in _te[0], _te
+# a window that only overruns is a different, equally explicit message
+_over = sl.timing_errors(sl.screenshot_items(plan_with(
+    (1, "in_01", dict(GOOD_PHONE, steps=[], show={"from_s": 0.0, "to_s": 5.0})), n_scenes=1)),
+    3.0, INPUTS)
+assert len(_over) == 1 and "would be cut" in _over[0], _over
+# steps and entrances are measured against the composed duration too
+_step = sl.timing_errors(sl.screenshot_items(plan_with((1, "in_01", GOOD_PHONE), n_scenes=1)),
+                         2.0, INPUTS)
+assert any("step 2 (zoom_to)" in n and "outside the 2 s" in n for n in _step), _step
+_ent = sl.timing_errors(sl.screenshot_items(plan_with(
+    (1, "in_01", dict(GOOD_PHONE, steps=[], enter={"type": "fade", "at_s": 4.0})), n_scenes=1)),
+    3.0, INPUTS)
+assert any("entrance ends at" in n for n in _ent), _ent
+# a still pipeline has no timing at all
+assert sl.timing_errors(_late_items, 3.0, INPUTS, "panda-carousel") == []
+
+# compose refuses the render rather than shortening what the user asked for
+_cp = PROJECTS / "job_compose_timing"
+(_cp / "inputs").mkdir(parents=True, exist_ok=True)
+(_cp / "assets" / "video").mkdir(parents=True, exist_ok=True)
+(_cp / "inputs" / "in_01.png").write_bytes(png_bytes(40, 80))
+(_cp / "inputs" / "inputs.json").write_text(json.dumps(
+    [dict(INPUTS[0], file="in_01.png", sha256="z")]), encoding="utf-8")
+(_cp / "inputs" / "job.json").write_text(json.dumps({"pipeline": "panda-video"}), encoding="utf-8")
+(_cp / "checkpoint_scene_plan.json").write_text(json.dumps(
+    {"artifacts": {"scene_plan": plan_with((1, "in_01", _late), n_scenes=1)}}), encoding="utf-8")
+_clip = _cp / "assets" / "video" / "s01.mp4"
+_clip.write_bytes(b"\x00" * 64)
+from tools.video.screen_overlay import ScreenOverlay  # noqa: E402
+
+_res = ScreenOverlay().execute({"mode": "compose", "project_dir": str(_cp), "scenes": [
+    {"scene_id": "s01", "media_path": str(_clip), "duration_s": 3.0}]})
+assert not _res.success and "will not move a placement" in (_res.error or ""), _res.error
+assert "4–5 s" in (_res.error or ""), _res.error
+assert not (_cp / "overlay" / "timeline.json").exists(), "a refused compose records no timeline"
+# the same scene at its planned length composes (no timing complaint before the render starts)
+_res_ok = ScreenOverlay().execute({"mode": "compose", "project_dir": str(_cp), "scenes": [
+    {"scene_id": "s01", "media_path": str(_clip), "duration_s": 5.0}]})
+assert "will not move a placement" not in (_res_ok.error or ""), _res_ok.error
+
+# --- the caption area is measured from the scene's real caption ------------------
+_CAP_ZONE = {"zone": {"x": 0.06, "y": 0.50, "w": 0.52, "h": 0.24}, "frame": "phone",
+             "camera": "locked", "steps": []}
+_dev = sl.device_box_fraction(_CAP_ZONE, 1080, 1920, {"width": 1170, "height": 2532})
+assert _dev["y"] + _dev["h"] < sl.keep_out_for(1080, 1920)["captions"]["y"], \
+    "the test screenshot must sit clear of the one-line caption strip"
+
+
+def _cap_plan(zh: str, en: str) -> dict:
+    plan = plan_with((1, "in_01", _CAP_ZONE), n_scenes=1)
+    plan["scenes"][0]["captions"] = {"zh": zh, "en": en}
+    return plan
+
+
+_short = _cap_plan("点这里", "Tap here")
+assert not [n for n in sl.validate_layouts(_short, INPUTS, None) if "caption" in n], \
+    sl.validate_layouts(_short, INPUTS, None)
+_long = _cap_plan("在设置里点开移动服务然后添加 eSIM 并扫描二维码，等待运营商确认后重启手机",
+                  "Open Settings, tap Mobile Service, then Add eSIM and scan the QR code, then "
+                  "wait for the carrier to confirm and restart the phone")
+_ln = [n for n in sl.validate_layouts(_long, INPUTS, None) if "caption strip" in n]
+assert len(_ln) == 1 and "as it wraps" in _ln[0], sl.validate_layouts(_long, INPUTS, None)
+assert sl.measure_caption(1080, 1920, _long["scenes"][0]["captions"])["y"] \
+    < sl.keep_out_for(1080, 1920)["captions"]["y"], "a wrapped bilingual caption reaches higher"
+# a scene with no caption in the plan keeps the one-line strip (nothing to measure, no guessing)
+assert sl.caption_keep_out(1080, 1920, None) == (sl.keep_out_for(1080, 1920)["captions"], True)
+# the same clearance is re-checked at the later video gates, and never applies to a still job
+assert [n for n in sl.caption_notes(_long, INPUTS) if "caption covers part" in n]
+assert sl.caption_notes(_short, INPUTS) == []
+assert sl.caption_notes(_long, INPUTS, pipeline="panda-carousel") == []
+# the conservative fallback is used and DECLARED when the renderer cannot be measured
+_real_measure = sl.measure_caption
+sl.measure_caption = lambda *a, **k: None
+try:
+    _fb, _measured = sl.caption_keep_out(1080, 1920, _long["scenes"][0]["captions"])
+    assert not _measured and _fb["y"] < sl.keep_out_for(1080, 1920)["captions"]["y"], _fb
+    assert any("conservative estimate" in n for n in sl.validate_layouts(_long, INPUTS, None))
+finally:
+    sl.measure_caption = _real_measure
+
+# --- one preview per set of screenshots on screen together ----------------------
+_A = dict(GOOD_PHONE, steps=[], show={"from_s": 0.0, "to_s": 2.4})
+_B = dict(GOOD_WEB, zone=dict(GOOD_PHONE["zone"]), show={"from_s": 2.6, "to_s": 5.0})
+_seq = sl.screenshot_items(plan_with((1, "in_01", _A), (1, "in_02", _B), n_scenes=1))
+_w = sl.display_windows(_seq, 5.0)
+assert [(round(a, 1), round(b, 1), [i["input_id"] for i in its]) for a, b, its in _w] == [
+    (0.0, 2.4, ["in_01"]), (2.6, 5.0, ["in_02"])], _w
+for _a, _b, _its in _w:                       # the moment a preview is drawn at is inside it
+    _t = sl.preview_time(_its, 5.0, (_a, _b))
+    assert _a <= _t <= _b, (_a, _b, _t)
+# screenshots shown together stay ONE preview (an intentionally simultaneous layout)
+_both = sl.screenshot_items(plan_with((1, "in_01", dict(GOOD_PHONE, steps=[])),
+                                      (1, "in_02", GOOD_WEB), n_scenes=1))
+assert len(sl.display_windows(_both, 5.0)) == 1
+print("[ok] timing measured against the composed duration (compose refuses rather than moving a "
+      "placement), the caption area measured from the scene's own wrapped caption, one preview "
+      "per display window")
 
 _server.shutdown()
 shutil.rmtree(_TMP, ignore_errors=True)
