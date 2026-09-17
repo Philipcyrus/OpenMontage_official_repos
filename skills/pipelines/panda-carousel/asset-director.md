@@ -29,6 +29,21 @@ Walk every scene. Each `required_assets` entry of type `image` is one still task
 (`scene_id`, description, Element ids, captions, aspect ratio from
 `scene_plan.metadata.aspect_ratio` — default `4:5`).
 
+### 1b. User screenshots (only when the prompt has a USER SCREENSHOTS block)
+- `source: "provided"` items are the user's screenshots. They are **not** still tasks: never
+  generate, edit or upload them, never copy them into `assets/`, never add them to
+  `asset_manifest`, never call `screen_overlay`.
+- Their slides still get the normal generated still (hero included), composed so the screenshot area
+  stays empty. The prompt facts list, per slide, the area to keep plain and where the character
+  stands. Put both into the still prompt ("panda bottom-left; headline across the top; the right 55%
+  below the headline is plain white background — empty, no character, props, text or scenery").
+  Keep the baked slide copy out of that area too.
+- After every stills pass the launcher places the screenshots onto the stills the user reviews and
+  the brand pass stamps. The files under `assets/images` stay clean: always revise from them (edit
+  mode imports the clean still), and never paint a screenshot into a prompt or an edit.
+- The launcher checks those areas on every still and flags any that are not empty; regenerate only
+  the flagged slide, with the area empty.
+
 ### 2. PHASE 0 — ONE HERO STILL, then STOP (GATE 2.5) when `hero_still` is on (default)
 Generate ONE still for `hero_moment` (else slide 1). Checkpoint top-level
 `partial_progress={"phase":"hero_still","hero_scene_id":"…","look_notes":[]}` and STOP.

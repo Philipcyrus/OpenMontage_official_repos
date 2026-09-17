@@ -1,10 +1,14 @@
 """User screenshots laid over generated Panda shots — shared layout logic.
 
-A user may attach screenshots to a panda-video brief and say which one goes in which scene
-and how to use it. The scene-plan director writes a *layout* for each placement onto the
-scene's ``required_assets`` item (``source: "provided"``). That one layout drives the still /
-clip prompts (which area stays empty), the gate boards, the launcher checks and the final
-Remotion overlay — so they cannot disagree.
+A user may attach screenshots to a panda-video, panda-carousel or panda-image brief and say
+which one goes in which scene (a carousel slide, or the one image) and how to use it. The
+scene-plan director writes a *layout* for each placement onto the scene's ``required_assets``
+item (``source: "provided"``). That one layout drives the still / clip prompts (which area stays
+empty), the gate boards, the launcher checks and the Remotion render — so they cannot disagree.
+
+Video: the screenshots are laid over each clip at compose (timed steps). Carousel / image: the
+launcher places them onto every approved still (settled state, no timing), so the stills the
+user reviews and the brand pass stamps already carry them.
 
 Used by ``tools/video/screen_overlay.py`` (renders) and ``dify_launcher/screens.py`` (intake,
 checks, prompt facts). Stdlib only at import time.
@@ -14,8 +18,9 @@ Geometry mirrors ``remotion-composer/src/panda/screenGeometry.ts`` — keep the 
 Project files (all launcher-owned, never under ``assets/``):
     projects/<job>/inputs/in_01.png ...   normalised uploads
     projects/<job>/inputs/inputs.json     [{n, input_id, name, file, width, height, sha256}]
+    projects/<job>/inputs/job.json        {pipeline}
     projects/<job>/inputs/requests.json   the user's guidance, written by the idea director
-    projects/<job>/overlay/               boards, composite clips, work files
+    projects/<job>/overlay/               boards, composite clips / stills, work files
 """
 
 from __future__ import annotations
@@ -29,6 +34,12 @@ INPUTS_DIR = "inputs"
 OVERLAY_DIR = "overlay"
 INPUTS_FILE = "inputs.json"
 REQUESTS_FILE = "requests.json"
+JOB_FILE = "job.json"
+
+VIDEO_PIPELINE = "panda-video"
+STILL_PIPELINES = ("panda-carousel", "panda-image")
+PIPELINES = (VIDEO_PIPELINE, *STILL_PIPELINES)
+DEFAULT_ASPECTS = {"panda-video": "9:16", "panda-carousel": "4:5", "panda-image": "1:1"}
 
 FRAMES = ("phone", "browser", "card", "none")
 MOTIONS = ("none", "fade", "pop", "slide_left", "slide_right", "slide_up", "slide_down")
@@ -47,6 +58,8 @@ CANVASES: dict[str, tuple[int, int]] = {
     "16:9": (1920, 1080),
     "1:1": (1080, 1080),
     "4:5": (1080, 1350),
+    "3:4": (1080, 1440),
+    "4:3": (1440, 1080),
 }
 DEFAULT_ASPECT = "9:16"
 
@@ -63,6 +76,10 @@ KEEP_OUT: dict[tuple[int, int], dict[str, dict[str, float]]] = {
                    "logo": {"x": 0.64, "y": 0.06, "w": 0.33, "h": 0.17}},
     (1080, 1350): {"captions": {"x": 0.03, "y": 0.66, "w": 0.94, "h": 0.13},
                    "logo": {"x": 0.64, "y": 0.05, "w": 0.33, "h": 0.13}},
+    (1080, 1440): {"captions": {"x": 0.03, "y": 0.68, "w": 0.94, "h": 0.12},
+                   "logo": {"x": 0.64, "y": 0.04, "w": 0.33, "h": 0.13}},
+    (1440, 1080): {"captions": {"x": 0.03, "y": 0.57, "w": 0.94, "h": 0.16},
+                   "logo": {"x": 0.72, "y": 0.05, "w": 0.26, "h": 0.18}},
 }
 
 # Legibility: how much the screenshot is scaled on screen. Below MIN the text gets tiny,
@@ -101,6 +118,34 @@ def load_inputs(project_dir: Path) -> list[dict[str, Any]]:
 
 def has_inputs(project_dir: Path) -> bool:
     return bool(load_inputs(project_dir))
+
+
+def pipeline_of(project_dir: Path) -> str:
+    """The pipeline the uploads were accepted for (inputs/job.json); panda-video if unknown."""
+    data = _read_json(inputs_dir(project_dir) / JOB_FILE)
+    name = str((data or {}).get("pipeline") or "") if isinstance(data, dict) else ""
+    return name if name in PIPELINES else VIDEO_PIPELINE
+
+
+def is_still_pipeline(pipeline: Optional[str]) -> bool:
+    return pipeline in STILL_PIPELINES
+
+
+def unit_word(pipeline: Optional[str]) -> str:
+    """What a scene is called for this pipeline: scene / slide / image."""
+    return {"panda-carousel": "slide", "panda-image": "image"}.get(str(pipeline), "scene")
+
+
+def unit_label(pipeline: Optional[str], n: int) -> str:
+    """'scene 3' / 'slide 3' / 'the image' (panda-image makes one image)."""
+    word = unit_word(pipeline)
+    if pipeline == "panda-image" and n == 1:
+        return "the image"
+    return f"{word} {n}"
+
+
+def deliverable_word(pipeline: Optional[str]) -> str:
+    return {"panda-carousel": "carousel", "panda-image": "image"}.get(str(pipeline), "video")
 
 
 def load_requests(project_dir: Path) -> Optional[list[dict[str, Any]]]:
@@ -284,7 +329,8 @@ def device_box_fraction(layout: dict[str, Any], W: int, H: int,
 # ---------------------------------------------------------------------------
 
 def canvas_for(scene_plan: Optional[dict[str, Any]] = None,
-               resolution: Optional[str] = None) -> tuple[int, int]:
+               resolution: Optional[str] = None,
+               pipeline: Optional[str] = None) -> tuple[int, int]:
     if resolution and "x" in str(resolution):
         try:
             w, h = (int(v) for v in str(resolution).lower().split("x", 1))
@@ -292,17 +338,25 @@ def canvas_for(scene_plan: Optional[dict[str, Any]] = None,
                 return w, h
         except ValueError:
             pass
+    default = DEFAULT_ASPECTS.get(str(pipeline), DEFAULT_ASPECT)
     meta = (scene_plan or {}).get("metadata") if isinstance(scene_plan, dict) else None
-    ratio = str((meta or {}).get("aspect_ratio") or DEFAULT_ASPECT).strip()
-    return CANVASES.get(ratio, CANVASES[DEFAULT_ASPECT])
+    ratio = str((meta or {}).get("aspect_ratio") or default).strip()
+    return CANVASES.get(ratio, CANVASES[default])
 
 
-def keep_out_for(W: int, H: int) -> dict[str, dict[str, float]]:
+def keep_out_for(W: int, H: int, pipeline: Optional[str] = None) -> dict[str, dict[str, float]]:
+    """Areas the screenshot must stay out of. Carousel / image stills get no caption strip (slide
+    copy is part of the generated still) and the whole top-right corner for the logo, because the
+    brand stamp sits closer to the corner on larger stills."""
     if (W, H) in KEEP_OUT:
-        return KEEP_OUT[(W, H)]
-    ratio = W / H
-    best = min(KEEP_OUT, key=lambda k: abs(k[0] / k[1] - ratio))
-    return KEEP_OUT[best]
+        areas = KEEP_OUT[(W, H)]
+    else:
+        ratio = W / H
+        areas = KEEP_OUT[min(KEEP_OUT, key=lambda k: abs(k[0] / k[1] - ratio))]
+    if not is_still_pipeline(pipeline):
+        return areas
+    logo = areas["logo"]
+    return {"logo": {"x": logo["x"], "y": 0.0, "w": 1.0 - logo["x"], "h": logo["y"] + logo["h"]}}
 
 
 def scene_duration(scene: dict[str, Any]) -> float:
@@ -419,7 +473,7 @@ def validate_requests(inputs: list[dict[str, Any]],
 def _check_steps(label: str, layout: dict[str, Any], duration: float,
                  geo: dict[str, Any], natural: dict[str, Any], W: int, H: int,
                  keep_out: dict[str, dict[str, float]],
-                 subject: Optional[dict[str, float]]) -> list[str]:
+                 subject: Optional[dict[str, float]], still: bool = False) -> list[str]:
     notes: list[str] = []
     crop = fit_region(norm_box(layout.get("crop")), geo["aspect"], natural)
     for i, st in enumerate(layout.get("steps") or []):
@@ -444,13 +498,13 @@ def _check_steps(label: str, layout: dict[str, Any], duration: float,
             if not st.get("text"):
                 notes.append(f"{where} has no text")
             cz = norm_box(st.get("zone"))
-            if overlaps(cz, keep_out["captions"]):
+            if "captions" in keep_out and overlaps(cz, keep_out["captions"]):
                 notes.append(f"{where} overlaps the caption strip ({fmt_box(keep_out['captions'])})")
             if subject and overlaps(cz, subject):
                 notes.append(f"{where} covers the character area")
         at = _num(st.get("at_s"))
         dur = _num(st.get("duration_s")) or 0.0
-        if at is not None and (at < -EPS or at + dur > duration + 0.05):
+        if not still and at is not None and (at < -EPS or at + dur > duration + 0.05):
             notes.append(f"{where} runs outside the scene (0–{duration:g} s)")
         if kind == "zoom_to":
             target = fit_region(st["region"], geo["aspect"], natural)
@@ -465,12 +519,20 @@ def _check_steps(label: str, layout: dict[str, Any], duration: float,
 
 def validate_layouts(scene_plan: Optional[dict[str, Any]], inputs: list[dict[str, Any]],
                      requests: Optional[list[dict[str, Any]]],
-                     canvas: Optional[tuple[int, int]] = None) -> list[str]:
-    """Plain-language problems with the plan's screenshot placements (empty = all good)."""
+                     canvas: Optional[tuple[int, int]] = None,
+                     pipeline: Optional[str] = None) -> list[str]:
+    """Plain-language problems with the plan's screenshot placements (empty = all good).
+
+    Carousel / image stills have no timing and no caption strip: layouts are checked in their
+    settled state, and any two screenshots that overlap on the same slide are a problem."""
     notes: list[str] = []
+    pipeline = pipeline or VIDEO_PIPELINE
+    still = is_still_pipeline(pipeline)
+    word = unit_word(pipeline)
+    unit = lambda s: unit_label(pipeline, s)  # noqa: E731
     scenes = (scene_plan or {}).get("scenes") or [] if isinstance(scene_plan, dict) else []
-    W, H = canvas or canvas_for(scene_plan)
-    keep_out = keep_out_for(W, H)
+    W, H = canvas or canvas_for(scene_plan, pipeline=pipeline)
+    keep_out = keep_out_for(W, H, pipeline)
     known = {r["input_id"]: r for r in inputs}
     items = screenshot_items(scene_plan)
     number = {iid: known[iid].get("n") for iid in known}
@@ -490,19 +552,23 @@ def validate_layouts(scene_plan: Optional[dict[str, Any]], inputs: list[dict[str
             if wanted:
                 for s in wanted:
                     if s > len(scenes):
-                        notes.append(f"screenshot {n} is assigned to scene {s}, but the plan has "
-                                     f"only {len(scenes)} scenes")
+                        if pipeline == "panda-image":
+                            notes.append(f"screenshot {n} is assigned to image {s}, but this job "
+                                         "makes one image")
+                        else:
+                            notes.append(f"screenshot {n} is assigned to {word} {s}, but the plan "
+                                         f"has only {len(scenes)} {word}s")
                     elif iid not in by_scene.get(s, set()):
-                        notes.append(f"scene {s} is missing screenshot {n}, which the user put there")
+                        notes.append(f"{unit(s)} is missing screenshot {n}, which the user put there")
                 for s, ids in sorted(by_scene.items()):
                     if iid in ids and s not in wanted:
-                        notes.append(f"scene {s} shows screenshot {n}, but the user put it in "
-                                     f"scene {', '.join(str(x) for x in wanted)}")
+                        notes.append(f"{unit(s)} shows screenshot {n}, but the user put it in "
+                                     f"{word} {', '.join(str(x) for x in wanted)}")
             elif is_unplaced(req):
                 if iid in placed_anywhere:
-                    notes.append(f"screenshot {n} has no scene from the user but appears in the plan")
+                    notes.append(f"screenshot {n} has no {word} from the user but appears in the plan")
             elif iid not in placed_anywhere:
-                notes.append(f"screenshot {n} ({str(req.get('moment'))[:60]}) is not used in any scene")
+                notes.append(f"screenshot {n} ({str(req.get('moment'))[:60]}) is not used in any {word}")
 
     # --- each placement ------------------------------------------------------
     grouped = items_by_scene(items)
@@ -510,7 +576,7 @@ def validate_layouts(scene_plan: Optional[dict[str, Any]], inputs: list[dict[str
         shown: list[tuple[dict[str, float], float, float, str]] = []
         for it in group:
             rec = known.get(it["input_id"])
-            label = f"scene {it['scene_number']}"
+            label = unit(it["scene_number"])
             if rec is None:
                 notes.append(f"{label} uses an unknown screenshot id {it['input_id']!r}")
                 continue
@@ -542,12 +608,13 @@ def validate_layouts(scene_plan: Optional[dict[str, Any]], inputs: list[dict[str
             if subject and overlaps(dev, subject):
                 notes.append(f"{label}: the screenshot covers the character area "
                              f"({fmt_box(subject)})")
-            if overlaps(dev, keep_out["captions"]):
+            if "captions" in keep_out and overlaps(dev, keep_out["captions"]):
                 notes.append(f"{label}: the screenshot overlaps the caption strip "
                              f"({fmt_box(keep_out['captions'])})")
             if overlaps(dev, keep_out["logo"]):
                 notes.append(f"{label}: the screenshot reaches the corner where the Panda logo "
-                             f"goes if the video is branded ({fmt_box(keep_out['logo'])})")
+                             f"goes if the {deliverable_word(pipeline)} is branded "
+                             f"({fmt_box(keep_out['logo'])})")
             crop_px = fit_region(norm_box(layout.get("crop")), geo["aspect"], natural)
             scale = geo["screen"]["w"] / max(1.0, crop_px["w"])
             if scale < LEGIBLE_MIN_SCALE:
@@ -555,25 +622,30 @@ def validate_layouts(scene_plan: Optional[dict[str, Any]], inputs: list[dict[str
                              "bigger, crop to the part that matters, or zoom in")
             elif scale > LEGIBLE_MAX_SCALE:
                 notes.append(f"{label}: enlarged {scale:.1f}× — it will look soft")
-            show = layout.get("show") if isinstance(layout.get("show"), dict) else {}
-            s_from = _num(show.get("from_s")) or 0.0
-            s_to = _num(show.get("to_s"))
-            s_to = it["duration"] if s_to is None else s_to
-            if s_from < -EPS or s_to <= s_from or s_to > it["duration"] + 0.05:
-                notes.append(f"{label}: show window must fit the scene (0–{it['duration']:g} s)")
+            if still:
+                s_from, s_to = 0.0, 1.0      # a still has no timing: everything shows at once
+            else:
+                show = layout.get("show") if isinstance(layout.get("show"), dict) else {}
+                s_from = _num(show.get("from_s")) or 0.0
+                s_to = _num(show.get("to_s"))
+                s_to = it["duration"] if s_to is None else s_to
+                if s_from < -EPS or s_to <= s_from or s_to > it["duration"] + 0.05:
+                    notes.append(f"{label}: show window must fit the scene (0–{it['duration']:g} s)")
             notes += _check_steps(label, layout, it["duration"], geo, natural, W, H,
-                                  keep_out, subject)
+                                  keep_out, subject, still)
             for other_dev, o_from, o_to, other_label in shown:
                 if overlaps(dev, other_dev) and s_from < o_to - EPS and o_from < s_to - EPS:
-                    notes.append(f"{label} and {other_label} overlap on screen at the same time")
+                    notes.append(f"{label} and {other_label} overlap on screen"
+                                 + ("" if still else " at the same time"))
             shown.append((dev, s_from, s_to, label))
     return notes
 
 
 def keep_clear_lines(scene_plan: Optional[dict[str, Any]],
-                     canvas: Optional[tuple[int, int]] = None) -> list[str]:
+                     canvas: Optional[tuple[int, int]] = None,
+                     pipeline: Optional[str] = None) -> list[str]:
     """Per screenshot scene: which areas the still/clip must leave plain (for prompts)."""
-    W, H = canvas or canvas_for(scene_plan)
+    still = is_still_pipeline(pipeline)
     lines: list[str] = []
     for scene_id, group in items_by_scene(screenshot_items(scene_plan)).items():
         zones = [norm_box(it["layout"].get("zone")) for it in group if valid_box(it["layout"].get("zone"))]
@@ -581,12 +653,14 @@ def keep_clear_lines(scene_plan: Optional[dict[str, Any]],
                     if valid_box(it["layout"].get("subject_zone"))]
         if not zones:
             continue
-        parts = [f"scene {group[0]['scene_number']} ({scene_id}): keep "
+        parts = [f"{unit_label(pipeline, group[0]['scene_number'])} ({scene_id}): keep "
                  + "; ".join(fmt_box(z) for z in zones)
-                 + " plain white — no character, props or text there"]
+                 + (" plain white — no character, props or slide text there" if still
+                    else " plain white — no character, props or text there")]
         if subjects:
             parts.append("character inside " + "; ".join(fmt_box(s) for s in subjects))
-        parts.append("camera locked")
+        if not still:
+            parts.append("camera locked")
         lines.append(", ".join(parts))
     return lines
 

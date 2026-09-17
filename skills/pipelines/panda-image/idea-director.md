@@ -59,6 +59,23 @@ Fix `deliverable_mix`:
 Recommended keys: `concept`, `deliverable_mix` (still_count=1, aspect_ratio, language),
 `character_lock`, `visual_medium` (default `2d_flat`), `missing_capabilities`, `fallback_policy`.
 
+### 4b. User screenshots (only when the prompt has a USER SCREENSHOTS block)
+The user attached screenshots for this image and may have said how to use them. Their guidance is
+binding — you record it, you do not re-decide it.
+1. Look at every screenshot (read them all in one turn) so you know what each one shows.
+2. Write `projects/<job>/inputs/requests.json` — one entry per upload
+   (`schemas/artifacts/screen_requests.schema.json`):
+   `{"n": 1, "input_id": "in_01", "scenes": [1], "moment": "", "instruction": "highlight the Activate button", "shows": "activation page with the Activate button"}`
+   - The image is scene 1. A screenshot the brief asks to use or talks about gets `"scenes": [1]`.
+   - A screenshot the brief never refers to, or says not to use → `"scenes": []` and `"moment": ""`.
+     It is **not used**; never place it on your own.
+   - `n` is the attachment number the user sees; they may also name a screenshot by file name or
+     by what it shows.
+   - `instruction`: how to use it, in the user's words (highlight, blur, frame, text).
+3. One image holds about two screenshots readably. If the user placed more, record them all anyway
+   and note in the brief that the layout will be tight.
+4. Never copy screenshots into `assets/`, never edit them, never send them to Higgsfield.
+
 ### 5. Quality check (self, no human pause)
 - [ ] The concept is a single readable still, not a video or a carousel
 - [ ] Aspect ratio (from `options.aspect_ratio`, default `1:1`) + language are explicit

@@ -14,9 +14,14 @@ this tool renders it deterministically, 0 credits:
                   duration_s, cover-cropped like panda_render) with the screenshot layers on top,
                   and return the same list with those media_paths swapped. Call it right
                   before panda_render and pass panda_render the returned list.
+  mode "still"    carousel / image: place one scene's screenshots onto its generated still, at the
+                  still's own size, every layer and step in its settled state. Called by the
+                  launcher, not by the agent.
 
 Remotion renders a transparent PNG sequence (PandaScreenOverlay) that ffmpeg composites onto
-the normalised clip, so the Panda pixels are only touched by the final encode.
+the normalised clip, so the Panda pixels are only touched by the final encode. For stills it
+renders one transparent PNG that is alpha-composited onto the still, so every pixel outside the
+screenshot layers stays exactly as generated.
 """
 
 from __future__ import annotations
@@ -46,7 +51,8 @@ from tools.base_tool import (
 
 _ENGINE_ROOT = Path(__file__).resolve().parents[2]
 COMPOSER_DIR = _ENGINE_ROOT / "remotion-composer"
-ENTRY = "src/index.tsx"
+# Panda-only bundle: src/index.tsx would also load compositions that download Google Fonts.
+ENTRY = "src/panda/entry.tsx"
 BOARD_TIMEOUT_S = int(os.environ.get("SCREEN_OVERLAY_BOARD_TIMEOUT_S", "300"))
 RENDER_TIMEOUT_S = int(os.environ.get("SCREEN_OVERLAY_RENDER_TIMEOUT_S", "900"))
 MIN_NODE_MAJOR = 22
@@ -128,7 +134,7 @@ class ScreenOverlay(BaseTool):
         "type": "object",
         "required": ["mode"],
         "properties": {
-            "mode": {"type": "string", "enum": ["board", "compose"]},
+            "mode": {"type": "string", "enum": ["board", "compose", "still"]},
             "project_id": {"type": "string"},
             "project_dir": {"type": "string", "description": "Absolute project dir (else projects/<project_id>)."},
             "kind": {"type": "string", "enum": ["uploads", "layouts", "stills", "clips"],
@@ -137,6 +143,8 @@ class ScreenOverlay(BaseTool):
             "notes": {"type": "object", "description": "board only: {scene_number or n: note}"},
             "scenes": {"type": "array", "description": "compose only: the exact panda_render scene list; "
                                                       "add scene_id to each item"},
+            "scene_id": {"type": "string", "description": "still only"},
+            "still_path": {"type": "string", "description": "still only: the generated still"},
             "resolution": {"type": "string", "default": "1080x1920"},
             "language": {"type": "string", "default": "zh"},
         },
@@ -208,6 +216,8 @@ class ScreenOverlay(BaseTool):
         recs = sl.load_inputs(project)
         if not recs:
             return ToolResult(success=False, error="this project has no user screenshots")
+        pipeline = sl.pipeline_of(project)
+        word = sl.unit_word(pipeline)
         by_id = {r["input_id"]: r for r in recs}
         work = sl.overlay_dir(project) / "work" / f"board_{kind}"
         public = work / "public"
@@ -230,7 +240,9 @@ class ScreenOverlay(BaseTool):
                 if q is None:
                     where = "not matched yet"
                 elif sl.request_scenes(q):
-                    where = "scene " + ", ".join(str(s) for s in sl.request_scenes(q))
+                    where = (sl.unit_label(pipeline, 1) if pipeline == "panda-image"
+                             and sl.request_scenes(q) == [1]
+                             else f"{word} " + ", ".join(str(s) for s in sl.request_scenes(q)))
                 elif str(q.get("moment") or "").strip():
                     where = str(q.get("moment"))[:40]
                 else:
@@ -254,7 +266,7 @@ class ScreenOverlay(BaseTool):
             items = sl.screenshot_items(plan)
             if not items:
                 return ToolResult(success=False, error="the scene plan places no screenshots")
-            W, H = sl.canvas_for(plan, inputs.get("resolution"))
+            W, H = sl.canvas_for(plan, inputs.get("resolution"), pipeline)
             title = {"layouts": "Layouts · Panda area marked",
                      "stills": "Over the stills",
                      "clips": "Over the clips"}.get(kind, "Screenshots")
@@ -288,8 +300,9 @@ class ScreenOverlay(BaseTool):
                         cell_note = cell_note or "no clip found for this scene"
                 names = ", ".join(str(by_id[it["input_id"]].get("n")) for it in group
                                   if it["input_id"] in by_id)
+                unit = sl.unit_label(pipeline, n)
                 cells.append({
-                    "label": f"Scene {n} · screenshot {names}",
+                    "label": f"{unit[:1].upper()}{unit[1:]} · screenshot {names}",
                     "canvas": {"width": W, "height": H},
                     "sceneDuration": group[0]["duration"],
                     "background": background,
@@ -448,6 +461,83 @@ class ScreenOverlay(BaseTool):
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
+    # ------------------------------------------------------------------ still
+    def _still(self, inputs: dict[str, Any]) -> ToolResult:
+        start = time.time()
+        project = self._project_dir(inputs)
+        scene_id = str(inputs.get("scene_id") or "")
+        still = Path(str(inputs.get("still_path") or ""))
+        out = inputs.get("output_path")
+        if not scene_id or not out or not still.is_file():
+            return ToolResult(success=False,
+                              error="still needs scene_id, output_path and an existing still_path")
+        recs = {r["input_id"]: r for r in sl.load_inputs(project)}
+        group = sl.items_by_scene(sl.screenshot_items(self._scene_plan(project))).get(scene_id)
+        if not group:
+            return ToolResult(success=False, error=f"scene {scene_id} places no screenshots")
+        try:
+            path = self._render_still(project, scene_id, group, recs, still, Path(str(out)),
+                                      inputs.get("language") or "zh")
+        except Exception as e:  # noqa: BLE001
+            return ToolResult(success=False, error=f"scene {scene_id}: still render failed: {e}")
+        return ToolResult(success=True,
+                          data={"output_path": str(path), "scene_id": scene_id,
+                                "layout_hash": sl.layout_hash(group, recs.values())},
+                          artifacts=[str(path)], duration_seconds=round(time.time() - start, 2))
+
+    def _render_still(self, project: Path, scene_id: str, group: list[dict[str, Any]],
+                      recs: dict[str, dict[str, Any]], still: Path, out: Path,
+                      language: str) -> Path:
+        from PIL import Image
+
+        safe = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in scene_id)[:60] or "scene"
+        work = sl.overlay_dir(project) / "work" / f"still_{safe}"
+        if work.exists():
+            shutil.rmtree(work, ignore_errors=True)
+        public = work / "public"
+        public.mkdir(parents=True, exist_ok=True)
+        try:
+            with Image.open(still) as im:
+                had_alpha = im.mode in ("RGBA", "LA") or "transparency" in im.info
+                base = im.convert("RGBA")
+            W, H = base.size
+            layers = []
+            for it in group:
+                rec = recs.get(it["input_id"])
+                if rec is None:
+                    raise ValueError(f"unknown screenshot id {it['input_id']}")
+                src = sl.input_path(project, rec)
+                _link_or_copy(src, public / src.name)
+                layers.append(sl.layer_props(it, rec, src.name))
+            props = {"width": W, "height": H, "fps": 30, "durationInFrames": 1,
+                     "sceneDuration": group[0]["duration"], "background": {"type": "none"},
+                     "still": True, "layers": layers, "language": language}
+            font = self._stage_font(public)
+            if font:
+                props["fontSrc"] = font
+            props_path = work / "props.json"
+            props_path.write_text(json.dumps(props, ensure_ascii=False), encoding="utf-8")
+            layer_png = work / "layers.png"
+            self._run(["npx", "remotion", "still", ENTRY, "PandaScreenOverlay", str(layer_png.resolve()),
+                       "--image-format=png", f"--props={props_path.resolve()}",
+                       f"--public-dir={public.resolve()}"],
+                      timeout=BOARD_TIMEOUT_S, cwd=COMPOSER_DIR)
+            with Image.open(layer_png) as lp:
+                layer = lp.convert("RGBA")
+            if layer.size != base.size:
+                raise RuntimeError(f"overlay is {layer.size}, still is {base.size}")
+            base.alpha_composite(layer)
+            out.parent.mkdir(parents=True, exist_ok=True)
+            tmp = out.with_name(f"{out.stem}.tmp{out.suffix}")
+            if out.suffix.lower() in (".jpg", ".jpeg"):
+                base.convert("RGB").save(tmp, "JPEG", quality=95)
+            else:
+                (base if had_alpha else base.convert("RGB")).save(tmp, "PNG")
+            os.replace(tmp, out)
+            return out
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
     # ------------------------------------------------------------------ entry
     def execute(self, inputs: dict[str, Any]) -> ToolResult:
         mode = inputs.get("mode")
@@ -460,4 +550,6 @@ class ScreenOverlay(BaseTool):
             return self._board(inputs)
         if mode == "compose":
             return self._compose(inputs)
-        return ToolResult(success=False, error="mode must be 'board' or 'compose'")
+        if mode == "still":
+            return self._still(inputs)
+        return ToolResult(success=False, error="mode must be 'board', 'compose' or 'still'")

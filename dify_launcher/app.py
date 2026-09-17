@@ -301,9 +301,12 @@ def _prepare_media(options: dict[str, Any], pipeline: str) -> Optional[Any]:
         return None
     from dify_launcher import screens
 
-    if pipeline != "panda-video":
+    from lib.screen_layout import PIPELINES
+
+    if pipeline not in PIPELINES:
         raise HTTPException(status_code=400,
-                            detail="images (options.media) are supported for panda-video jobs only")
+                            detail="images (options.media) are supported for "
+                                   f"{', '.join(PIPELINES)} jobs only")
     from tools.video.screen_overlay import remotion_ready
 
     ok, why = remotion_ready()
@@ -340,7 +343,8 @@ def create_job(body: StartJob, x_dify_token: Optional[str] = Header(None)) -> di
 
         options.pop("media", None)    # the signed links expire; the files now live in the job
         try:
-            records = screens.commit(prepared, _projects_dir() / job_id)
+            records = screens.commit(prepared, _projects_dir() / job_id, pipeline=pipeline,
+                                     language=str(options.get("language") or "zh"))
         except OSError as e:
             raise HTTPException(status_code=500, detail=f"could not store the images: {e}") from e
         inputs = [{"n": r["n"], "name": r["name"]} for r in records]

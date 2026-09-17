@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://openmontage.dev/schemas/artifacts/screen_layout.schema.json",
   "title": "Screen layout",
-  "description": "How one user screenshot is laid over a generated Panda shot. Written by the panda-video scene-plan director on a scene_plan required_assets item with source 'provided'. Rendered by tools/video/screen_overlay.py; checked by lib/screen_layout.py. zone / subject_zone / card zone are fractions of the video frame; crop, step regions and points are fractions of the whole screenshot; *_s are seconds from the start of the scene.",
+  "description": "How one user screenshot is laid over a generated Panda shot. Written by the panda-video, panda-carousel or panda-image scene-plan director on a scene_plan required_assets item with source 'provided'. Rendered by tools/video/screen_overlay.py; checked by lib/screen_layout.py. zone / subject_zone / card zone are fractions of the frame (video frame, slide or image); crop, step regions and points are fractions of the whole screenshot; *_s are seconds from the start of the scene (video only — carousel and image stills show every part at once).",
   "type": "object",
   "required": ["zone", "frame"],
   "additionalProperties": false,

@@ -16,16 +16,7 @@ import { ProductReveal, ProductRevealProps } from "./components/ProductReveal";
 import { CaptionOverlay, WordCaption } from "./components/CaptionOverlay";
 import { CollageBurst, CollageBurstProps } from "./CollageBurst";
 import { LyricOverlay, LyricOverlayProps } from "./LyricOverlay";
-import {
-  PandaScreenOverlay,
-  PandaScreenOverlayProps,
-  calculatePandaScreenOverlayMetadata,
-} from "./panda/PandaScreenOverlay";
-import {
-  PandaScreenBoard,
-  PandaScreenBoardProps,
-  calculatePandaScreenBoardMetadata,
-} from "./panda/PandaScreenBoard";
+import { PandaCompositions } from "./panda/PandaCompositions";
 
 // ---------------------------------------------------------------------------
 // Theme System — prevents every video from looking like dark fintech
@@ -341,34 +332,7 @@ export const Root: React.FC = () => {
         } as EndTagProps}
       />
       {/* Panda: user screenshots laid over a generated shot (tools/video/screen_overlay.py) */}
-      <Composition
-        id="PandaScreenOverlay"
-        component={PandaScreenOverlay}
-        durationInFrames={150}
-        fps={30}
-        width={1080}
-        height={1920}
-        defaultProps={{
-          width: 1080,
-          height: 1920,
-          fps: 30,
-          durationInFrames: 150,
-          background: { type: "none" },
-          layers: [],
-          language: "zh",
-        } as PandaScreenOverlayProps}
-        calculateMetadata={calculatePandaScreenOverlayMetadata}
-      />
-      <Composition
-        id="PandaScreenBoard"
-        component={PandaScreenBoard}
-        durationInFrames={1}
-        fps={30}
-        width={1200}
-        height={800}
-        defaultProps={{ cells: [], language: "zh" } as PandaScreenBoardProps}
-        calculateMetadata={calculatePandaScreenBoardMetadata}
-      />
+      <PandaCompositions />
     </>
   );
 };

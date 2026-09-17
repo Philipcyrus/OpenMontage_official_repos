@@ -292,7 +292,7 @@ after the last content gate — a post-cut overlay, never in generation. `skip` 
 | `max_higgsfield_credits` | integer, or unset | **hard credit ceiling** for the run |
 | `aspect_ratio` | string | stills canvas, passed through to `generate_image`. Carousel default `"4:5"`; **panda-image** default `"1:1"`. Also `9:16`, `WIDTHxHEIGHT`, … |
 | `gates` | e.g. `["scene_plan", "stills"]` | carousel only — omit `script` to auto-approve GATE 1 |
-| `media` | `[{"url": "<Dify file link>", "name": "checkout.png"}, …]` | **panda-video only** — the user's screenshots, in attachment order. See **User screenshots** below |
+| `media` | `[{"url": "<Dify file link>", "name": "checkout.png"}, …]` | **panda-video, panda-carousel, panda-image** — the user's screenshots, in attachment order. See **User screenshots** below |
 
 If `voice_id` is omitted, the launcher builds a **VOICE CAST** map from
 `config/panda-elements.json` → `voices[speaker][language]` for all three brand speakers
@@ -323,28 +323,38 @@ unavailable — an infrastructure failure, never a missing id.
 - `"hyperframes"` — HTML/CSS/GSAP (kinetic typography, product-promo title cards). Needs Node ≥ 22 + headless Chrome on the box.
 - If a requested runtime isn't available on the box, the job **fails with a clear error** rather than silently downgrading. Leave it `"auto"` unless you specifically want motion-graphics output.
 
-### User screenshots (`options.media`, panda-video)
-The user attaches screenshots to the brief message and says, in the same message, which one goes in
-which scene and how to use it — e.g. *"Screenshot 1 in scene 1, zoom on Pay now and blur the card
-number. 3 and 4 in scene 2. Screenshot 5 when we explain activation."* (English or Chinese).
-Screenshots are numbered **in attachment order**; a file name or a description also works.
+### User screenshots (`options.media` — panda-video, panda-carousel, panda-image)
+The user attaches screenshots to the brief message and says, in the same message, which one goes
+where and how to use it — e.g. *"Screenshot 1 in scene 1, zoom on Pay now and blur the card
+number. 3 and 4 in scene 2. Screenshot 5 when we explain activation."* For a carousel the user
+names slides (*"screenshot 2 on slide 3"*); for a single image they just say which screenshots to
+use. English or Chinese. Screenshots are numbered **in attachment order**; a file name or a
+description also works.
 
 - **What happens:** Claude records the user's guidance (binding), then at the scene plan decides for
-  each placement where the screenshot sits, where the Panda stands, and the zoom / highlight / cursor /
-  blur / card timing. Stills and clips are generated with that area left empty, and at compose the
-  screenshots are laid over their clips with Remotion. **Screenshots are never sent to Higgsfield**
-  (0 credits for placement). A screenshot the user gave no scene for is **not used**.
+  each placement where the screenshot sits, where the Panda stands, and the highlight / cursor / blur /
+  card (plus zoom and timing for video). Stills and clips are generated with that area left empty.
+  **Screenshots are never sent to Higgsfield** (0 credits for placement). A screenshot the user gave
+  no scene / slide for is **not used**.
+  - **Video:** at compose the screenshots are laid over their clips with Remotion.
+  - **Carousel / image:** the launcher places the screenshots onto each generated still as soon as it
+    exists, so the hero, the stills, the storyboard and the branded copies (`branded_stills`) all
+    show them — what the reviewer approves is what they get. The clean still is kept and revisions
+    (`fresh` / `edit`) work from it. Slide copy is part of the generated still, so it is kept out of
+    the screenshot area.
 - **Dify side:** enable image upload on the chat (local files), pass `sys.files` into the node that
   builds the `POST /jobs` body, and send `options.media = [{"url": file.url, "name": file.filename}]`
   in the same order. Show the `inputs` list from the response if you want to echo the numbering.
 - **What the reviewer sees:** `artifacts.screens_board` — one picture per gate (numbered uploads at
-  `approve_script`, layouts with the Panda area marked at `approve_scene_plan`, screenshots over the
-  stills at `approve_hero_still` / `approve_stills`, over the clips at `approve_motion_sample` /
-  `approve_assets`). Show it full width. Problems the launcher's checks find (a scene missing a
-  screenshot the user put there, a still with the character in the screenshot area, a screenshot not
-  found in the final video, …) are appended to `question` under *"Your screenshots — please check"*.
-  The user fixes them with a normal revise — including re-assigning ("move 4 to scene 6") at the
-  scene plan gate.
+  `approve_script`, layouts with the Panda area marked at `approve_scene_plan`; for video also
+  screenshots over the stills at `approve_hero_still` / `approve_stills` and over the clips at
+  `approve_motion_sample` / `approve_assets`). Show it full width. Carousel / image jobs get no board
+  at their stills gates — the `stills` themselves carry the screenshots. Problems the launcher's
+  checks find (a scene or slide missing a screenshot the user put there, a still with the character
+  or slide text in the screenshot area, a screenshot that could not be placed, a screenshot not found
+  in the final video, …) are appended to `question` under *"Your screenshots — please check"*. The
+  user fixes them with a normal revise — including re-assigning ("move 4 to scene 6") at the scene
+  plan gate.
 - **Server requirements:** `DIFY_FILES_HOSTS` must name Dify's file host (empty = media refused);
   `DIFY_FILES_BASE` is needed only if Dify returns relative `/files/...` links (its `FILES_URL` unset).
   Node ≥ 22 + `remotion-composer` must be installed (`deploy/README.md`). Links are downloaded when the
@@ -398,7 +408,7 @@ Returned under `artifacts` in every state; grouped by kind:
 | `final` | single MP4 path | after compose (video pipeline) — UGC master, kept after branding |
 | `branded_final` | single MP4 path | after `approve_brand` approve or later `/brand` on a video job (`final.bgc.mp4`) |
 | `branded` | bool | `false` until branding is applied; then `true` |
-| `screens_board` | single PNG path | **jobs with user screenshots only** — the screenshot board for the current gate (uploads / layouts / over the stills / over the clips). Show it full width |
+| `screens_board` | single PNG path | **jobs with user screenshots only** — the screenshot board for the current gate (uploads / layouts; video also over the stills / over the clips). Show it full width |
 | `_checkpoint_artifacts` | raw structured data (render report, decision log) | context/debug |
 
 Structured artifacts (`script`, `scene_plan`, `asset_manifest`) come as **inline JSON objects** — display them directly for review, no fetch needed. **You MUST show `script` at the `approve_script` gate** so the reviewer reads the actual dialogue before approving — do not just show the gate label. (If a pipeline ever emits the script only as a markdown file instead of structured JSON, `script` falls back to a **relative URL** to fetch — but the panda-video script-director emits structured JSON.)

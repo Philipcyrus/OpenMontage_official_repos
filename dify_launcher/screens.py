@@ -1,13 +1,16 @@
 """User screenshots — the launcher side.
 
-Only active for jobs whose POST /jobs carried ``options.media``. Everything here is a no-op for
-jobs without uploads, so their prompts, gates and renders are unchanged.
+Only active for jobs whose POST /jobs carried ``options.media`` (panda-video, panda-carousel,
+panda-image). Everything here is a no-op for jobs without uploads, so their prompts, gates and
+renders are unchanged.
 
-  intake       download the Dify file links (allow-listed hosts only), check they are real
-               images, normalise them (EXIF rotation, metadata stripped, sRGB PNG) and stage
-               them under projects/<job>/inputs/ BEFORE the job exists
-  facts        the USER SCREENSHOTS block appended to every agent leg's prompt
-  apply_gate   per-gate checks (plain-language notes for the gate question) + preview boards
+  intake           download the Dify file links (allow-listed hosts only), check they are real
+                   images, normalise them (EXIF rotation, metadata stripped, sRGB PNG) and stage
+                   them under projects/<job>/inputs/ BEFORE the job exists
+  facts            the USER SCREENSHOTS block appended to every agent leg's prompt
+  place_on_stills  carousel / image: bake the screenshots into the job-store copy of each
+                   generated still (the clean still under assets/images is never touched)
+  apply_gate       per-gate checks (plain-language notes for the gate question) + preview boards
 
 Shared layout rules live in lib/screen_layout.py; rendering lives in tools/video/screen_overlay.py.
 """
@@ -41,6 +44,10 @@ ACCEPTED_FORMATS = ("PNG", "JPEG", "WEBP")
 CLEAR_MAX_BUSY = float(os.environ.get("SCREENSHOT_CLEAR_MAX_BUSY", "0.04"))
 # Final-video check: mean absolute difference (0-255) below which a frame "matches".
 FINAL_MATCH_MAX_DIFF = float(os.environ.get("SCREENSHOT_FINAL_MATCH_MAX_DIFF", "14"))
+# Carousel / image: time allowed for placing screenshots onto stills in one pass (renders are
+# cached, so each still is normally rendered once, ~7 s).
+STILLS_BUDGET_S = float(os.environ.get("SCREENSHOT_STILLS_BUDGET_S", "300"))
+STILL_RENDER_VERSION = "1"
 
 BOARD_FILES = {"uploads": "screens_uploads.png", "layouts": "screens_layouts.png",
                "stills": "screens_stills.png", "clips": "screens_clips.png"}
@@ -208,13 +215,16 @@ def prepare(options: Optional[dict[str, Any]]) -> Optional[tuple[Path, list[dict
         raise
 
 
-def commit(prepared: tuple[Path, list[dict[str, Any]]], project_dir: Path) -> list[dict[str, Any]]:
+def commit(prepared: tuple[Path, list[dict[str, Any]]], project_dir: Path,
+           pipeline: str = sl.VIDEO_PIPELINE, language: str = "zh") -> list[dict[str, Any]]:
     tmp, records = prepared
     dest = sl.inputs_dir(project_dir)
     dest.mkdir(parents=True, exist_ok=True)
     try:
         for rec in records:
             os.replace(tmp / rec["file"], dest / rec["file"])
+        (dest / sl.JOB_FILE).write_text(json.dumps({"pipeline": pipeline, "language": language}),
+                                        encoding="utf-8")
         (dest / sl.INPUTS_FILE).write_text(json.dumps(records, ensure_ascii=False, indent=1),
                                            encoding="utf-8")
     finally:
@@ -230,10 +240,12 @@ def public_inputs(project_dir: Path) -> list[dict[str, Any]]:
 # prompt facts
 # ---------------------------------------------------------------------------
 
-def _describe_request(q: dict[str, Any]) -> str:
+def _describe_request(q: dict[str, Any], pipeline: str = sl.VIDEO_PIPELINE) -> str:
     scenes = sl.request_scenes(q)
-    if scenes:
-        where = "scene " + ", ".join(str(s) for s in scenes)
+    if scenes and pipeline == "panda-image" and scenes == [1]:
+        where = "the image"
+    elif scenes:
+        where = f"{sl.unit_word(pipeline)} " + ", ".join(str(s) for s in scenes)
     elif str(q.get("moment") or "").strip():
         where = f"moment: {str(q.get('moment')).strip()[:80]}"
     else:
@@ -256,21 +268,38 @@ def facts(project_dir: Path) -> str:
     for r in recs:
         lines.append(f"  {r.get('n')}. {r['input_id']}  {r.get('name')}  "
                      f"{r.get('width')}x{r.get('height')}  {idir / str(r.get('file'))}")
+    pipeline = sl.pipeline_of(project_dir)
+    still = sl.is_still_pipeline(pipeline)
+    word = sl.unit_word(pipeline)
     reqs = sl.load_requests(project_dir)
     req_path = idir / sl.REQUESTS_FILE
     if reqs is None:
         lines.append(f"- {req_path} does not exist yet.")
     else:
         by_id = {str(q.get("input_id")): q for q in reqs}
-        lines.append(f"- The user's guidance ({req_path}) — scene numbers are binding. If feedback in "
+        binding = ("every placed screenshot goes on the one image" if pipeline == "panda-image"
+                   else f"{word} numbers are binding")
+        lines.append(f"- The user's guidance ({req_path}) — {binding}. If feedback in "
                      "this leg changes which screenshot goes where or how, update that file to match:")
         for r in recs:
             q = by_id.get(r["input_id"])
-            lines.append(f"  {r.get('n')} → " + (_describe_request(q) if q else "(missing)"))
+            lines.append(f"  {r.get('n')} → " + (_describe_request(q, pipeline) if q else "(missing)"))
     plan = sl.load_scene_plan(project_dir)
-    keep = sl.keep_clear_lines(plan)
-    W, H = sl.canvas_for(plan)
-    ko = sl.keep_out_for(W, H)
+    keep = sl.keep_clear_lines(plan, pipeline=pipeline)
+    W, H = sl.canvas_for(plan, pipeline=pipeline)
+    ko = sl.keep_out_for(W, H, pipeline)
+    if still:
+        if keep:
+            lines.append(f"- Screenshot {word}s in the scene plan — the stills leave these areas plain:")
+            lines += [f"  {line}" for line in keep]
+        lines.append("- The launcher places the screenshots onto the stills itself after every stills "
+                     "pass (settled layout, no timing), so the stills the user reviews already show "
+                     "them. Do not call screen_overlay; never draw, describe or imitate a screenshot "
+                     "in an image prompt; generate and revise from the clean stills under assets/images.")
+        lines.append(f"- Canvas {W}x{H}. No caption strip is drawn: slide copy is part of the still, so "
+                     f"keep it out of the screenshot areas. The Panda logo goes over "
+                     f"{sl.fmt_box(ko['logo'])} if the {sl.deliverable_word(pipeline)} is branded.")
+        return "\n".join(lines)
     if keep:
         lines.append("- Screenshot scenes in the scene plan — stills and clips leave these areas plain:")
         lines += [f"  {line}" for line in keep]
@@ -334,23 +363,30 @@ def _device_boxes(group: list[dict[str, Any]], recs: dict[str, dict[str, Any]],
 
 
 def still_clear_notes(project_dir: Path, plan: Optional[dict[str, Any]],
-                      recs: list[dict[str, Any]]) -> list[str]:
+                      recs: list[dict[str, Any]], pipeline: str = sl.VIDEO_PIPELINE) -> list[str]:
+    """Is the area each screenshot will cover empty in the generated (clean) still?
+
+    Video stills are cover-cropped to the frame the way panda_render does; a carousel / image
+    still IS the deliverable, so it is measured at its own size."""
     from PIL import Image
 
-    W, H = sl.canvas_for(plan)
+    still_pipeline = sl.is_still_pipeline(pipeline)
     by_id = {r["input_id"]: r for r in recs}
     notes: list[str] = []
     for scene_id, group in sl.items_by_scene(sl.screenshot_items(plan)).items():
         still = sl.scene_media(project_dir, scene_id, "image")
         if still is None:
             continue
+        label = sl.unit_label(pipeline, group[0]["scene_number"])
         with Image.open(still) as im:
+            W, H = im.size if still_pipeline else sl.canvas_for(plan, pipeline=pipeline)
             for box in _device_boxes(group, by_id, W, H):
                 frac = _busy_fraction(im, box, W, H)
                 if frac > CLEAR_MAX_BUSY:
-                    notes.append(f"scene {group[0]['scene_number']}: the still has the character or "
-                                 f"props where the screenshot goes ({frac:.0%} of that area) — "
-                                 "regenerate that still with the area empty, or move the screenshot")
+                    what = "the character, props or slide text" if still_pipeline else "the character or props"
+                    notes.append(f"{label}: the still has {what} where the screenshot goes "
+                                 f"({frac:.0%} of that area) — regenerate that still with the area "
+                                 "empty, or move the screenshot")
                     break
     return notes
 
@@ -515,18 +551,22 @@ def final_notes(project_dir: Path, plan: Optional[dict[str, Any]], recs: list[di
 # gate markdown + boards
 # ---------------------------------------------------------------------------
 
-def uploads_markdown(recs: list[dict[str, Any]], reqs: Optional[list[dict[str, Any]]]) -> str:
+def uploads_markdown(recs: list[dict[str, Any]], reqs: Optional[list[dict[str, Any]]],
+                     pipeline: str = sl.VIDEO_PIPELINE) -> str:
     by_id = {str(q.get("input_id")): q for q in reqs or []}
+    ask = ("say if it goes on the image" if pipeline == "panda-image"
+           else f"say which {sl.unit_word(pipeline)} to use it in")
     lines = ["", "## Your screenshots", ""]
     for r in recs:
         q = by_id.get(r["input_id"])
-        desc = _describe_request(q) if q else "not matched yet"
-        desc = desc.replace("not placed (do not use it)", "not placed — say which scene to use it in")
+        desc = _describe_request(q, pipeline) if q else "not matched yet"
+        desc = desc.replace("not placed (do not use it)", f"not placed — {ask}")
         lines.append(f"- **{r.get('n')}** · {r.get('name')} → {desc}")
     return "\n".join(lines) + "\n"
 
 
-def layouts_markdown(plan: Optional[dict[str, Any]], recs: list[dict[str, Any]]) -> str:
+def layouts_markdown(plan: Optional[dict[str, Any]], recs: list[dict[str, Any]],
+                     pipeline: str = sl.VIDEO_PIPELINE) -> str:
     by_id = {r["input_id"]: r for r in recs}
     items = sl.screenshot_items(plan)
     if not items:
@@ -551,7 +591,8 @@ def layouts_markdown(plan: Optional[dict[str, Any]], recs: list[dict[str, Any]])
             if isinstance(txt, dict):
                 txt = txt.get("zh") or txt.get("en")
             bits.append(f"card “{str(txt)[:40]}”")
-        lines.append(f"- **Scene {it['scene_number']}** · screenshot {rec.get('n')} "
+        unit = sl.unit_label(pipeline, it["scene_number"])
+        lines.append(f"- **{unit[:1].upper()}{unit[1:]}** · screenshot {rec.get('n')} "
                      f"({rec.get('name')}): " + ", ".join(bits))
     return "\n".join(lines) + "\n"
 
@@ -614,14 +655,149 @@ def render_board(project_dir: Path, job_id: str, kind: str, plan: Optional[dict[
     return png.name
 
 
-def _scene_note_map(notes: list[str]) -> dict[str, str]:
+def _scene_note_map(notes: list[str], pipeline: str = sl.VIDEO_PIPELINE) -> dict[str, str]:
     out: dict[str, str] = {}
+    prefix = f"{sl.unit_word(pipeline)} "
     for note in notes:
-        if note.startswith("scene "):
-            num = note[len("scene "):].split(" ", 1)[0].split(":", 1)[0].strip("(),")
+        if pipeline == "panda-image" and note.startswith("the image"):
+            out.setdefault("1", note.split(":", 1)[-1].strip()[:120])
+        elif note.startswith(prefix):
+            num = note[len(prefix):].split(" ", 1)[0].split(":", 1)[0].strip("(),")
             if num.isdigit():
                 out.setdefault(num, note.split(":", 1)[-1].strip()[:120])
     return out
+
+
+# ---------------------------------------------------------------------------
+# carousel / image: screenshots baked into the stills
+# ---------------------------------------------------------------------------
+
+def _stills_dir(project_dir: Path) -> Path:
+    return sl.overlay_dir(project_dir) / "stills"
+
+
+def _read_status(project_dir: Path) -> dict[str, Any]:
+    try:
+        data = json.loads((_stills_dir(project_dir) / "status.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _job_language(project_dir: Path) -> str:
+    try:
+        data = json.loads((sl.inputs_dir(project_dir) / sl.JOB_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "zh"
+    return str((data or {}).get("language") or "zh") if isinstance(data, dict) else "zh"
+
+
+def _render_still(project_dir: Path, scene_id: str, still: Path, out: Path,
+                  language: str) -> tuple[bool, str]:
+    from tools.video.screen_overlay import ScreenOverlay
+
+    res = ScreenOverlay().execute({"mode": "still", "project_dir": str(project_dir),
+                                   "scene_id": scene_id, "still_path": str(still),
+                                   "output_path": str(out), "language": language})
+    return bool(res.success), str(res.error or "")
+
+
+def place_on_stills(projects_dir: Path, job_id: str, arts: dict[str, Any], *,
+                    render: Optional[Any] = None) -> list[dict[str, Any]]:
+    """Carousel / image: copy each screenshot scene's still, with its screenshots placed, into
+    the job store under the still's own name — what Dify shows, the storyboard joins and the
+    brand pass stamps. The clean still under assets/images is never touched, so revisions work
+    from it. Renders are cached per (still, layout, screenshots, language). Never raises."""
+    from dify_launcher import store
+
+    project = Path(projects_dir) / job_id
+    try:
+        recs = sl.load_inputs(project)
+        pipeline = sl.pipeline_of(project)
+        stills = {str(Path(str(n)).name) for n in arts.get("stills") or []}
+        if not recs or not sl.is_still_pipeline(pipeline) or not stills:
+            return []
+        grouped = sl.items_by_scene(sl.screenshot_items(sl.load_scene_plan(project)))
+        if not grouped:
+            return []
+        render = render or _render_still
+        language = _job_language(project)
+        out_dir = _stills_dir(project)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        status = _read_status(project)
+        deadline = time.monotonic() + STILLS_BUDGET_S
+        results: list[dict[str, Any]] = []
+        for scene_id, group in grouped.items():
+            entry: dict[str, Any] = {"scene_id": scene_id, "scene_number": group[0]["scene_number"]}
+            results.append(entry)
+            raw = sl.scene_media(project, scene_id, "image")
+            if raw is None or raw.name not in stills:
+                entry["state"] = "no_still"
+                continue
+            raw_sha = hashlib.sha256(raw.read_bytes()).hexdigest()
+            lh = sl.layout_hash(group, recs)
+            sig = hashlib.sha256(json.dumps([raw_sha, lh, language, STILL_RENDER_VERSION])
+                                 .encode("utf-8")).hexdigest()[:16]
+            safe = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in scene_id)[:60] or "scene"
+            cached = out_dir / f"{safe}_{sig}{raw.suffix.lower()}"
+            prev = status.get(scene_id) if isinstance(status.get(scene_id), dict) else {}
+            if not cached.is_file():
+                failures = int(prev.get("failures") or 0) if prev.get("sig") == sig else 0
+                if failures >= 2:
+                    entry.update(state="failed", error=prev.get("error") or "render failed")
+                    continue
+                if time.monotonic() > deadline:
+                    entry.update(state="pending")
+                    continue
+                ok, err = render(project, scene_id, raw, cached, language)
+                if not ok or not cached.is_file():
+                    status[scene_id] = {"sig": sig, "name": raw.name, "failures": failures + 1,
+                                        "error": (err or "render produced no file")[:300]}
+                    entry.update(state="failed", error=status[scene_id]["error"])
+                    continue
+            store.ensure_job(job_id)
+            shutil.copyfile(cached, store.artifact_path(job_id, raw.name))
+            status[scene_id] = {"sig": sig, "name": raw.name, "raw_sha": raw_sha, "layout_hash": lh,
+                                "composite": cached.name,
+                                "composite_sha": hashlib.sha256(cached.read_bytes()).hexdigest(),
+                                "failures": 0}
+            entry.update(state="placed", name=raw.name)
+            for old in out_dir.glob(f"{safe}_*"):
+                if old != cached and old.is_file():
+                    old.unlink()
+        (out_dir / "status.json").write_text(json.dumps(status, ensure_ascii=False, indent=1),
+                                             encoding="utf-8")
+        return results
+    except Exception:  # noqa: BLE001 — placing screenshots must never break mirroring
+        return []
+
+
+def placement_notes(project_dir: Path, job_id: str, plan: Optional[dict[str, Any]],
+                    arts: dict[str, Any], pipeline: str) -> list[str]:
+    """Carousel / image gates: is every still that should carry screenshots the placed one?"""
+    from dify_launcher import store
+
+    stills = {str(Path(str(n)).name) for n in arts.get("stills") or []}
+    status = _read_status(project_dir)
+    notes: list[str] = []
+    for scene_id, group in sl.items_by_scene(sl.screenshot_items(plan)).items():
+        raw = sl.scene_media(project_dir, scene_id, "image")
+        if raw is None or raw.name not in stills:
+            continue
+        label = sl.unit_label(pipeline, group[0]["scene_number"])
+        st = status.get(scene_id) if isinstance(status.get(scene_id), dict) else {}
+        if st.get("name") != raw.name or not st.get("composite_sha"):
+            why = f" ({st['error'][:140]})" if st.get("error") and st.get("name") == raw.name else ""
+            notes.append(f"{label}: the screenshot could not be placed on the still{why} — it is "
+                         "shown without it")
+            continue
+        try:
+            shown = hashlib.sha256(store.artifact_path(job_id, raw.name).read_bytes()).hexdigest()
+        except OSError:
+            shown = ""
+        if shown != st["composite_sha"]:
+            notes.append(f"{label}: the still shown is not the version with the screenshot placed")
+    return notes
 
 
 def apply_gate(projects_dir: Path, job_id: str, gate: Optional[str], arts: dict[str, Any],
@@ -636,6 +812,7 @@ def apply_gate(projects_dir: Path, job_id: str, gate: Optional[str], arts: dict[
         return []
     notes: list[str] = []
     try:
+        pipeline = sl.pipeline_of(project)
         notes += integrity_notes(project, recs)
         reqs = sl.load_requests(project)
         plan = sl.load_scene_plan(project)
@@ -643,19 +820,24 @@ def apply_gate(projects_dir: Path, job_id: str, gate: Optional[str], arts: dict[
         notes_map: dict[str, str] = {}
         if gate == "approve_script":
             notes += sl.validate_requests(recs, reqs)
-            _append_md(job_id, "script.md", uploads_markdown(recs, reqs))
+            _append_md(job_id, "script.md", uploads_markdown(recs, reqs, pipeline))
             kind = "uploads"
             for q in reqs or []:
                 if sl.is_unplaced(q):
                     n = next((r.get("n") for r in recs if r["input_id"] == q.get("input_id")), None)
                     if n is not None:
-                        notes_map[str(n)] = "not placed — say which scene"
+                        notes_map[str(n)] = f"not placed — say which {sl.unit_word(pipeline)}"
         elif gate == "approve_scene_plan":
             notes += sl.validate_requests(recs, reqs)
-            notes += sl.validate_layouts(plan, recs, reqs)
-            _append_md(job_id, "scene_plan.md", uploads_markdown(recs, reqs) + layouts_markdown(plan, recs))
+            notes += sl.validate_layouts(plan, recs, reqs, pipeline=pipeline)
+            _append_md(job_id, "scene_plan.md", uploads_markdown(recs, reqs, pipeline)
+                       + layouts_markdown(plan, recs, pipeline))
             kind = "layouts" if sl.screenshot_items(plan) else "uploads"
-            notes_map = _scene_note_map(notes)
+            notes_map = _scene_note_map(notes, pipeline)
+        elif gate in ("approve_hero_still", "approve_stills") and sl.is_still_pipeline(pipeline):
+            # the stills themselves already show the screenshots — no extra board
+            notes += still_clear_notes(project, plan, recs, pipeline)
+            notes += placement_notes(project, job_id, plan, arts, pipeline)
         elif gate in ("approve_hero_still", "approve_stills"):
             notes += still_clear_notes(project, plan, recs)
             kind = "stills" if sl.screenshot_items(plan) else None

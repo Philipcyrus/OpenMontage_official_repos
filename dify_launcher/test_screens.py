@@ -3,13 +3,17 @@ Remotion render is covered by tests/tools/test_screen_overlay_render.py).
 
 Proves:
   * intake: allow-listed hosts only, no redirects, size / type / pixel limits, EXIF rotation applied,
-    metadata stripped, nothing created on a bad upload, media only for panda-video
+    metadata stripped, nothing created on a bad upload, media only for panda-video /
+    panda-carousel / panda-image
   * the user's scene assignments are enforced (missing / extra / unplaced / moment / beyond plan)
-  * layout checks: captions, logo corner, character area, legibility, zoom, same-frame overlap
+  * layout checks: captions, logo corner, character area, legibility, zoom, same-frame overlap;
+    carousel / image in slide / image words with no caption strip and no timing
   * clear-area checks on stills
   * jobs WITHOUT uploads: identical prompts, no inputs key, nothing mirrored differently
   * jobs WITH uploads: facts appended to every leg, inputs/overlay never become stills or clips,
     gate questions carry the notes, checks never raise
+  * carousel / image: the stills Dify shows and the brand pass stamps carry the screenshots; the
+    clean stills stay for revise; failures and busy areas are flagged at the stills gate
 
 Run:  python dify_launcher/test_screens.py
 """
@@ -158,7 +162,7 @@ screens.MAX_PIXELS = _saved_pixels
 print("[ok] fetch: no redirects, 404 and oversize refused; normalise: EXIF rotation, metadata stripped, GIF/non-image/pixel cap refused")
 
 # ---------------------------------------------------------------------------
-# 3) POST /jobs — media accepted for panda-video only; bad media creates nothing
+# 3) POST /jobs — media accepted for panda-video / panda-carousel / panda-image; bad media creates nothing
 # ---------------------------------------------------------------------------
 import tools.video.screen_overlay as so_mod  # noqa: E402
 
@@ -188,10 +192,17 @@ assert (PROJECTS / jid / "inputs" / "in_01.png").is_file()
 state = store.load_state(jid)
 assert "media" not in (state.get("options") or {}), "signed links must not stay in job state"
 assert client.get(f"/jobs/{jid}").json()["inputs"] == body["inputs"]
+assert sl.pipeline_of(PROJECTS / jid) == "panda-video"
+for still_pipeline in ("panda-carousel", "panda-image"):
+    rs = client.post("/jobs", json={"brief": brief, "pipeline": still_pipeline,
+                                    "options": {"language": "en", "media": [{"url": BASE + "/ok.png"}]}})
+    assert rs.status_code == 200 and rs.json()["inputs"] == [{"n": 1, "name": "ok.png"}], rs.text
+    assert sl.pipeline_of(PROJECTS / rs.json()["job_id"]) == still_pipeline
+    assert json.loads((PROJECTS / rs.json()["job_id"] / "inputs" / "job.json").read_text())["language"] == "en"
 
 before = job_dirs()
 for bad, want in (
-    ({"pipeline": "panda-carousel", "options": {"media": [{"url": BASE + "/ok.png"}]}}, "panda-video"),
+    ({"pipeline": "hybrid", "options": {"media": [{"url": BASE + "/ok.png"}]}}, "panda-carousel"),
     ({"pipeline": "panda-video", "options": {"media": [{"url": "https://evil.example.net/a.png"}]}}, "allowed"),
     ({"pipeline": "panda-video", "options": {"media": [{"url": BASE + "/notimage.png"}]}}, "image"),
     ({"pipeline": "panda-video", "options": {"media": [{"url": BASE + "/redirect"}]}}, "redirect"),
@@ -305,6 +316,63 @@ assert "unknown screenshot id" in " ".join(sl.validate_requests(INPUTS, REQS + [
 assert "missing from requests.json" in " ".join(sl.validate_requests(INPUTS, REQS[:2]))
 print("[ok] assignments binding (missing / extra / unplaced / moment / beyond plan / two scenes / two in one scene)")
 print("[ok] layout checks: captions, logo corner, character area, legibility, zoom, timing, schema")
+
+# carousel / image: slide wording, no caption strip, no timing, logo corner out to the edge
+SLIDE_PHONE = {"zone": {"x": 0.42, "y": 0.20, "w": 0.54, "h": 0.74},
+               "subject_zone": {"x": 0.03, "y": 0.40, "w": 0.36, "h": 0.55}, "frame": "phone",
+               "crop": {"x": 0, "y": 0.1, "w": 1, "h": 0.5},
+               "steps": [{"kind": "blur_region", "region": {"x": 0.06, "y": 0.30, "w": 0.88, "h": 0.034}},
+                         {"kind": "highlight_box", "region": {"x": 0.1, "y": 0.5, "w": 0.8, "h": 0.08},
+                          "at_s": 99, "duration_s": 5},
+                         {"kind": "card", "text": {"zh": "点这里", "en": "Tap"},
+                          "zone": {"x": 0.45, "y": 0.94, "w": 0.5, "h": 0.05}}]}
+SLIDE_WEB = {"zone": {"x": 0.04, "y": 0.20, "w": 0.92, "h": 0.46},
+             "subject_zone": {"x": 0.30, "y": 0.70, "w": 0.40, "h": 0.28}, "frame": "browser"}
+
+
+def slide_plan(*items, n_scenes: int = 3, aspect: str = "4:5") -> dict:
+    p = plan_with(*items, n_scenes=n_scenes)
+    p["metadata"] = {"aspect_ratio": aspect}
+    return p
+
+
+def car_notes(plan, reqs=REQS, pipeline="panda-carousel") -> str:
+    return " | ".join(sl.validate_layouts(plan, INPUTS, reqs, pipeline=pipeline))
+
+
+clean_slides = slide_plan((1, "in_01", SLIDE_PHONE), (2, "in_02", SLIDE_WEB))
+assert car_notes(clean_slides) == "", car_notes(clean_slides)
+video_view = " | ".join(sl.validate_layouts(clean_slides, INPUTS, REQS))
+assert "caption strip" in video_view and "runs outside the scene" in video_view, video_view
+assert "slide 2 is missing screenshot 2" in car_notes(slide_plan((1, "in_01", SLIDE_PHONE)))
+assert "but the plan has only 3 slides" in car_notes(slide_plan((1, "in_01", SLIDE_PHONE)),
+                                                      [{"input_id": "in_01", "scenes": [5]}])
+assert "screenshot 3 has no slide from the user" in car_notes(
+    slide_plan((1, "in_01", SLIDE_PHONE), (2, "in_02", SLIDE_WEB), (3, "in_03", SLIDE_WEB)))
+corner = dict(SLIDE_WEB, zone={"x": 0.30, "y": 0.02, "w": 0.69, "h": 0.30})
+assert "if the carousel is branded" in car_notes(slide_plan((1, "in_01", SLIDE_PHONE), (2, "in_02", corner)))
+# no timing on a slide: two screenshots in one zone always overlap
+stacked = slide_plan((1, "in_01", dict(SLIDE_PHONE, show={"from_s": 0, "to_s": 0.5})),
+                     (1, "in_02", dict(SLIDE_WEB, zone=SLIDE_PHONE["zone"], show={"from_s": 0.5, "to_s": 1})))
+two_on_one = [{"input_id": "in_01", "scenes": [1]}, {"input_id": "in_02", "scenes": [1]}]
+stacked_notes = car_notes(stacked, two_on_one)
+assert "overlap on screen" in stacked_notes and "at the same time" not in stacked_notes, stacked_notes
+# panda-image: one image
+one = slide_plan((1, "in_01", SLIDE_PHONE), n_scenes=1, aspect="1:1")
+img_reqs = [{"input_id": "in_01", "scenes": [1]}, {"input_id": "in_02", "scenes": [2]}]
+img_notes = car_notes(one, img_reqs, "panda-image")
+assert "screenshot 2 is assigned to image 2, but this job makes one image" in img_notes, img_notes
+assert "the image is missing screenshot 2" in car_notes(one, [{"input_id": "in_02", "scenes": [1]}], "panda-image")
+assert sl.canvas_for({}, pipeline="panda-carousel") == (1080, 1350)
+assert sl.canvas_for({}, pipeline="panda-image") == (1080, 1080)
+assert sl.canvas_for({"metadata": {"aspect_ratio": "3:4"}}, pipeline="panda-carousel") == (1080, 1440)
+keep = sl.keep_clear_lines(clean_slides, pipeline="panda-carousel")
+assert keep[0].startswith("slide 1 (s01): keep") and "slide text" in keep[0] and "camera" not in keep[0], keep
+assert sl.keep_clear_lines(one, pipeline="panda-image")[0].startswith("the image (s01): keep")
+assert screens._scene_note_map(["slide 2: covers it", "scene 3: no"], "panda-carousel") == {"2": "covers it"}
+assert screens._scene_note_map(["the image: tight"], "panda-image") == {"1": "tight"}
+print("[ok] carousel / image layout rules: slide / image wording, no caption strip or timing, "
+      "logo corner, one image")
 
 # geometry parity with the Remotion component
 import re  # noqa: E402
@@ -506,6 +574,150 @@ if shutil.which("ffmpeg"):
 else:
     print("[skip] final check (ffmpeg not on PATH)")
 
+# ---------------------------------------------------------------------------
+# 9) carousel / image: screenshots placed onto the stills (render stubbed; real render in
+#    tests/tools/test_screen_overlay_render.py)
+# ---------------------------------------------------------------------------
+import hashlib  # noqa: E402
+
+
+def _sha(p) -> str:
+    return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+
+
+def still_project(job: str, pipeline: str, plan: dict, reqs: list) -> Path:
+    pj = PROJECTS / job
+    for sub in ("inputs", "assets/images", "artifacts"):
+        (pj / sub).mkdir(parents=True, exist_ok=True)
+    recs = []
+    for rec in INPUTS[:2]:
+        data = png_bytes(rec["width"] // 10, rec["height"] // 10)
+        (pj / "inputs" / f"{rec['input_id']}.png").write_bytes(data)
+        recs.append(dict(rec, file=f"{rec['input_id']}.png", sha256=hashlib.sha256(data).hexdigest()))
+    (pj / "inputs" / "job.json").write_text(json.dumps({"pipeline": pipeline, "language": "zh"}))
+    (pj / "inputs" / "inputs.json").write_text(json.dumps(recs))
+    (pj / "inputs" / "requests.json").write_text(json.dumps(reqs))
+    (pj / "checkpoint_scene_plan.json").write_text(json.dumps(
+        {"stage": "scene_plan", "status": "completed", "artifacts": {"scene_plan": plan}}), encoding="utf-8")
+    return pj
+
+
+def draw_slide(path: Path, busy_zone: bool = False, tint: str = "#ffffff") -> None:
+    im = Image.new("RGB", (1080, 1350), tint)
+    d = ImageDraw.Draw(im)
+    d.rectangle([60, 600, 380, 1260], fill="#111111")        # the panda, left, in its subject_zone
+    if busy_zone:
+        d.rectangle([600, 400, 900, 700], fill="#fdc50d")    # slide copy painted where the screenshot goes
+    im.save(path)
+
+
+cjob = "job_carousel_shots"
+cpj = still_project(cjob, "panda-carousel", slide_plan((1, "in_01", SLIDE_PHONE), n_scenes=2),
+                    [{"input_id": "in_01", "scenes": [1]}, {"input_id": "in_02", "scenes": []}])
+raw1, raw2 = cpj / "assets" / "images" / "slide-1.png", cpj / "assets" / "images" / "slide-2.png"
+draw_slide(raw1)
+draw_slide(raw2)
+(cpj / "artifacts" / "asset_manifest.json").write_text(json.dumps({"version": "1.0", "assets": [
+    {"id": "a", "type": "image", "path": "assets/images/slide-1.png", "source_tool": "t", "scene_id": "s01"},
+    {"id": "b", "type": "image", "path": "assets/images/slide-2.png", "source_tool": "t", "scene_id": "s02"},
+]}), encoding="utf-8")
+
+BLUE = (26, 115, 232)
+PHONE_NATURAL = {"width": 1170, "height": 2532}
+still_renders: list[str] = []
+
+
+def fake_still_render(project, scene_id, still, out, language):
+    still_renders.append(scene_id)
+    im = Image.open(still).convert("RGB")
+    g = sl.device_box_fraction(SLIDE_PHONE, im.width, im.height, PHONE_NATURAL)
+    ImageDraw.Draw(im).rectangle([int(g["x"] * im.width), int(g["y"] * im.height),
+                                  int((g["x"] + g["w"]) * im.width) - 1,
+                                  int((g["y"] + g["h"]) * im.height) - 1], fill=BLUE)
+    im.save(out)
+    return True, ""
+
+
+gbox = sl.device_box_fraction(SLIDE_PHONE, 1080, 1350, PHONE_NATURAL)
+centre = (int((gbox["x"] + gbox["w"] / 2) * 1080), int((gbox["y"] + gbox["h"] / 2) * 1350))
+clean_sha = _sha(raw1)
+_real_render_still = screens._render_still
+screens._render_still = fake_still_render
+try:
+    carts = run._mirror_artifacts(cjob, {})
+    assert sorted(carts["stills"]) == ["slide-1.png", "slide-2.png"], carts.get("stills")
+    assert Image.open(store.artifact_path(cjob, "slide-1.png")).convert("RGB").getpixel(centre) == BLUE, \
+        "the still Dify shows must carry the screenshot"
+    assert _sha(store.artifact_path(cjob, "slide-2.png")) == _sha(raw2), "a slide without screenshots stays as generated"
+    assert _sha(raw1) == clean_sha, "the clean still under assets/images is never touched"
+    assert still_renders == ["s01"]
+    run._mirror_artifacts(cjob, {})              # every sync re-copies the clean stills...
+    assert still_renders == ["s01"], "cached — not rendered again"
+    assert Image.open(store.artifact_path(cjob, "slide-1.png")).convert("RGB").getpixel(centre) == BLUE
+    # edit-mode revise imports the clean still, never the copy with the screenshot
+    assert R._still_abs_paths(cjob, {"artifacts": carts}, [1], PROJECTS) == [str(raw1.resolve())]
+    # the brand pass stamps the still that carries the screenshot
+    try:
+        R._apply_brand({"job_id": cjob, "artifacts": dict(carts)})
+        stamped = Image.open(store.artifact_path(cjob, "slide-1.bgc.png")).convert("RGB")
+        assert stamped.getpixel(centre) == BLUE, "branded slide lost the screenshot"
+        print("[ok] brand pass stamps the slide with its screenshot")
+    except ImportError as e:
+        print(f"[skip] brand pass ({e})")
+    # a regenerated still gets its screenshot again
+    draw_slide(raw1, tint="#fefefe")
+    carts = run._mirror_artifacts(cjob, {})
+    assert still_renders == ["s01", "s01"], still_renders
+
+    # gate: no extra board and no notes when all is well
+    cp.get_latest_checkpoint = lambda _pd, _jid: {"stage": "assets", "status": "awaiting_human",
+                                                   "partial_progress": {"phase": "stills"}, "artifacts": {}}
+    st = run._sync({"job_id": cjob, "pipeline": "panda-carousel", "options": {"language": "zh"}})
+    assert st["gate"] == "approve_stills", st.get("gate")
+    assert "Your screenshots" not in (st.get("question") or ""), st.get("question")
+    assert "screens_board" not in st["artifacts"]
+
+    # slide copy painted into the screenshot area is flagged, by slide
+    draw_slide(raw1, busy_zone=True)
+    notes = screens.apply_gate(PROJECTS, cjob, "approve_stills", run._mirror_artifacts(cjob, {}))
+    assert any(n.startswith("slide 1: the still has the character, props or slide text") for n in notes), notes
+
+    # a failing render: shown without the screenshot, flagged, tried at most twice per version
+    screens._render_still = lambda *a, **k: (still_renders.append("fail") or (False, "chromium missing"))
+    draw_slide(raw1, tint="#fdfdfd")
+    for _ in range(3):
+        farts = run._mirror_artifacts(cjob, {})
+    assert still_renders.count("fail") == 2, still_renders
+    assert _sha(store.artifact_path(cjob, "slide-1.png")) == _sha(raw1)
+    notes = screens.apply_gate(PROJECTS, cjob, "approve_stills", farts)
+    assert any("slide 1: the screenshot could not be placed on the still (chromium missing)" in n
+               for n in notes), notes
+finally:
+    screens._render_still = _real_render_still
+    cp.get_latest_checkpoint, cp.get_next_stage = _real_latest, _real_next
+
+# nothing happens for video jobs or jobs without uploads
+assert screens.place_on_stills(PROJECTS, "job_plain", {"stills": ["s01.png"]}) == []
+assert screens.place_on_stills(PROJECTS, "job_shots", {"stills": ["s01.png"]}) == []
+
+# prompt facts say who places the screenshots, in slide / image words
+cfacts = screens.facts(cpj)
+for want in ("slide numbers are binding", "1 → slide 1", "slide 1 (s01): keep",
+             "places the screenshots onto the stills", "Canvas 1080x1350", "if the carousel is branded"):
+    assert want in cfacts, f"carousel facts missing {want!r}:\n{cfacts}"
+for unwanted in ("mode=compose", "Captions are drawn over", "camera locked"):
+    assert unwanted not in cfacts, unwanted
+ipj = still_project("job_image_shots", "panda-image",
+                    slide_plan((1, "in_01", SLIDE_PHONE), n_scenes=1, aspect="1:1"),
+                    [{"input_id": "in_01", "scenes": [1]}, {"input_id": "in_02", "scenes": []}])
+ifacts = screens.facts(ipj)
+for want in ("every placed screenshot goes on the one image", "1 → the image", "the image (s01): keep",
+             "Canvas 1080x1080", "if the image is branded"):
+    assert want in ifacts, f"image facts missing {want!r}:\n{ifacts}"
+print("[ok] carousel / image: screenshots placed on the stills Dify shows (cached, clean originals "
+      "kept for revise), flagged when the area is busy or the render fails; facts in slide / image words")
+
 _server.shutdown()
 shutil.rmtree(_TMP, ignore_errors=True)
-print("\n[PASS] user screenshots: intake, assignments, layout checks, prompt facts, mirroring guard, gate hook")
+print("\n[PASS] user screenshots: intake, assignments, layout checks, prompt facts, mirroring guard, gate hook, "
+      "carousel / image stills")

@@ -28,6 +28,20 @@ There is one scene. Its `required_assets` entry of type `image` is the still tas
 (`scene_id`, description, Element ids, captions, aspect ratio from
 `scene_plan.metadata.aspect_ratio` — default `1:1`).
 
+### 1b. User screenshots (only when the prompt has a USER SCREENSHOTS block)
+- `source: "provided"` items are the user's screenshots. They are **not** still tasks: never
+  generate, edit or upload them, never copy them into `assets/`, never add them to
+  `asset_manifest`, never call `screen_overlay`.
+- The still is composed so every screenshot area stays empty. The prompt facts list the area to keep
+  plain and where the character stands. Put both into the still prompt ("panda bottom-left; headline
+  across the top; the right 55% below the headline is plain white background — empty, no character,
+  props, text or scenery"). Keep the baked copy out of that area too.
+- After every stills pass the launcher places the screenshots onto the still the user reviews and
+  the brand pass stamps. The file under `assets/images` stays clean: always revise from it (edit
+  mode imports the clean still), and never paint a screenshot into a prompt or an edit.
+- The launcher checks those areas and flags them if they are not empty; then regenerate with the
+  area empty.
+
 ### 2. Generate ONE STILL, then STOP (GATE 2, approve_stills)
 **Follow the binding rules in `skills/meta/higgsfield-mcp-bridge.md`:** **CHARACTER LOCK**,
 **STILLS 2-TAKE HARD RULE**, and **2D MEDIUM LOCK**. Summary:

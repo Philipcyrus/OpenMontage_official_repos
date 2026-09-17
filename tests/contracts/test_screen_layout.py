@@ -182,3 +182,74 @@ def test_pipeline_and_directors_wire_screenshots():
                        ("asset-director.md", "USER SCREENSHOTS"), ("compose-director.md", "screen_overlay")):
         text = (skills / name).read_text(encoding="utf-8")
         assert "USER SCREENSHOTS" in text and must in text, name
+
+
+@pytest.mark.parametrize("pipeline, directors", [
+    ("panda-carousel", (("idea-director.md", "requests.json"), ("script-director.md", "requests.json"),
+                        ("scene-plan-director.md", "screen_layout.schema.json"),
+                        ("asset-director.md", "assets/images"))),
+    ("panda-image", (("idea-director.md", "requests.json"),
+                     ("scene-plan-director.md", "screen_layout.schema.json"),
+                     ("asset-director.md", "assets/images"))),
+])
+def test_still_pipeline_directors_wire_screenshots(pipeline, directors):
+    skills = ROOT / "skills" / "pipelines" / pipeline
+    for name, must in directors:
+        text = (skills / name).read_text(encoding="utf-8")
+        assert "USER SCREENSHOTS" in text and must in text, (pipeline, name)
+    # the launcher places the screenshots on stills; the agent never calls the render tool for them
+    asset = (skills / "asset-director.md").read_text(encoding="utf-8")
+    assert "never call `screen_overlay`" in asset
+    assert pipeline in sl.STILL_PIPELINES and pipeline in sl.PIPELINES
+
+
+def test_still_mode_places_screenshots_on_the_still(tmp_path, monkeypatch):
+    """mode=still renders at the still's own size and writes the composite; the still is untouched."""
+    import hashlib
+
+    from PIL import Image
+
+    import tools.video.screen_overlay as so
+
+    proj = tmp_path / "job_s"
+    (proj / "inputs").mkdir(parents=True)
+    (proj / "assets" / "images").mkdir(parents=True)
+    Image.new("RGB", (100, 200), "#1a73e8").save(proj / "inputs" / "in_01.png")
+    (proj / "inputs" / "job.json").write_text(json.dumps({"pipeline": "panda-carousel"}), encoding="utf-8")
+    (proj / "inputs" / "inputs.json").write_text(json.dumps(
+        [{"n": 1, "input_id": "in_01", "name": "a.png", "file": "in_01.png", "width": 100, "height": 200}]),
+        encoding="utf-8")
+    layout = {"zone": {"x": 0.5, "y": 0.2, "w": 0.45, "h": 0.6}, "frame": "phone"}
+    plan = {"version": "1.0", "metadata": {"aspect_ratio": "4:5"}, "scenes": [
+        {"id": "slide-1", "type": "generated", "description": "x", "start_seconds": 0, "end_seconds": 1,
+         "required_assets": [{"type": "image", "source": "provided", "input_id": "in_01",
+                              "description": "d", "layout": layout}]}]}
+    (proj / "checkpoint_scene_plan.json").write_text(json.dumps({"artifacts": {"scene_plan": plan}}),
+                                                     encoding="utf-8")
+    still = proj / "assets" / "images" / "slide-1.png"
+    Image.new("RGB", (1080, 1350), "#ffffff").save(still)
+    before = hashlib.sha256(still.read_bytes()).hexdigest()
+    monkeypatch.setattr(so, "remotion_ready", lambda: (True, "ok"))
+    seen = {}
+
+    def fake_run(self, cmd, timeout, cwd=None):
+        props = json.loads(Path(next(a for a in cmd if a.startswith("--props="))[8:]).read_text(encoding="utf-8"))
+        seen.update(props)
+        out = Path(cmd[5])
+        layer = Image.new("RGBA", (props["width"], props["height"]), (0, 0, 0, 0))
+        layer.paste((17, 17, 17, 255), (600, 300, 900, 1000))
+        layer.save(out)
+
+    monkeypatch.setattr(so.ScreenOverlay, "_run", fake_run)
+    out = proj / "overlay" / "stills" / "slide-1.png"
+    res = so.ScreenOverlay().execute({"mode": "still", "project_dir": str(proj), "scene_id": "slide-1",
+                                      "still_path": str(still), "output_path": str(out)})
+    assert res.success, res.error
+    assert seen["still"] is True and (seen["width"], seen["height"]) == (1080, 1350)
+    assert seen["background"] == {"type": "none"} and seen["durationInFrames"] == 1
+    img = Image.open(out).convert("RGB")
+    assert img.size == (1080, 1350) and img.getpixel((700, 500)) == (17, 17, 17) and img.getpixel((50, 50)) == (255, 255, 255)
+    assert hashlib.sha256(still.read_bytes()).hexdigest() == before
+    bad = so.ScreenOverlay().execute({"mode": "still", "project_dir": str(proj), "scene_id": "slide-9",
+                                      "still_path": str(still), "output_path": str(out)})
+    assert not bad.success and "places no screenshots" in bad.error

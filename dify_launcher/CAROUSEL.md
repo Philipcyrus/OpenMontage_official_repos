@@ -74,6 +74,17 @@ slightly from the mock sizes (e.g. 1024×1024 for 1:1) depending on the image mo
 
 ---
 
+## User screenshots (`options.media`)
+
+Attach screenshots to the brief and say which slide each goes on and how to use it (*"screenshot 1
+on slide 2, highlight Activate; 3 is not needed"*). Slides that carry a screenshot are generated with
+that area left empty and the launcher places the screenshot onto the still as soon as it exists, so
+the hero, `approve_stills`, the storyboard and `branded_stills` all show it. Revisions (`edit` /
+`fresh`) work from the clean still. Screenshots never go to Higgsfield. Setup, limits and checks:
+[`DIFY_INTEGRATION.md`](DIFY_INTEGRATION.md) §6 "User screenshots".
+
+---
+
 ## Isolated test launcher (:8600)
 
 Production Dify stays on **:8501**. For local walks:

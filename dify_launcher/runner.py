@@ -1641,6 +1641,14 @@ class ClaudeCodeRunner(Runner):
         except Exception:  # noqa: BLE001 — facts are an extra; never block a leg
             return ""
 
+    def _place_screenshots(self, job_id: str, arts: dict[str, Any]) -> None:
+        """Carousel / image jobs with uploads: screenshots onto the store stills. Never raises."""
+        try:
+            from dify_launcher import screens
+            screens.place_on_stills(self._projects_dir, job_id, arts)
+        except Exception:  # noqa: BLE001 — never let placement break mirroring
+            pass
+
     def _screenshot_question(self, state: dict[str, Any], gate: Optional[str],
                              arts: dict[str, Any], question: str) -> str:
         """`question` plus screenshot checks + board for this gate (jobs with uploads only).
@@ -2109,6 +2117,9 @@ class ClaudeCodeRunner(Runner):
         if stills:
             tmp = {**out, "stills": stills}
             out["stills"] = ordered_still_basenames(tmp) or stills
+            # carousel / image jobs with user screenshots: the copies just written are clean —
+            # put the screenshots back on them (cached; no-op for every other job)
+            self._place_screenshots(job_id, out)
         if clips:
             out["clips"] = clips
         if final:

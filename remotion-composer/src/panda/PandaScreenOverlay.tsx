@@ -24,6 +24,8 @@ export type PandaScreenOverlayProps = {
   sceneDuration?: number;
   /** "none" renders a transparent overlay for compositing over the Panda clip. */
   background?: ScreenBackground;
+  /** Carousel / image stills: every layer and step in its settled state, no timing. */
+  still?: boolean;
   layers: ScreenLayerSpec[];
   subjectZones?: Box[];
   language?: string;
@@ -76,7 +78,7 @@ export const PandaScreenOverlay: React.FC<PandaScreenOverlayProps> = (props) => 
           height={height}
           t={t}
           sceneDuration={sceneDuration}
-          preview={false}
+          preview={props.still === true}
           language={props.language || "zh"}
         />
       ))}

@@ -84,3 +84,63 @@ def test_compose_places_screenshot_where_geometry_says(tmp_path):
                           "output_path": str(tmp_path / "board.png")})
     assert board.success, board.error
     assert (tmp_path / "board.png").stat().st_size > 1000
+
+
+def test_still_mode_keeps_every_generated_pixel_outside_the_screenshot(tmp_path):
+    """Carousel / image: the screenshot lands where the geometry says, in its settled state (a
+    highlight timed for 'later' still shows), and every pixel away from it is the generated still's."""
+    import random
+
+    from PIL import Image, ImageDraw
+
+    proj = tmp_path / "job_still"
+    for sub in ("inputs", "assets/images"):
+        (proj / sub).mkdir(parents=True)
+    shot = Image.new("RGB", (400, 800), "#ffffff")
+    ImageDraw.Draw(shot).rectangle([100, 300, 300, 500], fill="#1a73e8")
+    shot.save(proj / "inputs" / "in_01.png")
+    (proj / "inputs" / "job.json").write_text(json.dumps({"pipeline": "panda-carousel"}), encoding="utf-8")
+    (proj / "inputs" / "inputs.json").write_text(json.dumps([
+        {"n": 1, "input_id": "in_01", "name": "s.png", "file": "in_01.png", "width": 400, "height": 800}]),
+        encoding="utf-8")
+    layout = {"zone": {"x": 0.5, "y": 0.2, "w": 0.45, "h": 0.6}, "frame": "none",
+              "steps": [{"kind": "highlight_box", "region": {"x": 0.05, "y": 0.05, "w": 0.3, "h": 0.1},
+                         "at_s": 50, "duration_s": 1}]}
+    plan = {"version": "1.0", "metadata": {"aspect_ratio": "4:5"}, "scenes": [
+        {"id": "slide-1", "type": "generated", "description": "x", "start_seconds": 0, "end_seconds": 1,
+         "required_assets": [{"type": "image", "source": "provided", "input_id": "in_01",
+                              "description": "d", "layout": layout}]}]}
+    (proj / "checkpoint_scene_plan.json").write_text(json.dumps({"artifacts": {"scene_plan": plan}}),
+                                                     encoding="utf-8")
+    # a noisy still, so any resampling or colour shift of the background would show
+    W, H = 810, 1012
+    rnd = random.Random(7)
+    still_img = Image.new("RGB", (W, H))
+    still_img.putdata([(rnd.randrange(256), rnd.randrange(256), rnd.randrange(256)) for _ in range(W * H)])
+    still = proj / "assets" / "images" / "slide-1.png"
+    still_img.save(still)
+
+    out = proj / "overlay" / "stills" / "slide-1.png"
+    res = ScreenOverlay().execute({"mode": "still", "project_dir": str(proj), "scene_id": "slide-1",
+                                   "still_path": str(still), "output_path": str(out)})
+    assert res.success, res.error
+    img = Image.open(out).convert("RGB")
+    assert img.size == (W, H)
+
+    g = sl.device_geometry(layout, W, H, {"width": 400, "height": 800})
+    s, d = g["screen"], g["device"]
+    r, gg, b = img.getpixel((int(s["x"] + s["w"] * 0.5), int(s["y"] + s["h"] * 0.5)))   # the blue block
+    assert b > 180 and r < 90, (r, gg, b)
+    # settled state: the 'later' highlight is drawn (yellow edge around its region)
+    hx = int(s["x"] + s["w"] * 0.05) - 1
+    hy = int(s["y"] + s["h"] * 0.10)
+    assert any(img.getpixel((x, hy))[0] > 200 and img.getpixel((x, hy))[2] < 80 for x in range(hx - 6, hx + 6))
+    # everything 12 px or more away from the screenshot is byte-identical to the generated still
+    margin = 12
+    x0, y0 = int(d["x"]) - margin, int(d["y"]) - margin
+    x1, y1 = int(d["x"] + d["w"]) + margin, int(d["y"] + d["h"]) + margin
+    src = still_img.load()
+    dst = img.load()
+    diffs = sum(1 for y in range(0, H, 3) for x in range(0, W, 3)
+                if not (x0 <= x <= x1 and y0 <= y <= y1) and src[x, y] != dst[x, y])
+    assert diffs == 0, f"{diffs} generated pixels changed outside the screenshot"

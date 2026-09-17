@@ -1,6 +1,6 @@
-# User screenshots in Panda videos — build plan
+# User screenshots in Panda videos, carousels and images — build plan
 
-**Scope:** `panda-video` jobs started from Dify. **Status:** built on branch `feat/user-screenshots` (not merged, not deployed); tested locally — see §8. **Date:** 2026-09-17.
+**Scope:** `panda-video`, `panda-carousel` and `panda-image` jobs started from Dify (carousel and image: §5 "Carousel and image"). **Status:** built on branch `feat/user-screenshots` (not merged, not deployed); tested locally — see §8. **Date:** 2026-09-17.
 
 ---
 
@@ -168,6 +168,27 @@ stands, what stays empty), the gate previews, the checks, and the final Remotion
 - **Revise at the final gate** ("box later", "bigger", "no blur"): update the layout, re-run
   `screen_overlay` + `panda_render`. 0 credits.
 
+### Carousel and image (no clips, no compose)
+The same intake, `requests.json`, layout and checks, with three differences:
+- **Units.** A carousel places screenshots by slide number; an image job has one scene, so a screenshot
+  is either on the image (`"scenes": [1]`) or not used. Notes and boards say "slide 2" / "the image".
+- **No timing, no caption strip.** A still shows every part of a layout at once (the Remotion `still`
+  prop = the boards' settled state), so `show` / `enter` / `exit` / `at_s` are ignored and any two
+  screenshots on one slide must not overlap. Slide copy is baked into the generated still, so the
+  director keeps it out of the screenshot zones and the clear-area check counts it. The logo keep-out
+  runs to the top-right corner, because the brand stamp sits closer to the corner on larger stills.
+  Canvas defaults: carousel 4:5, image 1:1 (3:4 and 4:3 also measured).
+- **Placement by the launcher, as soon as a still exists.** At the end of every `_mirror_artifacts`
+  (right after the clean stills are copied into the job store), `screens.place_on_stills` renders each
+  screenshot scene's still with its screenshots (`screen_overlay` mode `still`: one transparent Remotion
+  PNG at the still's own size, alpha-composited, so every other pixel stays as generated) and writes it
+  over the store copy under the same name. The hero, the stills, the storyboard and the brand pass
+  (`branded_stills`) therefore all carry the screenshots. The clean still under `assets/images` is
+  never touched; `_still_abs_paths` already prefers it, so `fresh` / `edit` revisions work from it.
+  Renders are cached per (still, layout, screenshots, language) under `overlay/stills/`; a failing
+  render is tried at most twice per version and one sync spends at most `SCREENSHOT_STILLS_BUDGET_S`
+  (300 s). The agent never calls the tool for stills.
+
 ## 6. Checks (launcher code, not prompts)
 
 | When | Check | If it fails |
@@ -176,6 +197,7 @@ stands, what stays empty), the gate previews, the checks, and the final Remotion
 | `approve_script` | `requests.json` valid; every upload listed once; scene numbers ≥ 1; unplaced uploads named | noted in the question + board |
 | `approve_scene_plan` | layout schema; each scene shows exactly the screenshots assigned to it — none missing, none extra; unplaced screenshots nowhere; enough scenes for the highest scene number; zones inside the frame and clear of captions, logo and `subject_zone`; same-frame screenshots don't overlap in time; legible (shown scale not < 0.35× or > 2×); a zoom that barely zooms; step times fit the scene | noted + board |
 | stills gates | screenshot area of each still is clear (busy pixels ≤ 4%, `SCREENSHOT_CLEAR_MAX_BUSY`) | noted + note under the scene on the board |
+| carousel / image stills gates | the same clear-area check on the clean still (slide copy counts), and the still in the job store is the placed version (sha256 against `overlay/stills/status.json`); no caption-strip or timing rules at the scene plan | noted (no board — the stills show the screenshots) |
 | clips gates | same check on 5 frames per clip | noted + board |
 | `approve_final` | each screenshot scene has its overlay clip, rendered from the approved layout (layout hash in a sidecar); the screenshot area of that clip is found in the final video (sampled every 0.25 s, compared against the same area of the clip without the screenshot) | noted |
 | every gate | `inputs/` files unchanged (sha256); nothing from `inputs/` or `overlay/` in stills/clips | noted |
@@ -187,16 +209,16 @@ guard fully), and they explain the problem in the gate question instead of block
 
 | Area | File | What | Launcher restart |
 |---|---|---|---|
-| Intake | `dify_launcher/app.py` | `options.media` checked, downloaded and normalised before the job id exists; `inputs` in the job view; `media` dropped from stored options | **yes** |
-| Launcher helpers | `dify_launcher/screens.py` (new) | intake, prompt facts, gate checks, boards, markdown sections | **yes** |
-| Launcher | `dify_launcher/runner.py` | facts appended in `_run_agent` (nothing for jobs without uploads); `inputs/` + `overlay/` skipped in `_mirror_artifacts`; checks + board at every `awaiting_human` gate | **yes** |
-| Shared rules | `lib/screen_layout.py` (new) | geometry (mirrors the TS), assignment + layout rules, keep-out areas, file lookups | **yes** (imported by the launcher) |
+| Intake | `dify_launcher/app.py` | `options.media` checked, downloaded and normalised before the job id exists, for panda-video / panda-carousel / panda-image; pipeline + language recorded in `inputs/job.json`; `inputs` in the job view; `media` dropped from stored options | **yes** |
+| Launcher helpers | `dify_launcher/screens.py` (new) | intake, prompt facts (scene / slide / image wording), gate checks, boards, markdown sections, `place_on_stills` + placement check for carousel / image | **yes** |
+| Launcher | `dify_launcher/runner.py` | facts appended in `_run_agent` (nothing for jobs without uploads); `inputs/` + `overlay/` skipped in `_mirror_artifacts`, which ends by placing screenshots on carousel / image stills; checks + board at every `awaiting_human` gate | **yes** |
+| Shared rules | `lib/screen_layout.py` (new) | geometry (mirrors the TS), assignment + layout rules (video, and stills without timing or caption strip), keep-out areas for 6 canvases, file lookups | **yes** (imported by the launcher) |
 | Schemas | `schemas/artifacts/screen_layout.schema.json`, `screen_requests.schema.json` (new) | §4 layout, `requests.json` | no |
-| Tool | `tools/video/screen_overlay.py` (new, auto-discovered) | modes `board` (uploads / layouts / stills / clips) and `compose` | no |
-| Remotion | `remotion-composer/src/panda/{screenGeometry.ts, ScreenLayer.tsx, PandaScreenOverlay.tsx, PandaScreenBoard.tsx}` (new) + 2 entries in `Root.tsx` | frames (phone / browser / card / none), crop, `zoom_to`, highlight, cursor, click, blur, cards with the CJK font `panda_render` uses | no |
-| Directors | `skills/pipelines/panda-video/{idea,scene-plan,asset,compose}-director.md` | "User screenshots" sections, all starting "only when the prompt has a USER SCREENSHOTS block" | no |
-| Pipeline | `pipeline_defs/panda-video.yaml` | compose `tools_available` += `screen_overlay` | no |
-| Docs | `dify_launcher/DIFY_INTEGRATION.md`, `dify_launcher/README.md`, `deploy/README.md`, `.env.example` | `options.media`, `inputs`, `screens_board`, `DIFY_FILES_HOSTS` / `DIFY_FILES_BASE`, limits, Node 22 for screenshot jobs | no |
+| Tool | `tools/video/screen_overlay.py` (new, auto-discovered) | modes `board` (uploads / layouts / stills / clips), `compose` (video) and `still` (carousel / image, called by the launcher) | no |
+| Remotion | `remotion-composer/src/panda/{screenGeometry.ts, ScreenLayer.tsx, PandaScreenOverlay.tsx, PandaScreenBoard.tsx, PandaCompositions.tsx, entry.tsx}` (new) + one element in `Root.tsx` | frames (phone / browser / card / none), crop, `zoom_to`, highlight, cursor, click, blur, cards with the CJK font `panda_render` uses; `still` prop = settled state. `entry.tsx` bundles only the Panda compositions, so renders do not depend on the Google Fonts other compositions download | no |
+| Directors | `skills/pipelines/panda-video/{idea,scene-plan,asset,compose}-director.md`, `panda-carousel/{idea,script,scene-plan,asset}-director.md`, `panda-image/{idea,scene-plan,asset}-director.md` | "User screenshots" sections, all starting "only when the prompt has a USER SCREENSHOTS block" | no |
+| Pipeline | `pipeline_defs/panda-video.yaml` | compose `tools_available` += `screen_overlay` (carousel / image pipelines unchanged — the launcher places) | no |
+| Docs | `dify_launcher/DIFY_INTEGRATION.md`, `dify_launcher/README.md`, `dify_launcher/CAROUSEL.md`, `dify_launcher/IMAGE.md`, `deploy/README.md`, `.env.example` | `options.media`, `inputs`, `screens_board`, `DIFY_FILES_HOSTS` / `DIFY_FILES_BASE`, limits, Node 22 for screenshot jobs | no |
 
 The upstream `ScreenshotScene.tsx` is untouched; the Panda composition adds blur, zoom, `at_s` timing
 and the CJK font alongside it.
@@ -238,7 +260,6 @@ image upload; send `options.media`; show `screens_board` full width. One end-to-
 
 - Screenshot inside a generated phone the Panda holds (blank screen + frame-by-frame tracked composite).
 - Screenshot scenes with no Panda shot behind them (needs a no-generation scene and gate-count changes).
-- Carousel and image pipelines (same layout, rendered as a Remotion still).
 - Video uploads, adding screenshots at a later gate, photos as generation references.
 
 ## 11. Decisions taken in the build

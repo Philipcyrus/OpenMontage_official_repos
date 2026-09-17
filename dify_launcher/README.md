@@ -111,10 +111,12 @@ DIFY_RUNNER=mock uvicorn dify_launcher.app:app --host 0.0.0.0 --port 8600
   `3:4`, `16:9`, or `WIDTHxHEIGHT`. See [`CAROUSEL.md`](CAROUSEL.md) / [`IMAGE.md`](IMAGE.md).
 - `gates` — carousel only: list of gates to surface. Default `["script", "scene_plan", "stills"]`.
   Omit `script` to auto-approve GATE 1.
-- `media` — panda-video only: the user's screenshots as `[{"url": "<Dify file link>", "name": "..."}]`
-  in attachment order. The user says in the brief which one goes in which scene and how to use it;
-  Claude lays each screenshot over its generated shot and Remotion places it at compose (never
-  Higgsfield). Off until `DIFY_FILES_HOSTS` is set; needs Node 22 + remotion-composer. See
+- `media` — panda-video, panda-carousel and panda-image: the user's screenshots as
+  `[{"url": "<Dify file link>", "name": "..."}]` in attachment order. The user says in the brief which
+  one goes in which scene / slide and how to use it; Claude lays each screenshot out around the
+  generated shot and Remotion places it — over the clips at compose for video, onto the stills as
+  soon as they exist for carousel / image (never Higgsfield). Off until `DIFY_FILES_HOSTS` is set;
+  needs Node 22 + remotion-composer. See
   [`DIFY_INTEGRATION.md`](DIFY_INTEGRATION.md) §6 "User screenshots" and
   [`../docs/user-screenshots-plan.md`](../docs/user-screenshots-plan.md).
 

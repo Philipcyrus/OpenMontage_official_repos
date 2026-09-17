@@ -48,6 +48,14 @@ are the locked Elements from `config/panda-elements.json` — not free-invented 
 write character-design prose into slide copy; leave identity to the scene plan + assets
 (CHARACTER LOCK in `skills/meta/higgsfield-mcp-bridge.md`).
 
+### 3c. User screenshots (only when the prompt has a USER SCREENSHOTS block)
+- Write at least as many slides as the highest slide number in `inputs/requests.json`, keeping the
+  order the user gave.
+- A slide that carries a screenshot keeps its copy short (headline + one line): the screenshot
+  takes the space. The copy may point at what it shows ("tap Activate") but never retypes
+  personal data from it.
+- If the user's feedback at this gate moves a screenshot, update `inputs/requests.json` to match.
+
 ### 4. Quality gate
 - [ ] Section count matches the planned slide count
 - [ ] Hook / content / CTA hierarchy is obvious from `label`s
