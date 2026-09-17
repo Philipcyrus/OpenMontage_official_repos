@@ -161,12 +161,24 @@ def _lip_sync_warning_suffix(artifacts: Optional[dict[str, Any]]) -> str:
 
 
 def _safe_checkpoint_question(checkpoint: dict[str, Any], fallback: str) -> str:
-    """Use concise agent-authored gate copy without exposing invalid control data."""
+    """Compose agent-authored gate copy onto the mandatory launcher question.
+
+    Custom copy is additive only: lip-sync warnings and revise instructions from
+    ``fallback`` must never be dropped when the agent supplies a ``question``.
+    """
     raw = checkpoint.get("question")
     if not isinstance(raw, str):
         return fallback
-    question = raw.replace("\x00", "").strip()
-    return question[:4000] if question else fallback
+    custom = raw.replace("\x00", "").strip()
+    if not custom:
+        return fallback
+    # If the agent already included the mandatory wording, keep their text.
+    if fallback and fallback in custom:
+        return custom[:4000]
+    if not fallback:
+        return custom[:4000]
+    composed = f"{custom} {fallback}".strip()
+    return composed[:4000]
 
 
 def _question_for_gate(gate: Optional[str], *, stage: Optional[str] = None,

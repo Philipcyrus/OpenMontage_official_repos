@@ -119,6 +119,32 @@ def test_conservative_classification_pass_and_offset() -> None:
     assert delayed["measured_av_offset_seconds"] == pytest.approx(0.6)
     assert delayed["recommended_audio_offset_seconds"] == pytest.approx(0.6)
 
+    early = classify_lipsync(
+        clip_duration=4,
+        speech_end=2.5,
+        expected_offset=0,
+        observation=_observation(observed_mouth_onset_seconds=0.0),
+    )
+    assert early["status"] == "fail_timing"
+    assert early["measured_av_offset_seconds"] == pytest.approx(-0.5)
+    assert early["recommended_audio_offset_seconds"] == pytest.approx(-0.5)
+
+
+def test_negative_recommended_offset_is_clamped_not_zeroed() -> None:
+    """Mouths that start early must keep a signed correction within ±2s."""
+    result = classify_lipsync(
+        clip_duration=8,
+        speech_end=5.0,
+        expected_offset=0.1,
+        observation=_observation(
+            observed_mouth_onset_seconds=0.0,
+            speech_onset_seconds=1.0,
+        ),
+    )
+    assert result["status"] == "fail_timing"
+    assert result["measured_av_offset_seconds"] == pytest.approx(-1.1)
+    assert result["recommended_audio_offset_seconds"] == pytest.approx(-1.0)
+
 
 def test_bad_first_shot_calibration_is_generation_failure() -> None:
     # Calibrates the concrete flat/closed-mouth pattern observed in

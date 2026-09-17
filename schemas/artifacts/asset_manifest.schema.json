@@ -273,8 +273,9 @@
         },
         "validated_audio_offset_seconds": {
           "type": ["number", "null"],
-          "minimum": 0,
-          "description": "Applied by edit only when the QA result is fail_timing with concrete onset evidence."
+          "minimum": -2,
+          "maximum": 2,
+          "description": "Signed scene-local VO offset applied by edit only when the QA result is fail_timing with concrete onset evidence."
         },
         "retry_job_id": { "type": ["string", "null"] },
         "retry_credits": { "type": "number", "minimum": 0 },
@@ -296,7 +297,8 @@
         "measured_av_offset_seconds": { "type": ["number", "null"] },
         "recommended_audio_offset_seconds": {
           "type": ["number", "null"],
-          "minimum": 0
+          "minimum": -2,
+          "maximum": 2
         },
         "job_id": { "type": ["string", "null"] },
         "credits": { "type": "number", "minimum": 0 },
@@ -314,7 +316,7 @@
             "notes"
           ],
           "properties": {
-            "expected_audio_offset_seconds": { "type": "number", "minimum": 0 },
+            "expected_audio_offset_seconds": { "type": "number", "minimum": -2, "maximum": 2 },
             "speech_onset_seconds": { "type": ["number", "null"], "minimum": 0 },
             "speech_end_seconds": { "type": ["number", "null"], "minimum": 0 },
             "frame_paths": {

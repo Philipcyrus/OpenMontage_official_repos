@@ -119,11 +119,13 @@ growth/shrinkage, depth drift, crouch, or camera move that changes the ratio fai
 
 This is the motion cost gate: the reviewer approves the motion feel (and lipsync when on)
 **before** committing to the whole batch. Record the sample's Higgsfield **credits** on that
-asset (`credits`, `credits_source: "actual"`), plus `duration` / narration `duration_seconds`
-when TTS ran; set clip metadata `audio_lipsync: true` when that path was used. Then write the
-assets checkpoint `status='awaiting_human'` **AND `partial_progress={"phase": "motion_sample"}`**
-and STOP. Generate **no other clips** yet. Sample-scene VO files already on disk are reused in
-PHASE 3 (do not re-TTS unless revising that line).
+asset (`credits`, `credits_source: "actual"`), plus clip/narration `duration_seconds` when TTS
+ran; when the lipsync path was used, note `[audio_lipsync:true]` in `generation_summary` (asset
+rows must not invent an `audio_lipsync` property — schema is `additionalProperties: false`).
+Then write the assets checkpoint `status='awaiting_human'` **AND
+`partial_progress={"phase": "motion_sample"}`** and STOP. Generate **no other clips** yet.
+Sample-scene VO files already on disk are reused in PHASE 3 (do not re-TTS unless revising that
+line).
 
 On "request revision" here, regenerate ONLY the sample clip per the feedback (adjust motion prompt /
 model / motion params; keep the same measured `duration` unless VO was revised), keep
@@ -182,7 +184,10 @@ generate motion clips before the VO that drives their length (and mouths) exists
      allocated `timeline_contract.scenes[].i2v_duration`, aspect from the job.
    - Prompt: 2D + Element LOCK; lip-sync mouth/jaw to the attached audio; no walking / new
      person / photoreal.
-   - Manifest: `audio_lipsync: true`, `model: seedance_2_0`, VO path / media ids.
+   - Manifest row: `model: seedance_2_0`, `duration_seconds` = allocated i2v duration; put VO
+     path / media ids and `[audio_lipsync:true]` in `generation_summary`. Do **not** add an
+     `audio_lipsync` property on the asset row. After QA, eligibility lives under
+     `metadata.lip_sync_qa.scenes.<scene_id>`.
    - On failure: HOLD LOCK fallback (next bullet), log in `decision_log`.
 
    **HOLD / ineligible** (`narrator`-only, `text_card`, non-speaking, or `audio_lipsync:false`):
@@ -310,12 +315,18 @@ call ElevenLabs.
 ### 7. Build the asset_manifest (in PHASE 3)
 Record EVERY generated file canonically: per asset `id`, `type` (`image|video|audio|narration|
 music|...`), `path` (relative to the project dir), `source_tool`, `scene_id` (bind each asset to
-its scene), plus optional `prompt`/`model`/`cost_usd`/`duration_seconds`. For narration assets
-also record `speaker` and the script `section` id in metadata when multi-voice, and always set
-`duration_seconds` from the probe. For video clips set `duration` / `duration_seconds` to the
-Higgsfield `duration` used. Persist `metadata.vo_duration_map` (per-scene snap results) when
-TTS-first ran. Persist a schema-valid `asset_manifest` (`version: "1.0"`) as part of the PHASE 3
-checkpoint. On approval the stage completes and the pipeline proceeds to edit/compose.
+its scene), plus optional `prompt`/`model`/`cost_usd`/`duration_seconds` /
+`generation_summary` / `voice_performance`. Asset rows are schema-strict
+(`additionalProperties: false`) — never add `audio_lipsync`, `speaker`, bare `duration`, or
+per-row `metadata`.
+
+For narration assets always set `duration_seconds` from the probe and record the script section
+via `voice_performance.source_section_id` (and the speaker name in `generation_summary` when
+multi-voice). For video clips set `duration_seconds` to the Higgsfield `duration` used; note
+lipsync vs HOLD in `generation_summary`. Persist top-level `metadata.vo_duration_map` and
+`metadata.timeline_contract` when TTS-first ran, and `metadata.lip_sync_qa` after QA. Persist a
+schema-valid `asset_manifest` (`version: "1.0"`) as part of the PHASE 3 checkpoint. On approval
+the stage completes and the pipeline proceeds to edit/compose.
 
 **Record Higgsfield credits (for the per-project cost report).** For every Higgsfield-generated
 asset (stills via `generate_image`, clips via image_to_video), you already run the `get_cost:true`
@@ -333,14 +344,15 @@ Branding is a separate, on-demand `panda_brand` step applied only after final ap
 ## Success criteria
 - Every required asset exists on disk and appears in `asset_manifest` with `path` + `scene_id`
 - Stills/clips on-brand and character-consistent (panda Elements attached as media)
-- For speaking scenes: narration exists **before** i2v; clip `duration` came from
+- For speaking scenes: narration exists **before** i2v; clip `duration_seconds` came from
   the full-scene audio-driven allocation; no active speech exceeds the chosen i2v duration
 - `asset_manifest.metadata.timeline_contract` is schema-valid and within the requested ±5% band
   (or the assets checkpoint clearly requests a pacing revision before compose)
 - Narration covers all script sections; music (if any) sits under the VO
 - Checkpoint left in `awaiting_human` for the gate
 - When AUDIO LIPSYNC is on: customer/panda video clips used `seedance_2_0` + `audio_references`
-  + `generate_audio:false` (or logged HOLD fallback); metadata `audio_lipsync: true` on success
+  + `generate_audio:false` (or logged HOLD fallback); lipsync noted in `generation_summary` and
+  under `metadata.lip_sync_qa.scenes.<id>` (never an illegal per-row `audio_lipsync` field)
 - Every two-character still and clip passes the 0.58 ±0.05 pair-scale, shared-ground-plane, and
   posture check, or its scene-specific warning is persisted and surfaced at GATE 4
 - No Kling/Wav2Lip post-hoc; no `generate_audio:true` invented speech for brand VO

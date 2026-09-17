@@ -143,3 +143,44 @@ def test_preflight_rejects_frozen_mouth_during_active_speech() -> None:
             ],
             {"type": "cut", "duration_s": 0},
         )
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg is required")
+def test_missing_duration_probe_is_not_a_target_band_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When ffprobe omits duration, fail with probe-unavailable — not a ±5% band error."""
+    import tools.video._shared as shared
+
+    clip = tmp_path / "sc1.mp4"
+    _color_clip(clip, 5)
+    output = tmp_path / "final.mp4"
+
+    real_probe = shared.probe_output
+
+    def _probe_without_duration(path: Path) -> dict:
+        info = dict(real_probe(path))
+        info.pop("duration_seconds", None)
+        return info
+
+    monkeypatch.setattr(shared, "probe_output", _probe_without_duration)
+
+    result = PandaRender().execute(
+        {
+            "profile": "ugc",
+            "resolution": "64x64",
+            "fps": 12,
+            "transition": {"type": "cut", "duration_s": 0},
+            "scenes": [{"media_path": str(clip), "duration_s": 5}],
+            "target_duration_s": 5,
+            "duration_tolerance_fraction": 0.05,
+            "run_id": "probe-missing-test",
+            "output_path": str(output),
+        }
+    )
+
+    assert result.success is False
+    assert "duration probe unavailable" in (result.error or "")
+    assert "postflight failed" not in (result.error or "")
+    assert result.artifacts == [str(output)]
+    assert output.is_file()

@@ -320,9 +320,25 @@ def get_job(job_id: str, x_dify_token: Optional[str] = Header(None)) -> dict[str
     if not state:
         raise HTTPException(status_code=404, detail="job not found")
     if state.get("status") == "running" and not _job_is_active(job_id):
-        state = _recover_worker_result(
+        # Capture freshness markers from the orphan snapshot before recovery.
+        # A concurrent worker may finish and persist a newer gate between this
+        # load and save_state; never overwrite that newer result.
+        loaded_updated_at = state.get("updated_at")
+        loaded_started_at = state.get("processing_started_at")
+        candidate = _recover_worker_result(
             state, state, "persisted running state has no active worker")
-        store.save_state(state)
+        fresh = store.load_state(job_id) or {}
+        still_orphaned = (
+            fresh.get("status") == "running"
+            and not _job_is_active(job_id)
+            and fresh.get("updated_at") == loaded_updated_at
+            and fresh.get("processing_started_at") == loaded_started_at
+        )
+        if still_orphaned:
+            store.save_state(candidate)
+            state = candidate
+        else:
+            state = fresh or candidate
     return _public(state)
 
 

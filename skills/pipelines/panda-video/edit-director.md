@@ -93,9 +93,9 @@ Prefer the full-scene allocation in `asset_manifest.metadata.timeline_contract`;
 i2v durations and bounded post-speech holds while preserving the requested total-duration band.
 Mute native clip AAC and lay the ElevenLabs bed as today — do not keep Higgsfield native audio.
 **AUDIO LIPSYNC clips**
-(`metadata.audio_lipsync: true` / Seedance with `generate_audio:false`) are silent or discardable
-AAC; mouths were driven by the same VO file you lay here — still mute + lay VO (do not skip the
-bed thinking native audio carries brand voice).
+(Seedance with `generate_audio:false`, noted in `generation_summary` / `metadata.lip_sync_qa`)
+are silent or discardable AAC; mouths were driven by the same VO file you lay here — still mute
++ lay VO (do not skip the bed thinking native audio carries brand voice).
 
 For a legacy job, a missing/incomplete map, or any discovered VO overrun, preserve the complete
 VO and stop for a pacing revision rather than silently making the master substantially short or

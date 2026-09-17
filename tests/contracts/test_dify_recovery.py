@@ -72,6 +72,7 @@ def test_pre_guardrail_panda_edit_orphan_infers_assets_gate() -> None:
 def test_get_recovers_persisted_running_job_without_worker(monkeypatch) -> None:
     saved: list[dict] = []
     state = _running_state()
+    state["updated_at"] = "2026-09-16T20:00:01+00:00"
     monkeypatch.setattr(launcher, "_TOKEN", "")
     monkeypatch.setattr(launcher.store, "load_state", lambda job_id: dict(state))
     monkeypatch.setattr(
@@ -86,6 +87,42 @@ def test_get_recovers_persisted_running_job_without_worker(monkeypatch) -> None:
     assert public["gate"] == "approve_assets"
     assert public["worker_active"] is False
     assert saved and saved[-1]["status"] == "awaiting_human"
+
+
+def test_get_recovery_does_not_overwrite_newer_approve_final(monkeypatch) -> None:
+    """Poll loads running; worker finishes with approve_final before save — keep final."""
+    saved: list[dict] = []
+    orphan = _running_state()
+    orphan["updated_at"] = "2026-09-16T20:00:01+00:00"
+    finished = {
+        "job_id": orphan["job_id"],
+        "pipeline": "panda-video",
+        "status": "awaiting_human",
+        "stage": "compose",
+        "gate": "approve_final",
+        "question": "Approve the finished (unbranded) video.",
+        "artifacts": {"clips": ["clip.mp4"], "final": "final.mp4"},
+        "updated_at": "2026-09-16T20:01:00+00:00",
+        "processing_finished_at": "2026-09-16T20:01:00+00:00",
+    }
+    loads = [dict(orphan), dict(finished)]
+
+    def _load(_job_id: str) -> dict:
+        return loads.pop(0) if loads else dict(finished)
+
+    monkeypatch.setattr(launcher, "_TOKEN", "")
+    monkeypatch.setattr(launcher.store, "load_state", _load)
+    monkeypatch.setattr(
+        launcher.store, "save_state", lambda value: saved.append(dict(value))
+    )
+    with launcher._LOCK:
+        launcher._RUNNING.discard(orphan["job_id"])
+
+    public = launcher.get_job(orphan["job_id"])
+
+    assert public["status"] == "awaiting_human"
+    assert public["gate"] == "approve_final"
+    assert not saved  # must not persist stale approve_assets recovery
 
 
 def test_background_worker_cannot_persist_running(monkeypatch) -> None:

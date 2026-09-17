@@ -30,7 +30,22 @@ from tools.base_tool import (
 _SILENCE_RE = re.compile(r"silence_(start|end):\s*([0-9.]+)")
 _OFFSET_TOLERANCE_SECONDS = 0.30
 _DURATION_TOLERANCE_SECONDS = 0.15
+_MAX_ABS_AUDIO_OFFSET_SECONDS = 2.0
+_PROBE_TIMEOUT_SECONDS = 15
+_SILENCE_DETECT_TIMEOUT_SECONDS = 60
+_FRAME_EXTRACT_TIMEOUT_SECONDS = 30
 _MOUTH_SHAPES = {"closed", "narrow", "rounded", "wide", "teeth", "unclear"}
+
+
+def _clamp_audio_offset(value: float) -> float:
+    """Bound signed lip-sync audio offsets to a safe correction window."""
+    return round(
+        max(
+            -_MAX_ABS_AUDIO_OFFSET_SECONDS,
+            min(_MAX_ABS_AUDIO_OFFSET_SECONDS, float(value)),
+        ),
+        3,
+    )
 
 
 def _mouth_sequence_metrics(shapes: list[Any]) -> dict[str, Any]:
@@ -276,7 +291,7 @@ def classify_lipsync(
         float(observed_onset) - (expected_offset + speech_onset), 3
     )
     if abs(measured_offset) > _OFFSET_TOLERANCE_SECONDS:
-        corrected_offset = round(max(0.0, expected_offset + measured_offset), 3)
+        corrected_offset = _clamp_audio_offset(expected_offset + measured_offset)
         return {
             "status": "fail_timing",
             "reason": (
@@ -392,10 +407,10 @@ class LipSyncQA(BaseTool):
                 "-f",
                 "null",
                 os.devnull,
-            ])
+            ], timeout=_SILENCE_DETECT_TIMEOUT_SECONDS)
             intervals = speech_intervals_from_silence(audio_duration, silence.stderr)
-            expected_offset = max(
-                0.0, float(inputs.get("expected_audio_offset_seconds", 0.0))
+            expected_offset = _clamp_audio_offset(
+                float(inputs.get("expected_audio_offset_seconds", 0.0))
             )
             timestamps = build_sample_timestamps(
                 intervals,
@@ -461,7 +476,7 @@ class LipSyncQA(BaseTool):
             "-of",
             "csv=p=0",
             str(path),
-        ])
+        ], timeout=_PROBE_TIMEOUT_SECONDS)
         return float(result.stdout.strip().splitlines()[0])
 
     def _extract_frames(
@@ -485,7 +500,7 @@ class LipSyncQA(BaseTool):
                 "-q:v",
                 "2",
                 str(frame_path),
-            ])
+            ], timeout=_FRAME_EXTRACT_TIMEOUT_SECONDS)
             if frame_path.is_file():
                 frames.append({"timestamp_seconds": timestamp, "path": str(frame_path)})
         return frames

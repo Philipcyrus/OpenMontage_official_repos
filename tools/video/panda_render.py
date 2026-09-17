@@ -186,7 +186,12 @@ def _premix_voice_tracks(
         "-map", "[aout]", "-c:a", "pcm_s16le",
         str(out_path),
     ]
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError(
+            "voice_tracks premix timed out after 120s"
+        ) from exc
     if proc.returncode != 0 or not out_path.is_file():
         raise RuntimeError(
             f"voice_tracks premix failed (rc={proc.returncode}): "
@@ -445,17 +450,30 @@ class PandaRender(BaseTool):
         from tools.video._shared import probe_output
 
         probed = probe_output(output_path)
-        actual_duration = float(probed.get("duration_seconds") or 0.0)
-        postflight_error = _target_duration_error(
-            actual_duration, target_duration, duration_tolerance
-        )
-        if postflight_error:
-            return ToolResult(
-                success=False,
-                error=f"panda_render duration postflight failed: {postflight_error}",
-                artifacts=[str(output_path)],
-                duration_seconds=round(time.time() - start, 2),
+        if "duration_seconds" not in probed:
+            if target_duration is not None:
+                return ToolResult(
+                    success=False,
+                    error=(
+                        "panda_render duration probe unavailable: ffprobe did not "
+                        "return duration_seconds for the rendered output"
+                    ),
+                    artifacts=[str(output_path)],
+                    duration_seconds=round(time.time() - start, 2),
+                )
+            actual_duration = None
+        else:
+            actual_duration = float(probed["duration_seconds"])
+            postflight_error = _target_duration_error(
+                actual_duration, target_duration, duration_tolerance
             )
+            if postflight_error:
+                return ToolResult(
+                    success=False,
+                    error=f"panda_render duration postflight failed: {postflight_error}",
+                    artifacts=[str(output_path)],
+                    duration_seconds=round(time.time() - start, 2),
+                )
         return ToolResult(
             success=True,
             data={

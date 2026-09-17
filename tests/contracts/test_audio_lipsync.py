@@ -91,3 +91,89 @@ def test_effective_audio_start_without_qa_delta_preserves_local_offset():
         )
         == 24.4
     )
+
+
+def test_asset_manifest_rejects_illegal_per_row_lipsync_fields():
+    """Asset rows are additionalProperties:false — audio_lipsync/speaker/duration are illegal."""
+    import json
+
+    import pytest
+
+    jsonschema = pytest.importorskip("jsonschema")
+    schema = json.loads(
+        (ROOT / "schemas/artifacts/asset_manifest.schema.json").read_text(encoding="utf-8")
+    )
+    legal = {
+        "version": "1.0",
+        "assets": [
+            {
+                "id": "sc2-clip",
+                "type": "video",
+                "path": "assets/video/sc2.mp4",
+                "source_tool": "higgsfield_mcp",
+                "scene_id": "sc2",
+                "model": "seedance_2_0",
+                "duration_seconds": 8,
+                "generation_summary": "[audio_lipsync:true] seedance_2_0 with audio_references",
+            },
+            {
+                "id": "vo-s2-panda",
+                "type": "narration",
+                "path": "assets/audio/vo-s2-panda.mp3",
+                "source_tool": "elevenlabs_tts",
+                "scene_id": "sc2",
+                "duration_seconds": 5.3,
+                "voice_performance": {"source_section_id": "s2"},
+                "generation_summary": "speaker=panda section s2",
+            },
+        ],
+        "metadata": {
+            "lip_sync_qa": {
+                "status": "pass",
+                "reviewed_scene_count": 1,
+                "failed_scene_count": 0,
+                "retry_count": 0,
+                "unresolved_warnings": [],
+                "scenes": {
+                    "sc2": {
+                        "eligible": True,
+                        "status": "pass",
+                        "attempts": [],
+                        "retry_count": 0,
+                        "selected_take": "original",
+                        "unresolved_warning": None,
+                    }
+                },
+            }
+        },
+    }
+    jsonschema.validate(instance=legal, schema=schema)
+
+    illegal = {
+        "version": "1.0",
+        "assets": [
+            {
+                "id": "sc2-clip",
+                "type": "video",
+                "path": "assets/video/sc2.mp4",
+                "source_tool": "higgsfield_mcp",
+                "scene_id": "sc2",
+                "audio_lipsync": True,
+                "duration": 8,
+            }
+        ],
+    }
+    with pytest.raises(jsonschema.ValidationError):
+        jsonschema.validate(instance=illegal, schema=schema)
+
+
+def test_asset_director_avoids_illegal_per_row_manifest_fields():
+    text = (ROOT / "skills/pipelines/panda-video/asset-director.md").read_text(
+        encoding="utf-8"
+    )
+    assert "additionalProperties: false" in text
+    assert "never add `audio_lipsync`" in text or "must not invent an `audio_lipsync`" in text
+    assert "voice_performance.source_section_id" in text
+    assert "Manifest: `audio_lipsync: true`" not in text
+    assert "clip metadata `audio_lipsync: true`" not in text
+    assert "also record `speaker` and the script `section` id in metadata" not in text

@@ -473,7 +473,7 @@ assert "HERO" in (st.get("question") or ""), st.get("question")
 assert "Approve assets" not in (st.get("question") or "")
 print("[ok] _sync hero_still: single PNG preview, not storyboard")
 
-# Agent-authored gate copy is optional and safely preferred over the canonical fallback.
+# Agent-authored gate copy is additive: mandatory launcher wording is preserved.
 _fake_latest.cp = {
     "stage": "assets",
     "status": "awaiting_human",
@@ -483,9 +483,59 @@ _fake_latest.cp = {
 }
 st = run._sync({"job_id": JOBH})
 assert st["gate"] == "approve_hero_still"
-assert st["question"] == "Approve sc4 hero after reviewing the corrected thumb."
+_q = st.get("question") or ""
+assert "Approve sc4 hero after reviewing the corrected thumb." in _q
+assert "HERO" in _q or "hero" in _q.lower()
+assert "request a revision" in _q.lower()
 assert st["artifacts"].get("stills") == ["hero_scene-2.png"]
 print("[ok] _sync accepts checkpoint question and preserves hero media")
+
+# Custom question must not drop unresolved lip-sync warnings at approve_assets.
+JOBLQ = "jLipSyncQuestion"
+projlq = run._projects_dir / JOBLQ
+(projlq / "assets" / "video").mkdir(parents=True, exist_ok=True)
+(projlq / "artifacts").mkdir(parents=True, exist_ok=True)
+(projlq / "assets" / "video" / "sc4.mp4").write_bytes(b"\x00")
+_fake_latest.cp = {
+    "stage": "assets",
+    "status": "awaiting_human",
+    "question": "Clips look energetic — please approve.",
+    "artifacts": {
+        "asset_manifest": {
+            "version": "1.0",
+            "assets": [],
+            "metadata": {
+                "lip_sync_qa": {
+                    "status": "warning",
+                    "reviewed_scene_count": 1,
+                    "failed_scene_count": 0,
+                    "retry_count": 0,
+                    "unresolved_warnings": ["sc4: soft articulation"],
+                    "scenes": {
+                        "sc4": {
+                            "eligible": True,
+                            "status": "pass",
+                            "attempts": [],
+                            "retry_count": 0,
+                            "selected_take": "original",
+                            "unresolved_warning": "soft articulation",
+                        }
+                    },
+                }
+            },
+        },
+        "clips": ["sc4.mp4"],
+    },
+    "pipeline_type": "panda-video",
+}
+st = run._sync({"job_id": JOBLQ, "pipeline": "panda-video"})
+assert st["gate"] == "approve_assets", st
+_q = st.get("question") or ""
+assert "Clips look energetic" in _q
+assert "Lip-sync QA warning" in _q
+assert "sc4" in _q
+assert "revise" in _q.lower() and "shots" in _q
+print("[ok] _sync keeps lip-sync warning when agent supplies a custom question")
 
 # 3c2) stills-only with NO phase → approve_stills + storyboard (never approve_assets)
 JOBSO = "jStillsOnlyNoPhase"
