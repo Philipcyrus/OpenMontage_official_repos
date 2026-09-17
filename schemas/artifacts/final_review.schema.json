@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "openmontage/artifacts/final_review",
   "title": "Final Review",
-  "description": "Structured self-review of the rendered output. The compose stage must produce this artifact to prove the agent inspected the actual rendered video before presenting it to the user. If status is 'revise' or 'fail', the agent must not present the video as complete.",
+  "description": "Structured self-review of the rendered output. The compose stage must produce this artifact to prove the agent inspected the actual rendered video before presenting it to the user. A warning is presented with disclosed issues; if status is 'revise' or 'fail', the agent must not present the video as complete.",
   "type": "object",
   "required": ["version", "output_path", "status", "checks"],
   "properties": {
@@ -13,8 +13,8 @@
     },
     "status": {
       "type": "string",
-      "enum": ["pass", "revise", "fail"],
-      "description": "pass=ready to present, revise=fixable issues found, fail=critical problems"
+      "enum": ["pass", "warning", "revise", "fail"],
+      "description": "pass=ready, warning=present with disclosed bounded issues, revise=fixable issues found, fail=critical problems"
     },
     "checks": {
       "type": "object",

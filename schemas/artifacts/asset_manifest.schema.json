@@ -79,6 +79,11 @@
             "unresolved_warnings"
           ],
           "properties": {
+            "rubric_version": {
+              "type": "string",
+              "enum": ["1.0", "2.0"],
+              "description": "2.0 adds ordered mouth-shape sequence checks; omitted/1.0 remains valid for legacy manifests."
+            },
             "status": {
               "type": "string",
               "enum": ["pass", "warning", "not_applicable"]
@@ -320,6 +325,26 @@
             "active_speech_samples": { "type": "integer", "minimum": 0 },
             "closed_mouth_active_samples": { "type": "integer", "minimum": 0 },
             "distinct_mouth_shapes": { "type": "integer", "minimum": 0 },
+            "active_mouth_shapes": {
+              "type": "array",
+              "minItems": 3,
+              "items": {
+                "type": "string",
+                "enum": ["closed", "narrow", "rounded", "wide", "teeth", "unclear"]
+              }
+            },
+            "pre_speech_mouth_state": {
+              "type": "string",
+              "enum": ["closed", "open", "unclear"]
+            },
+            "mouth_shape_change_count": { "type": "integer", "minimum": 0 },
+            "longest_static_shape_run": { "type": "integer", "minimum": 0 },
+            "longest_static_shape_fraction": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "unclear_mouth_shape_samples": { "type": "integer", "minimum": 0 },
             "observed_mouth_onset_seconds": { "type": ["number", "null"], "minimum": 0 },
             "notes": { "type": "string" }
           },

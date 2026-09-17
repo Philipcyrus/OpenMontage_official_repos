@@ -58,8 +58,10 @@ Rules (upstream governance — do NOT break):
 3. **Write `render_report` and `final_review`.** Copy the asset manifest QA summary into optional
    `final_review.checks.lip_sync_check`, including reviewed scenes, applied offsets, affected scene
    ids, and warnings. A result still unresolved after attempt 2 uses `status:"warning"` and
-   `recommended_action:"present_to_user"` both inside `lip_sync_check` and at final-review top
-   level; it does not cause another automatic retry or block the final gate. Include
+   `recommended_action:"present_to_user"` inside `lip_sync_check`, and forces top-level
+   `final_review.status:"warning"` plus `recommended_action:"present_to_user"`. Never write
+   top-level `status:"pass"` while unresolved lip-sync warnings exist. This does not cause another
+   automatic retry or block the final gate. Include
    `asset_manifest` and `final_review` in the compose checkpoint artifacts so the launcher can
    surface the warning.
 4. Checkpoint `awaiting_human` for the final gate (approve_final).

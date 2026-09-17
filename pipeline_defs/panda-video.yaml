@@ -134,6 +134,7 @@ stages:
       - "PAIR SCALE LOCK: whenever panda + customer share a frame, panda ground-to-ear-top is 0.58 ±0.05 of standing customer ground-to-head height; feet share one ground line; upright canonical postures persist through stills and clips"
       - "PHASE 2 (motion sample): one hero clip approves the motion/animation before the full batch (only if motion_sample:true; default off); narrated sample scenes TTS + duration snap before i2v"
       - "PHASE 3 (media): TTS-first then full-timeline duration allocation — unequal scene lengths follow measured audio while final duration stays within ±5% of the user's request; when audio_lipsync on (default), customer/panda clips use seedance_2_0 + audio_references + generate_audio:false; every required asset on disk in asset_manifest (path + scene_id)"
+      - "LIP-SYNC QA rubric 2.0: ordered active-speech mouth states must show closures, at least three useful shapes, sufficient transitions, and no long static/open-mouth holds before the one-scene retry policy can pass"
       - "Budget: cumulative Higgsfield credits stay within max_higgsfield_credits (if set); overruns hard-block before spend, not after"
       - Narration covers all script sections; music (if any) sits under the VO
       - Reviewer can approve the set or request revision of specific scenes/shots (regenerate only those)

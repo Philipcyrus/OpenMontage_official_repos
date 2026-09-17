@@ -211,16 +211,24 @@ text-card, and `audio_lipsync:false` clips are `skipped`, not failures.
    speech, and extracts dense frames before onset, through speech, and just after speech.
 2. Read every returned frame. Re-invoke `lipsync_qa` with one honest `visual_observation`:
    `mouth_visible_ratio`, active/closed sample counts, number of distinct mouth shapes, observed
-   mouth-motion onset, and notes. Do not infer a pass from metadata or the generation prompt.
+   mouth-motion onset, `pre_speech_mouth_state`, and an ordered `active_mouth_shapes` label for
+   every active sample. Allowed labels are `closed`, `narrow`, `rounded`, `wide`, `teeth`, and
+   `unclear`. Preserve frame order; do not summarize a long held smile as several invented shapes.
+   Do not infer a pass from metadata or the generation prompt.
 3. Apply the returned conservative status:
-   - `pass`: mouth is visible in at least 80% of active samples, has at least two clearly distinct
-     shapes, is not closed for half the active samples, and starts within 0.30s of speech.
+   - `pass`: mouth is visible in at least 80% of active samples; sustained passages contain at
+     least three useful states including some closure, enough ordered transitions, no shape held
+     through more than half the samples, and onset within 0.30s of speech.
    - `fail_timing`: articulation exists but mouth onset leads/lags speech by more than 0.30s.
-   - `fail_generation`: concrete flat/closed/obscured articulation or incomplete clip coverage.
+   - `fail_generation`: concrete flat/closed/obscured articulation, continuous-open oscillation,
+     two-shape/static-mouth behavior, pre-speech held-open smiles with weak subsequent motion, or
+     incomplete clip coverage.
    - `inconclusive`: analysis or evidence is insufficient. Never spend automatically merely
      because the analysis tool failed.
-4. Persist the report under `asset_manifest.metadata.lip_sync_qa.scenes.<scene_id>`. Frame paths
-   must stay under the project directory. The report is evidence for GATE 4 and final review.
+4. Persist `rubric_version:"2.0"` and the report under
+   `asset_manifest.metadata.lip_sync_qa.scenes.<scene_id>`. Copy the ordered mouth states and the
+   tool-derived change count / longest static run into each attempt's evidence. Frame paths must
+   stay under the project directory. The report is evidence for GATE 4 and final review.
 
 #### Bounded correction policy
 

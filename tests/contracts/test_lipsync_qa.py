@@ -23,8 +23,17 @@ def _observation(**overrides):
     value = {
         "mouth_visible_ratio": 1.0,
         "active_speech_samples": 6,
-        "closed_mouth_active_samples": 1,
-        "distinct_mouth_shapes": 3,
+        "closed_mouth_active_samples": 2,
+        "distinct_mouth_shapes": 5,
+        "active_mouth_shapes": [
+            "closed",
+            "narrow",
+            "rounded",
+            "wide",
+            "closed",
+            "teeth",
+        ],
+        "pre_speech_mouth_state": "closed",
         "observed_mouth_onset_seconds": 0.7,
         "speech_onset_seconds": 0.5,
         "notes": "Face visible with changing mouth shapes.",
@@ -52,6 +61,16 @@ def _attempt(attempt: int, take: str, status: str) -> dict:
             "active_speech_samples": 6,
             "closed_mouth_active_samples": 4 if attempt == 1 else 1,
             "distinct_mouth_shapes": 1 if attempt == 1 else 3,
+            "active_mouth_shapes": (
+                ["closed", "closed", "closed", "closed", "narrow", "closed"]
+                if attempt == 1
+                else ["closed", "narrow", "rounded", "wide", "closed", "teeth"]
+            ),
+            "pre_speech_mouth_state": "closed",
+            "mouth_shape_change_count": 3 if attempt == 1 else 5,
+            "longest_static_shape_run": 4 if attempt == 1 else 1,
+            "longest_static_shape_fraction": 0.667 if attempt == 1 else 0.167,
+            "unclear_mouth_shape_samples": 0,
             "observed_mouth_onset_seconds": 1.1 if attempt == 1 else 0.6,
             "notes": "Observed sampled mouth states.",
         },
@@ -117,6 +136,77 @@ def test_bad_first_shot_calibration_is_generation_failure() -> None:
     assert result["status"] == "fail_generation"
 
 
+def test_reported_continuous_open_retry_is_generation_failure() -> None:
+    # job_a8269ac536a9 sc2 attempt 2 had 0/15 closed samples. Variation among
+    # open shapes must not make continuous-open oscillation pass.
+    result = classify_lipsync(
+        clip_duration=8,
+        speech_end=5.169,
+        expected_offset=0,
+        observation=_observation(
+            active_speech_samples=15,
+            closed_mouth_active_samples=0,
+            distinct_mouth_shapes=3,
+            active_mouth_shapes=[
+                "wide", "rounded", "wide", "teeth", "wide",
+                "rounded", "wide", "wide", "teeth", "wide",
+                "rounded", "wide", "teeth", "wide", "rounded",
+            ],
+            observed_mouth_onset_seconds=0,
+            speech_onset_seconds=0,
+        ),
+    )
+    assert result["status"] == "fail_generation"
+    assert "never closes" in result["reason"]
+
+
+def test_reported_two_shape_held_smile_is_generation_failure() -> None:
+    # job_a8269ac536a9 sc4: already open before onset and mostly held one wide
+    # shape. The old aggregate threshold accepted this.
+    result = classify_lipsync(
+        clip_duration=9,
+        speech_end=4.598,
+        expected_offset=0,
+        observation=_observation(
+            active_speech_samples=12,
+            closed_mouth_active_samples=1,
+            distinct_mouth_shapes=2,
+            active_mouth_shapes=[
+                "wide", "wide", "wide", "wide", "wide", "wide",
+                "wide", "rounded", "wide", "wide", "wide", "closed",
+            ],
+            pre_speech_mouth_state="open",
+            observed_mouth_onset_seconds=0,
+            speech_onset_seconds=0.073,
+        ),
+    )
+    assert result["status"] == "fail_generation"
+
+
+def test_richer_good_job_mouth_sequence_passes() -> None:
+    # job_7d112150c67f showed natural alternation among 4 shapes with closures.
+    result = classify_lipsync(
+        clip_duration=10,
+        speech_end=9.357,
+        expected_offset=0,
+        observation=_observation(
+            active_speech_samples=14,
+            closed_mouth_active_samples=3,
+            distinct_mouth_shapes=4,
+            active_mouth_shapes=[
+                "wide", "rounded", "closed", "teeth", "wide", "narrow", "closed",
+                "rounded", "wide", "teeth", "closed", "narrow", "rounded", "wide",
+            ],
+            pre_speech_mouth_state="open",
+            observed_mouth_onset_seconds=0,
+            speech_onset_seconds=0.073,
+        ),
+    )
+    assert result["status"] == "pass"
+    assert result["mouth_shape_change_count"] == 13
+    assert result["longest_static_shape_run"] == 1
+
+
 def test_missing_evidence_and_analysis_failure_are_inconclusive() -> None:
     result = classify_lipsync(
         clip_duration=4,
@@ -125,6 +215,17 @@ def test_missing_evidence_and_analysis_failure_are_inconclusive() -> None:
         observation=None,
     )
     assert result["status"] == "inconclusive"
+    missing_sequence = classify_lipsync(
+        clip_duration=4,
+        speech_end=2.5,
+        expected_offset=0,
+        observation={
+            key: value
+            for key, value in _observation().items()
+            if key != "active_mouth_shapes"
+        },
+    )
+    assert missing_sequence["status"] == "inconclusive"
     tool_result = LipSyncQA().execute(
         {"video_path": "/missing/video.mp4", "audio_path": "/missing/voice.wav"}
     )
@@ -149,6 +250,7 @@ def test_asset_manifest_serializes_two_attempts_and_caps_each_scene() -> None:
         ],
         "metadata": {
             "lip_sync_qa": {
+                "rubric_version": "2.0",
                 "status": "warning",
                 "reviewed_scene_count": 1,
                 "failed_scene_count": 1,
@@ -174,6 +276,22 @@ def test_asset_manifest_serializes_two_attempts_and_caps_each_scene() -> None:
         },
     }
     jsonschema.validate(manifest, schema)
+
+    legacy = json.loads(json.dumps(manifest))
+    legacy["metadata"]["lip_sync_qa"].pop("rubric_version")
+    for attempt in legacy["metadata"]["lip_sync_qa"]["scenes"]["scene-1"]["attempts"]:
+        evidence = attempt["evidence"]
+        for key in (
+            "active_mouth_shapes",
+            "pre_speech_mouth_state",
+            "mouth_shape_change_count",
+            "longest_static_shape_run",
+            "longest_static_shape_fraction",
+            "unclear_mouth_shape_samples",
+        ):
+            evidence.pop(key)
+    jsonschema.validate(legacy, schema)
+
     manifest["metadata"]["lip_sync_qa"]["scenes"]["scene-1"]["retry_count"] = 2
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(manifest, schema)
@@ -187,7 +305,7 @@ def test_final_review_warning_is_presented_not_blocked() -> None:
     review = {
         "version": "1.0",
         "output_path": "renders/final.mp4",
-        "status": "pass",
+        "status": "warning",
         "checks": {
             "technical_probe": {},
             "visual_spotcheck": {},
@@ -221,6 +339,9 @@ def test_runner_prompts_enforce_retry_cap_and_surface_scene_warning() -> None:
         assert "once" in normalized
         assert "attempt 3" in normalized
         assert "checkpoint" in normalized
+        assert "active_mouth_shapes" in normalized
+        assert "continuous-open" in normalized
+        assert "rubric_version='2.0'" in prompt
 
     artifacts = {
         "asset_manifest": {
@@ -259,6 +380,8 @@ def test_pipeline_and_directors_require_eligible_only_bounded_qa() -> None:
     assert "Narrator, HOLD" in assets
     assert "Never retry a `pass`" in assets
     assert "never submit attempt 3" in assets
+    assert "`active_mouth_shapes`" in assets
+    assert '`final_review.status:"warning"`' in compose
     assert "get_cost:true" in assets
     assert "validated_audio_offset_seconds" in edit
     assert "immutable scene-plan section/scene timestamps" in edit.replace("\n", " ")
