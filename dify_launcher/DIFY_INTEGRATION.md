@@ -348,13 +348,17 @@ description also works.
 - **What the reviewer sees:** `artifacts.screens_board` — one picture per gate (numbered uploads at
   `approve_script`, layouts with the Panda area marked at `approve_scene_plan`; for video also
   screenshots over the stills at `approve_hero_still` / `approve_stills` and over the clips at
-  `approve_motion_sample` / `approve_assets`). Show it full width. Carousel / image jobs get no board
-  at their stills gates — the `stills` themselves carry the screenshots. Problems the launcher's
-  checks find (a scene or slide missing a screenshot the user put there, a still with the character
-  or slide text in the screenshot area, a screenshot that could not be placed, a screenshot not found
-  in the final video, …) are appended to `question` under *"Your screenshots — please check"*. The
-  user fixes them with a normal revise — including re-assigning ("move 4 to scene 6") at the scene
-  plan gate.
+  `approve_motion_sample` / `approve_assets`). A scene that shows one screenshot and then another
+  gets one cell per moment, each labelled with its seconds, so both can be reviewed. Show it full
+  width. Carousel / image jobs get no board at their stills gates — the `stills` themselves carry
+  the screenshots. Problems the launcher's checks find (a scene or slide missing a screenshot the
+  user put there, a still with the character or slide text in the screenshot area, a caption long
+  enough to cover a screenshot, a screenshot that could not be placed, a screenshot not in the
+  final video where the plan puts it, …) are appended to `question` under *"Your screenshots —
+  please check"*. A note may also say a check **could not be run** (frames that will not decode, a
+  cut changed after compose) and ask the reviewer to look at the preview — that is never a failure
+  and never blocks the approval. The user fixes real problems with a normal revise — including
+  re-assigning ("move 4 to scene 6") at the scene plan gate.
 - **Server requirements:** `DIFY_FILES_HOSTS` must name Dify's file host (empty = media refused);
   `DIFY_FILES_BASE` is needed only if Dify returns relative `/files/...` links (its `FILES_URL` unset).
   Node ≥ 22 + `remotion-composer` must be installed (`deploy/README.md`). Links are downloaded when the
