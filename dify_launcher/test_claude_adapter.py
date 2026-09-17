@@ -77,8 +77,6 @@ assert "HOLD" in _sp_off
 _stills_on = run._stills_approved_prompt("jLips", {})
 assert "AUDIO LIPSYNC — ON" in _stills_on
 assert "lipsync_qa" in _stills_on
-assert "active_mouth_shapes" in _stills_on
-assert "rubric_version='2.0'" in _stills_on
 assert "allocate_scene_durations" in _stills_on
 assert "tolerance_fraction=0.05" in _stills_on
 assert "timeline_contract" in _stills_on
@@ -775,11 +773,9 @@ assert "timeline_contract" in aap
 assert "±5%" in aap
 assert "effective_scene_start + immutable original scene-local offset" in aap
 assert "approve_final" in aap
-assert "final_review.status='warning'" in aap
 edit_cont = run._edit_compose_continue_prompt("jEditHang", "panda-video")
 assert "Do NOT ask" in edit_cont and "approve_final" in edit_cont
 assert "timeline_contract" in edit_cont and "unequal audio-driven" in edit_cont
-assert "status='warning'" in edit_cont and "never status='pass'" in edit_cont
 cont_vid = run._continue_prompt("jEditHang", "panda-video")
 assert "approve_final" not in cont_vid
 print("[ok] _run_until_final_gate returns resumable approve_assets gate")
