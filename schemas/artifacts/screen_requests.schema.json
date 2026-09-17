@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://openmontage.dev/schemas/artifacts/screen_requests.schema.json",
   "title": "Screenshot requests",
-  "description": "projects/<job>/inputs/requests.json — the user's guidance for each uploaded screenshot, written by the panda-video idea director from the brief (and updated on a scene-plan revise). One entry per upload. Scene numbers are 1-based positions in the scene plan and are binding. No scenes and no moment = not placed (not used).",
+  "description": "projects/<job>/inputs/requests.json — the user's guidance for each uploaded screenshot, written by the panda-video, panda-carousel or panda-image idea director from the brief (and updated on a scene-plan or stills revise). One entry per upload. Scene numbers are 1-based positions in the scene plan and are binding (carousel: slide numbers; panda-image: 1 = the image). No scenes and no moment = not placed (not used).",
   "type": "array",
   "items": {
     "type": "object",

@@ -55,6 +55,49 @@ def test_keep_out_areas_cover_what_panda_render_draws(canvas):
         assert _contains(sl.KEEP_OUT[canvas]["logo"], frac(lb)), (canvas, frac(lb))
 
 
+# Sizes image models really return for a carousel / single image (dify_launcher/CAROUSEL.md
+# records 1024x1024 and 2048x2048 runs), plus the mock canvases.
+STILL_SIZES = [(1024, 1024), (2048, 2048), (1024, 1280), (896, 1152), (1080, 1350), (768, 1344),
+               (1440, 1080)]
+
+
+@pytest.mark.parametrize("size", STILL_SIZES)
+def test_still_logo_keep_out_covers_the_brand_stamp_at_real_still_sizes(size):
+    """The bgc stamp is a fixed pixel size, so it reaches further in on a smaller still.
+
+    A carousel / image still is whatever the image model returned, and the keep-out shown to the
+    agent (and checked at the gates) is one box for the job — so it has to cover the stamp on the
+    smallest still a model returns as well as on the big ones.
+    """
+    vendor = ROOT / "vendor"
+    os.environ.setdefault("MONTAGE_BRAND_DIR", str(vendor / "brand"))
+    os.environ.setdefault("MONTAGE_DATA_DIR", str(vendor / "data"))
+    if str(vendor) not in sys.path:
+        sys.path.insert(0, str(vendor))
+    try:
+        from PIL import Image
+        from montage_svc import storage as st
+        from montage_svc.render import overlays as ov
+
+        st.ensure_profiles()
+        bgc = st.load_profile("bgc")
+        W, H = size
+        logo = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        ov.draw_logo(logo, bgc)
+    except Exception as e:  # noqa: BLE001 — needs the vendored brand assets
+        pytest.skip(f"vendored overlays unavailable here: {e}")
+    box = logo.getbbox()
+    assert box is not None
+    stamp = (box[0] / W, box[1] / H, box[2] / W, box[3] / H)
+    for pipeline in ("panda-carousel", "panda-image"):
+        ko = sl.keep_out_for(W, H, pipeline)
+        assert "captions" not in ko, "a still draws its own copy — there is no caption strip"
+        assert _contains(ko["logo"], stamp), (size, pipeline, stamp, ko["logo"])
+    # the pixel constants the keep-out is built from must match what draw_logo actually stamps
+    assert W - box[0] <= sl.LOGO_STAMP_PX[0] + 1, (size, box)
+    assert box[3] <= sl.LOGO_STAMP_PX[1] + 1, (size, box)
+
+
 def test_chrome_geometry_matches_remotion_component():
     ts = (ROOT / "remotion-composer" / "src" / "panda" / "screenGeometry.ts").read_text(encoding="utf-8")
     for frame, vals in sl.CHROME.items():

@@ -20,8 +20,9 @@ this tool renders it deterministically, 0 credits:
 
 Remotion renders a transparent PNG sequence (PandaScreenOverlay) that ffmpeg composites onto
 the normalised clip, so the Panda pixels are only touched by the final encode. For stills it
-renders one transparent PNG that is alpha-composited onto the still, so every pixel outside the
-screenshot layers stays exactly as generated.
+renders one transparent PNG that is alpha-composited onto the still: a PNG still keeps every
+pixel outside the screenshot layers exactly as generated, and a JPEG still is re-encoded once
+(q95) from the clean original, which shifts pixels outside them by a level or two.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -478,8 +480,23 @@ class ScreenOverlay(BaseTool):
         try:
             path = self._render_still(project, scene_id, group, recs, still, Path(str(out)),
                                       inputs.get("language") or "zh")
+        except subprocess.TimeoutExpired as e:
+            # Cause first: str(CalledProcessError) starts with the whole npx command line and
+            # absolute server paths, which is all that survives the launcher's status.json and
+            # gate-note truncation — the reader learned nothing about what actually failed.
+            return ToolResult(success=False,
+                              error=f"scene {scene_id}: the Remotion still render timed out after "
+                                    f"{float(e.timeout or 0):.0f} s")
+        except subprocess.CalledProcessError as e:
+            detail = str(getattr(e, "detail", "") or e.stderr or e.stdout or "")
+            detail = re.sub(r"\x1b\[[0-9;]*m", "", detail).strip()
+            return ToolResult(success=False,
+                              error=f"scene {scene_id}: Remotion exited {e.returncode}: "
+                                    f"{detail[:400] or 'no output'}")
         except Exception as e:  # noqa: BLE001
-            return ToolResult(success=False, error=f"scene {scene_id}: still render failed: {e}")
+            return ToolResult(success=False,
+                              error=f"scene {scene_id}: still render failed: "
+                                    f"{type(e).__name__}: {str(e)[:300]}")
         return ToolResult(success=True,
                           data={"output_path": str(path), "scene_id": scene_id,
                                 "layout_hash": sl.layout_hash(group, recs.values())},
@@ -488,17 +505,30 @@ class ScreenOverlay(BaseTool):
     def _render_still(self, project: Path, scene_id: str, group: list[dict[str, Any]],
                       recs: dict[str, dict[str, Any]], still: Path, out: Path,
                       language: str) -> Path:
-        from PIL import Image
+        import tempfile
+
+        from PIL import Image, ImageOps
 
         safe = "".join(ch if ch.isalnum() or ch in "-_" else "-" for ch in scene_id)[:60] or "scene"
-        work = sl.overlay_dir(project) / "work" / f"still_{safe}"
-        if work.exists():
-            shutil.rmtree(work, ignore_errors=True)
+        # A work dir per CALL: two placement passes for the same scene (two syncs of one job) used
+        # to delete each other's staging dir mid-render and record a phantom render failure.
+        base_work = sl.overlay_dir(project) / "work"
+        base_work.mkdir(parents=True, exist_ok=True)
+        work = Path(tempfile.mkdtemp(dir=base_work, prefix=f"still_{safe}_"))
         public = work / "public"
         public.mkdir(parents=True, exist_ok=True)
         try:
-            with Image.open(still) as im:
+            with Image.open(still) as raw_im:
+                # Measure and composite on the image as it is DISPLAYED: a still carrying an EXIF
+                # orientation tag would otherwise get the screenshot drawn on the stored (rotated)
+                # pixel grid. 16-bit / float stills would clip to pure black and white on a plain
+                # RGBA convert, so scale them down to 8-bit first.
+                im = ImageOps.exif_transpose(raw_im)
                 had_alpha = im.mode in ("RGBA", "LA") or "transparency" in im.info
+                if im.mode.startswith("I;16"):
+                    im = im.convert("I")
+                if im.mode in ("I", "F"):
+                    im = im.point(lambda v: v * (1 / 256)).convert("L")
                 base = im.convert("RGBA")
             W, H = base.size
             layers = []
@@ -528,9 +558,13 @@ class ScreenOverlay(BaseTool):
                 raise RuntimeError(f"overlay is {layer.size}, still is {base.size}")
             base.alpha_composite(layer)
             out.parent.mkdir(parents=True, exist_ok=True)
-            tmp = out.with_name(f"{out.stem}.tmp{out.suffix}")
+            tmp = out.with_name(f"{out.stem}.{work.name[-8:]}.tmp{out.suffix}")
             if out.suffix.lower() in (".jpg", ".jpeg"):
-                base.convert("RGB").save(tmp, "JPEG", quality=95)
+                # Pillow reads icc_profile/exif for JPEG only from the save arguments, so they have
+                # to be carried over explicitly or the composite loses the still's colour profile.
+                extra = {k: v for k, v in (("icc_profile", base.info.get("icc_profile")),
+                                           ("exif", base.info.get("exif"))) if v}
+                base.convert("RGB").save(tmp, "JPEG", quality=95, **extra)
             else:
                 (base if had_alpha else base.convert("RGB")).save(tmp, "PNG")
             os.replace(tmp, out)

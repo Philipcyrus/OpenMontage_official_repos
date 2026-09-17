@@ -29,6 +29,7 @@ launcher-only after the last content gate.
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import sys
@@ -537,6 +538,44 @@ def _still_basename(name: Any) -> str:
     return Path(str(name)).name
 
 
+def _manifest_still(project: Path, basename: str) -> Optional[Path]:
+    """The generated still with this file name, from the asset_manifest — wherever the agent put it.
+
+    Carousel / image stills carry the user's screenshots in the JOB STORE copy, so a revise leg
+    must never be handed that copy: it would import the screenshot into the image edit and the
+    next placement would draw a second one on top. The engine file is the clean one.
+    """
+    try:
+        from lib.screen_layout import is_launcher_owned, load_manifest_rows
+    except Exception:  # noqa: BLE001 — never let an import break a revise prompt
+        return None
+    found: Optional[Path] = None
+    for row in load_manifest_rows(project):
+        raw = str(row.get("path") or "")
+        if not raw or Path(raw).name != basename or is_superseded_still(raw):
+            continue
+        p = Path(raw)
+        p = p if p.is_absolute() else project / p
+        try:
+            if p.is_file() and not is_launcher_owned(p, project):
+                found = p
+        except OSError:
+            continue
+    return found
+
+
+def _placed_still_names(project: Path) -> set[str]:
+    """Still file names whose job-store copy carries placed screenshots (overlay/stills/status.json)."""
+    try:
+        data = json.loads((project / "overlay" / "stills" / "status.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    if not isinstance(data, dict):
+        return set()
+    return {str(v.get("name")) for v in data.values()
+            if isinstance(v, dict) and v.get("name") and v.get("composite_sha")}
+
+
 def _still_abs_paths(job_id: str, state: Optional[dict[str, Any]], shots: list[Any],
                      projects_dir: Optional[Path] = None) -> list[str]:
     """Absolute paths of current stills (flagged shots if set, else all)."""
@@ -545,7 +584,9 @@ def _still_abs_paths(job_id: str, state: Optional[dict[str, Any]], shots: list[A
     if not names:
         return []
     indices = _revise_shot_indices({"shots": shots}, len(names))
-    engine_images = (projects_dir / job_id / "assets" / "images") if projects_dir else None
+    project = (projects_dir / job_id) if projects_dir else None
+    engine_images = (project / "assets" / "images") if project else None
+    placed = _placed_still_names(project) if project else set()
     paths: list[str] = []
     for i in indices:
         basename = names[i]
@@ -554,6 +595,13 @@ def _still_abs_paths(job_id: str, state: Optional[dict[str, Any]], shots: list[A
             if eng.is_file():
                 paths.append(str(eng.resolve()))
                 continue
+        if project is not None and basename in placed:
+            # the store copy has the screenshot baked in — use the manifest's own path, or
+            # nothing at all rather than hand the composite to an image edit
+            clean = _manifest_still(project, basename)
+            if clean is not None:
+                paths.append(str(clean.resolve()))
+            continue
         p = store.artifact_path(job_id, basename)
         paths.append(str(p.resolve()) if p.exists() else str(p))
     return paths
@@ -1531,6 +1579,9 @@ class ClaudeCodeRunner(Runner):
             if _is_stills_terminal(state):
                 # carousel / image are stills-terminal: complete assets and let _sync mark done
                 self._approve_stage(job_id, "assets", _pipeline_of(state))
+                # Last chance to place any screenshot still waiting for render time: the next gate
+                # is approve_brand, and the brand pass stamps whatever the store holds.
+                self._place_screenshots(job_id, state.get("artifacts") or {}, math.inf)
                 return self._sync(state)
             if _motion_sample_enabled(state):
                 # one hero clip first — approve the motion before batching all clips
@@ -1641,13 +1692,19 @@ class ClaudeCodeRunner(Runner):
         except Exception:  # noqa: BLE001 — facts are an extra; never block a leg
             return ""
 
-    def _place_screenshots(self, job_id: str, arts: dict[str, Any]) -> None:
-        """Carousel / image jobs with uploads: screenshots onto the store stills. Never raises."""
+    def _place_screenshots(self, job_id: str, arts: dict[str, Any],
+                           budget_s: Optional[float] = None) -> set[str]:
+        """Carousel / image jobs with uploads: screenshots onto the store stills. Never raises.
+
+        Returns the still file names whose store copy now carries its screenshots, so the mirror
+        does not overwrite them with the clean engine file.
+        """
         try:
             from dify_launcher import screens
-            screens.place_on_stills(self._projects_dir, job_id, arts)
+            results = screens.place_on_stills(self._projects_dir, job_id, arts, budget_s=budget_s)
+            return {str(r["name"]) for r in results if r.get("state") == "placed" and r.get("name")}
         except Exception:  # noqa: BLE001 — never let placement break mirroring
-            pass
+            return set()
 
     def _screenshot_question(self, state: dict[str, Any], gate: Optional[str],
                              arts: dict[str, Any], question: str) -> str:
@@ -1657,7 +1714,9 @@ class ClaudeCodeRunner(Runner):
         """
         try:
             from dify_launcher import screens
-            lang = str((state.get("options") or {}).get("language") or "zh")
+            # Same default the prompts use (runner._start_prompt): the boards and the placed cards
+            # must read in the language the agent was told to write in.
+            lang = str((state.get("options") or {}).get("language") or "en").strip().lower()
             notes = screens.apply_gate(self._projects_dir, state["job_id"], gate, arts,
                                        language=lang)
             return screens.question_with_notes(question, notes) if notes else question
@@ -1983,7 +2042,8 @@ class ClaudeCodeRunner(Runner):
         except (OSError, ValueError, TypeError):
             pass
 
-    def _mirror_artifacts(self, job_id: str, artifacts: dict[str, Any]) -> dict[str, Any]:
+    def _mirror_artifacts(self, job_id: str, artifacts: dict[str, Any],
+                          placement_budget_s: Optional[float] = None) -> dict[str, Any]:
         """Copy the job's artifact files into the launcher store, grouped by kind for Dify.
 
         Real panda-video checkpoints describe assets in rich structured text — filenames are
@@ -1999,12 +2059,15 @@ class ClaudeCodeRunner(Runner):
         out: dict[str, Any] = {}
         seen: set[str] = set()
 
-        def _copy(p: Path) -> Optional[str]:
+        def _copy(p: Path, skip: Optional[set[str]] = None) -> Optional[str]:
             try:
                 if not p.is_file():
                     return None
             except OSError:
                 return None
+            if skip and p.name in skip:
+                seen.add(p.name)        # the store copy carries placed screenshots — leave it
+                return p.name
             if p.name not in seen:
                 store.artifact_path(job_id, p.name).write_bytes(p.read_bytes())
                 seen.add(p.name)
@@ -2069,7 +2132,13 @@ class ClaudeCodeRunner(Runner):
                 elif p not in vids:
                     vids.append(p)
 
-        stills = [n for n in (_copy(p) for p in imgs) if n and not is_storyboard_name(n)]
+        # Carousel / image jobs with user screenshots: place them BEFORE the store copies are
+        # written, so a slide whose composite is already cached is never served as the clean still
+        # while another slide renders. No-op (and no Node call) for every other job.
+        scanned_names = {p.name for p in imgs if not is_storyboard_name(p.name)}
+        placed = self._place_screenshots(job_id, {"stills": sorted(scanned_names)},
+                                         placement_budget_s)
+        stills = [n for n in (_copy(p, placed) for p in imgs) if n and not is_storyboard_name(n)]
         clips = [n for n in (_copy(p) for p in vids) if n]
         final = None
         if renders:
@@ -2117,9 +2186,10 @@ class ClaudeCodeRunner(Runner):
         if stills:
             tmp = {**out, "stills": stills}
             out["stills"] = ordered_still_basenames(tmp) or stills
-            # carousel / image jobs with user screenshots: the copies just written are clean —
-            # put the screenshots back on them (cached; no-op for every other job)
-            self._place_screenshots(job_id, out)
+            # A still named only in the checkpoint (not scanned above) was not in the list the
+            # placement pass saw — give it one more pass now that the full list is known.
+            if set(out["stills"]) - scanned_names:
+                self._place_screenshots(job_id, out, placement_budget_s)
         if clips:
             out["clips"] = clips
         if final:

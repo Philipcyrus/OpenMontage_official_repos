@@ -181,13 +181,17 @@ The same intake, `requests.json`, layout and checks, with three differences:
 - **Placement by the launcher, as soon as a still exists.** At the end of every `_mirror_artifacts`
   (right after the clean stills are copied into the job store), `screens.place_on_stills` renders each
   screenshot scene's still with its screenshots (`screen_overlay` mode `still`: one transparent Remotion
-  PNG at the still's own size, alpha-composited, so every other pixel stays as generated) and writes it
+  PNG at the still's own size, alpha-composited, so every other pixel of a PNG still stays as
+  generated; a JPEG still is re-encoded once at q95 from the clean original) and writes it
   over the store copy under the same name. The hero, the stills, the storyboard and the brand pass
   (`branded_stills`) therefore all carry the screenshots. The clean still under `assets/images` is
   never touched; `_still_abs_paths` already prefers it, so `fresh` / `edit` revisions work from it.
   Renders are cached per (still, layout, screenshots, language) under `overlay/stills/`; a failing
-  render is tried at most twice per version and one sync spends at most `SCREENSHOT_STILLS_BUDGET_S`
-  (300 s). The agent never calls the tool for stills.
+  render is tried at most twice per version. `SCREENSHOT_STILLS_BUDGET_S` (300 s) bounds the
+  renders one pass may START, so a pass can also run the one render already under way; stills left
+  over are placed by the next pass and are flagged at the gate, and the pass that runs when
+  `approve_stills` is approved is not time-boxed, so nothing reaches the brand stamp unplaced
+  without a note. The agent never calls the tool for stills.
 
 ## 6. Checks (launcher code, not prompts)
 
@@ -223,16 +227,22 @@ guard fully), and they explain the problem in the gate question instead of block
 The upstream `ScreenshotScene.tsx` is untouched; the Panda composition adds blur, zoom, `at_s` timing
 and the CJK font alongside it.
 
-## 8. Tests (all run locally on 2026-09-17)
+## 8. Tests (all run locally on 2026-09-18, on `main` after PR #14)
 
 | Test | Result |
 |---|---|
-| `python dify_launcher/test_screens.py` (new) — intake (allow-list; redirect / 404 / oversize / fake image / GIF / pixel cap refused; EXIF rotation applied; metadata stripped; nothing created on a bad upload; media only for panda-video; Remotion required); assignment rules; layout rules; TS↔Python geometry; still clear-area; **prompts byte-identical for jobs without uploads**; facts appended with them; `inputs/` and `overlay/` never mirrored; gate notes + board; checks never raise; final-video check finds / flags | pass |
-| `python -m pytest tests/contracts/test_screen_layout.py` (new, 14) — keep-out areas re-measured from `overlays.py` for 4 canvases, schemas valid, this doc's §4 example is a clean layout, geometry, tool discovered without Node, `compose` swaps only screenshot scenes and keeps durations, directors + pipeline wired | pass |
-| `python -m pytest tests/tools/test_screen_overlay_render.py` (new) — real Remotion render: the screenshot lands on the pixels the Python geometry predicts, a short clip is held to the scene length, the board renders | pass |
+| `python dify_launcher/test_screens.py` (new) — intake (allow-list; redirect / 404 / oversize / fake image / GIF / pixel cap refused; EXIF rotation applied; metadata stripped; nothing created on a bad upload; media only for panda-video / panda-carousel / panda-image; Remotion required); assignment and layout rules for all three pipelines; TS↔Python geometry; still clear-area; **prompts byte-identical for jobs without uploads**; facts appended with them; `inputs/` and `overlay/` never mirrored; gate notes + board; checks never raise; final-video check finds / flags | pass |
+| the same file, §9 — carousel / image placement: the store still carries the screenshot and the clean one never changes, renders cached per still+layout+language, a regenerated still is re-placed, a cached composite is published before any render starts, one slide's failure does not skip the others, the 2-failure cap, scene ids that share a prefix keep their caches, an archived rejected take does not hide the shipped still, a manifest gap and a pending placement are both flagged, the brand gate repeats the notes, a still outside `assets/images` still gives a revise leg the clean file | pass |
+| the same file, §10 — `WIDTHxHEIGHT` and unlisted ratios measured as produced (one parser shared with the launcher), the stills logo keep-out covers the fixed-pixel brand stamp on small stills, slide / image wording, the newest scene plan wins, `inputs/job.json` carries the job's language (a Mandarin brief sent with `language:en` becomes zh) | pass |
+| `python -m pytest tests/contracts/test_screen_layout.py` (26) — keep-out areas re-measured from `overlays.py` for 6 canvases **and the brand stamp at 7 real still sizes**, schemas valid, this doc's §4 example is a clean layout, geometry, tool discovered without Node, `compose` swaps only screenshot scenes and keeps durations, directors + pipeline wired for all three pipelines | pass |
+| `python -m pytest tests/tools/test_screen_overlay_render.py` (3) — real Remotion renders: the screenshot lands on the pixels the Python geometry predicts, a short clip is held to the scene length, the board renders, the still mode keeps every generated pixel outside the screenshot, and JPEG / EXIF-rotated / 16-bit stills come out right | pass (35 s) |
 | `python dify_launcher/test_claude_adapter.py`, `python dify_launcher/test_dify_flow.py` (existing) | pass |
-| `python -m pytest tests/contracts` | 13 failed / 657 passed — the same 13 failures as `main` (Veo / Google Music / runtime-presentation), plus 14 new passes |
-| Whole-job simulation through the real launcher (scratch script; agent legs simulated, everything else real: intake from an HTTP server, gates, Remotion boards, `screen_overlay`, `panda_render`) | pass — uploads board at the script gate; layout board + logo-corner notes at the scene plan; a still with the character's arm in the screenshot area flagged, cleared after a revise; clips board; final video with both screenshots found |
+| `python -m pytest tests -q` | 17 failed / 1078 passed — the same 17 failures as `main` (Veo / Google Music / runtime-presentation, plus the `test_voice_cast` premix stub that PR #14 left stale) |
+| Whole-job simulation through the real launcher, panda-video (scratch script; agent legs simulated, everything else real: intake from an HTTP server, gates, Remotion boards, `screen_overlay`, `panda_render`) | pass (252 s) — uploads board at the script gate; layout board + logo-corner notes at the scene plan; a still with the character's arm in the screenshot area flagged, cleared after a revise; clips board; final video with both screenshots found |
+| Whole-job simulation, panda-carousel + panda-image (same harness, real still placement, storyboard and brand pass) | pass (34 s) — hero and stills gates show the placed screenshots, slide copy in the screenshot area flagged, an edit revise works from the clean still and is re-placed, branded copies keep the screenshots |
+
+Not covered by tests: whether a real agent leg follows the new carousel / image director text, and
+Linux-only behaviour (a hung Remotion render, `EXDEV`, systemd `PATH`). Both need the box.
 
 ## 9. Rollout
 

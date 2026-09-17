@@ -18,7 +18,7 @@ Geometry mirrors ``remotion-composer/src/panda/screenGeometry.ts`` — keep the 
 Project files (all launcher-owned, never under ``assets/``):
     projects/<job>/inputs/in_01.png ...   normalised uploads
     projects/<job>/inputs/inputs.json     [{n, input_id, name, file, width, height, sha256}]
-    projects/<job>/inputs/job.json        {pipeline}
+    projects/<job>/inputs/job.json        {pipeline, language} — the job as the launcher runs it
     projects/<job>/inputs/requests.json   the user's guidance, written by the idea director
     projects/<job>/overlay/               boards, composite clips / stills, work files
 """
@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import re
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -81,6 +83,15 @@ KEEP_OUT: dict[tuple[int, int], dict[str, dict[str, float]]] = {
     (1440, 1080): {"captions": {"x": 0.03, "y": 0.57, "w": 0.94, "h": 0.16},
                    "logo": {"x": 0.72, "y": 0.05, "w": 0.26, "h": 0.18}},
 }
+
+# The brand stamp is a FIXED-PIXEL pill (vendor/montage_svc/render/overlays.py draw_logo: a
+# 300 px logo + 22 px pill padding, 40 px from the right edge, 70 px from the top), so on a
+# smaller frame it covers a larger share of it. A carousel / image still is whatever size the
+# image model returned (1024x1024 and friends, see dify_launcher/CAROUSEL.md), so their logo
+# keep-out is sized for the smallest still a model returns — not for the 1080 mock canvases.
+# tests/contracts/test_screen_layout.py re-measures both against the real draw_logo.
+LOGO_STAMP_PX = (384, 235)
+MIN_STILL_PIXELS = 960 * 960
 
 # Legibility: how much the screenshot is scaled on screen. Below MIN the text gets tiny,
 # above MAX it is upscaled and soft. Tune on real renders.
@@ -148,6 +159,19 @@ def deliverable_word(pipeline: Optional[str]) -> str:
     return {"panda-carousel": "carousel", "panda-image": "image"}.get(str(pipeline), "video")
 
 
+def baked_text_words(pipeline: Optional[str]) -> tuple[str, str]:
+    """What the text drawn INTO the deliverable is called: (in a still, as a body of copy).
+
+    A carousel has slide copy, panda-image has on-image copy; a video's text is the caption
+    strip the render draws later, so it stays the plain word.
+    """
+    if pipeline == "panda-carousel":
+        return "slide text", "slide copy"
+    if pipeline == "panda-image":
+        return "on-image text", "on-image copy"
+    return "text", "copy"
+
+
 def load_requests(project_dir: Path) -> Optional[list[dict[str, Any]]]:
     data = _read_json(inputs_dir(project_dir) / REQUESTS_FILE)
     if isinstance(data, dict) and isinstance(data.get("requests"), list):
@@ -158,13 +182,30 @@ def load_requests(project_dir: Path) -> Optional[list[dict[str, Any]]]:
 
 
 def load_scene_plan(project_dir: Path) -> Optional[dict[str, Any]]:
-    """The scene plan as the gates see it: the scene_plan checkpoint, else artifacts/scene_plan.json."""
-    cp = _read_json(Path(project_dir) / "checkpoint_scene_plan.json")
-    val = ((cp or {}).get("artifacts") or {}).get("scene_plan") if isinstance(cp, dict) else None
-    if isinstance(val, dict) and val.get("scenes"):
-        return val
-    data = _read_json(Path(project_dir) / "artifacts" / "scene_plan.json")
-    return data if isinstance(data, dict) and data.get("scenes") else None
+    """The scene plan the launcher acts on: the scene_plan checkpoint or artifacts/scene_plan.json,
+    whichever was written LAST.
+
+    A later leg (a stills revise that moves a screenshot to another slide) rewrites
+    artifacts/scene_plan.json and may leave the approved checkpoint alone. Preferring the
+    checkpoint unconditionally placed the screenshots from the stale plan, so the reviewer saw the
+    move ignored with nothing to explain it.
+    """
+    project_dir = Path(project_dir)
+    cp_path = project_dir / "checkpoint_scene_plan.json"
+    art_path = project_dir / "artifacts" / "scene_plan.json"
+    cp = _read_json(cp_path)
+    from_cp = ((cp or {}).get("artifacts") or {}).get("scene_plan") if isinstance(cp, dict) else None
+    from_cp = from_cp if isinstance(from_cp, dict) and from_cp.get("scenes") else None
+    data = _read_json(art_path)
+    from_art = data if isinstance(data, dict) and data.get("scenes") else None
+    if from_cp is not None and from_art is not None:
+        try:
+            if art_path.stat().st_mtime > cp_path.stat().st_mtime:
+                return from_art
+        except OSError:
+            pass
+        return from_cp
+    return from_cp if from_cp is not None else from_art
 
 
 def load_manifest_rows(project_dir: Path) -> list[dict[str, Any]]:
@@ -328,6 +369,31 @@ def device_box_fraction(layout: dict[str, Any], W: int, H: int,
 # scene plan
 # ---------------------------------------------------------------------------
 
+def ratio_canvas(ratio: Optional[str]) -> Optional[tuple[int, int]]:
+    """Canvas for an ``options.aspect_ratio`` value: a table entry, ``WIDTHxHEIGHT``, or any
+    ``W:H`` scaled to 1080 on the short side. None when it is not a size at all.
+
+    Mirrors ``dify_launcher/runner.py`` ``_carousel_pixel_size``, which sizes the real stills —
+    a stills job passes the caller's ratio straight through (dify_launcher/CAROUSEL.md), so the
+    checks and the prompt facts must measure the same frame the job actually produces.
+    """
+    key = str(ratio or "").strip().lower().replace(" ", "")
+    if key in CANVASES:
+        return CANVASES[key]
+    m = re.fullmatch(r"(\d+)x(\d+)", key)
+    if m:
+        w, h = int(m.group(1)), int(m.group(2))
+        if w > 0 and h > 0:
+            return w, h
+    m = re.fullmatch(r"(\d+):(\d+)", key)
+    if m:
+        a, b = int(m.group(1)), int(m.group(2))
+        if a > 0 and b > 0:
+            return ((1080, max(1, round(1080 * b / a))) if a <= b
+                    else (max(1, round(1080 * a / b)), 1080))
+    return None
+
+
 def canvas_for(scene_plan: Optional[dict[str, Any]] = None,
                resolution: Optional[str] = None,
                pipeline: Optional[str] = None) -> tuple[int, int]:
@@ -341,13 +407,25 @@ def canvas_for(scene_plan: Optional[dict[str, Any]] = None,
     default = DEFAULT_ASPECTS.get(str(pipeline), DEFAULT_ASPECT)
     meta = (scene_plan or {}).get("metadata") if isinstance(scene_plan, dict) else None
     ratio = str((meta or {}).get("aspect_ratio") or default).strip()
-    return CANVASES.get(ratio, CANVASES[default])
+    if ratio in CANVASES:
+        return CANVASES[ratio]
+    if is_still_pipeline(pipeline):
+        size = ratio_canvas(ratio)      # carousel / image accept WIDTHxHEIGHT and any W:H
+        if size is not None:
+            return size
+    return CANVASES[default]
 
 
 def keep_out_for(W: int, H: int, pipeline: Optional[str] = None) -> dict[str, dict[str, float]]:
-    """Areas the screenshot must stay out of. Carousel / image stills get no caption strip (slide
-    copy is part of the generated still) and the whole top-right corner for the logo, because the
-    brand stamp sits closer to the corner on larger stills."""
+    """Areas the screenshot must stay out of.
+
+    Carousel / image stills get no caption strip (the copy is part of the generated still) and the
+    whole top-right corner for the logo: the brand stamp is a fixed pixel size (LOGO_STAMP_PX), so
+    it reaches further in from the corner the smaller the still is. The box therefore covers the
+    stamp on the smallest still an image model returns (MIN_STILL_PIXELS) as well as on the mock
+    canvases — a 1024x1024 still is a documented real output and its stamp started 15 px left of
+    the old box, so a passing layout could still be covered.
+    """
     if (W, H) in KEEP_OUT:
         areas = KEEP_OUT[(W, H)]
     else:
@@ -356,7 +434,11 @@ def keep_out_for(W: int, H: int, pipeline: Optional[str] = None) -> dict[str, di
     if not is_still_pipeline(pipeline):
         return areas
     logo = areas["logo"]
-    return {"logo": {"x": logo["x"], "y": 0.0, "w": 1.0 - logo["x"], "h": logo["y"] + logo["h"]}}
+    w_min = math.sqrt(MIN_STILL_PIXELS * W / H)
+    h_min = math.sqrt(MIN_STILL_PIXELS * H / W)
+    x = max(0.0, min(logo["x"], 1.0 - LOGO_STAMP_PX[0] / w_min))
+    h = min(1.0, max(logo["y"] + logo["h"], LOGO_STAMP_PX[1] / h_min))
+    return {"logo": {"x": x, "y": 0.0, "w": 1.0 - x, "h": h}}
 
 
 def scene_duration(scene: dict[str, Any]) -> float:
@@ -446,9 +528,11 @@ def is_unplaced(req: dict[str, Any]) -> bool:
 
 
 def validate_requests(inputs: list[dict[str, Any]],
-                      requests: Optional[list[dict[str, Any]]]) -> list[str]:
+                      requests: Optional[list[dict[str, Any]]],
+                      pipeline: Optional[str] = None) -> list[str]:
+    units = {"panda-carousel": "slides", "panda-image": "the image"}.get(str(pipeline), "scenes")
     if requests is None:
-        return ["requests.json is missing — the screenshots have not been matched to scenes yet"]
+        return [f"requests.json is missing — the screenshots have not been matched to {units} yet"]
     notes: list[str] = [f"requests.json {e}" for e in schema_errors(requests, "screen_requests")]
     known = {r["input_id"]: r for r in inputs}
     seen: dict[str, int] = {}
@@ -460,7 +544,12 @@ def validate_requests(inputs: list[dict[str, Any]],
         seen[iid] = seen.get(iid, 0) + 1
         raw = req.get("scenes")
         if raw not in (None, []) and not request_scenes(req):
-            notes.append(f"screenshot {known[iid].get('n')}: scene numbers must be 1 or higher")
+            if pipeline == "panda-image":
+                notes.append(f"screenshot {known[iid].get('n')}: use 1 (the image) or leave it "
+                             "unplaced")
+            else:
+                notes.append(f"screenshot {known[iid].get('n')}: {unit_word(pipeline)} numbers "
+                             "must be 1 or higher")
     for iid, count in seen.items():
         if count > 1:
             notes.append(f"screenshot {known[iid].get('n')} is listed {count} times in requests.json")
@@ -473,7 +562,8 @@ def validate_requests(inputs: list[dict[str, Any]],
 def _check_steps(label: str, layout: dict[str, Any], duration: float,
                  geo: dict[str, Any], natural: dict[str, Any], W: int, H: int,
                  keep_out: dict[str, dict[str, float]],
-                 subject: Optional[dict[str, float]], still: bool = False) -> list[str]:
+                 subject: Optional[dict[str, float]], still: bool = False,
+                 pipeline: Optional[str] = None) -> list[str]:
     notes: list[str] = []
     crop = fit_region(norm_box(layout.get("crop")), geo["aspect"], natural)
     for i, st in enumerate(layout.get("steps") or []):
@@ -502,6 +592,16 @@ def _check_steps(label: str, layout: dict[str, Any], duration: float,
                 notes.append(f"{where} overlaps the caption strip ({fmt_box(keep_out['captions'])})")
             if subject and overlaps(cz, subject):
                 notes.append(f"{where} covers the character area")
+            if overlaps(cz, keep_out["logo"]):
+                notes.append(f"{where} sits in the corner where the Panda logo goes if the "
+                             f"{deliverable_word(pipeline)} is branded — the stamp would cover it "
+                             f"({fmt_box(keep_out['logo'])})")
+            txt = st.get("text")
+            zh = str((txt or {}).get("zh") or "") if isinstance(txt, dict) else str(txt or "")
+            en = str((txt or {}).get("en") or "") if isinstance(txt, dict) else ""
+            if len(zh) > 12 or len(en.split()) > 5:
+                notes.append(f"{where} text is too long — the card is one line that does not wrap, "
+                             "so anything past ~12 CJK characters or 5 English words is cut off")
         at = _num(st.get("at_s"))
         dur = _num(st.get("duration_s")) or 0.0
         if not still and at is not None and (at < -EPS or at + dur > duration + 0.05):
@@ -632,7 +732,7 @@ def validate_layouts(scene_plan: Optional[dict[str, Any]], inputs: list[dict[str
                 if s_from < -EPS or s_to <= s_from or s_to > it["duration"] + 0.05:
                     notes.append(f"{label}: show window must fit the scene (0–{it['duration']:g} s)")
             notes += _check_steps(label, layout, it["duration"], geo, natural, W, H,
-                                  keep_out, subject, still)
+                                  keep_out, subject, still, pipeline)
             for other_dev, o_from, o_to, other_label in shown:
                 if overlaps(dev, other_dev) and s_from < o_to - EPS and o_from < s_to - EPS:
                     notes.append(f"{label} and {other_label} overlap on screen"
@@ -655,8 +755,7 @@ def keep_clear_lines(scene_plan: Optional[dict[str, Any]],
             continue
         parts = [f"{unit_label(pipeline, group[0]['scene_number'])} ({scene_id}): keep "
                  + "; ".join(fmt_box(z) for z in zones)
-                 + (" plain white — no character, props or slide text there" if still
-                    else " plain white — no character, props or text there")]
+                 + f" plain white — no character, props or {baked_text_words(pipeline)[0]} there"]
         if subjects:
             parts.append("character inside " + "; ".join(fmt_box(s) for s in subjects))
         if not still:

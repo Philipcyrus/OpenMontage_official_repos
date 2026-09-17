@@ -144,3 +144,91 @@ def test_still_mode_keeps_every_generated_pixel_outside_the_screenshot(tmp_path)
     diffs = sum(1 for y in range(0, H, 3) for x in range(0, W, 3)
                 if not (x0 <= x <= x1 and y0 <= y <= y1) and src[x, y] != dst[x, y])
     assert diffs == 0, f"{diffs} generated pixels changed outside the screenshot"
+
+
+def _still_job(proj: Path, layout: dict, aspect: str = "4:5") -> None:
+    """A one-slide carousel project with one screenshot placement."""
+    from PIL import Image, ImageDraw
+
+    for sub in ("inputs", "assets/images"):
+        (proj / sub).mkdir(parents=True, exist_ok=True)
+    shot = Image.new("RGB", (400, 800), "#ffffff")
+    ImageDraw.Draw(shot).rectangle([100, 300, 300, 500], fill="#1a73e8")
+    shot.save(proj / "inputs" / "in_01.png")
+    (proj / "inputs" / "job.json").write_text(json.dumps({"pipeline": "panda-carousel"}),
+                                              encoding="utf-8")
+    (proj / "inputs" / "inputs.json").write_text(json.dumps([
+        {"n": 1, "input_id": "in_01", "name": "s.png", "file": "in_01.png",
+         "width": 400, "height": 800}]), encoding="utf-8")
+    plan = {"version": "1.0", "metadata": {"aspect_ratio": aspect}, "scenes": [
+        {"id": "slide-1", "type": "generated", "description": "x", "start_seconds": 0,
+         "end_seconds": 1, "required_assets": [{"type": "image", "source": "provided",
+                                                "input_id": "in_01", "description": "d",
+                                                "layout": layout}]}]}
+    (proj / "checkpoint_scene_plan.json").write_text(json.dumps({"artifacts": {"scene_plan": plan}}),
+                                                     encoding="utf-8")
+
+
+def test_still_mode_handles_jpeg_rotated_and_high_bit_depth_stills(tmp_path):
+    """A JPEG still keeps its colour profile, an EXIF-rotated still is composited as it is shown,
+    and a 16-bit still is not flattened to black and white."""
+    from PIL import Image, ImageDraw, ImageOps
+
+    proj = tmp_path / "job_formats"
+    layout = {"zone": {"x": 0.5, "y": 0.25, "w": 0.45, "h": 0.55}, "frame": "none"}
+    _still_job(proj, layout)
+    overlay = ScreenOverlay()
+
+    # 1) JPEG with an ICC profile: kept, and the grey background survives the one re-encode
+    W, H = 1024, 1280
+    grey = Image.new("RGB", (W, H), (120, 130, 140))
+    ImageDraw.Draw(grey).rectangle([40, 40, 300, 300], fill=(30, 40, 50))
+    icc = (Path(sys.prefix) / "nonexistent").read_bytes() if False else None
+    try:
+        from PIL import ImageCms
+
+        icc = ImageCms.createProfile("sRGB")
+        icc = ImageCms.ImageCmsProfile(icc).tobytes()
+    except Exception:  # noqa: BLE001 — ImageCms is optional
+        icc = None
+    jpg = proj / "assets" / "images" / "slide-1.jpg"
+    grey.save(jpg, "JPEG", quality=95, **({"icc_profile": icc} if icc else {}))
+    out = proj / "overlay" / "stills" / "slide-1.jpg"
+    res = overlay.execute({"mode": "still", "project_dir": str(proj), "scene_id": "slide-1",
+                           "still_path": str(jpg), "output_path": str(out)})
+    assert res.success, res.error
+    with Image.open(out) as got:
+        assert got.size == (W, H) and got.format == "JPEG"
+        if icc:
+            assert got.info.get("icc_profile"), "the JPEG still lost its colour profile"
+        far = got.convert("RGB").getpixel((20, H - 20))
+    assert all(abs(a - b) <= 6 for a, b in zip(far, (120, 130, 140))), far
+
+    # 2) the same still with an EXIF orientation tag: composited on the image as DISPLAYED
+    rot = Image.new("RGB", (H, W), (120, 130, 140))          # stored sideways
+    exif = rot.getexif()
+    exif[274] = 6                                            # rotate 90° CW when displayed
+    rotated = proj / "assets" / "images" / "slide-1.jpg"
+    rot.save(rotated, "JPEG", quality=95, exif=exif)
+    res = overlay.execute({"mode": "still", "project_dir": str(proj), "scene_id": "slide-1",
+                           "still_path": str(rotated), "output_path": str(out)})
+    assert res.success, res.error
+    with Image.open(out) as got:
+        shown = ImageOps.exif_transpose(got)
+        assert shown.size == (W, H), f"the composite is not upright: {got.size} / {shown.size}"
+        g = sl.device_geometry(layout, W, H, {"width": 400, "height": 800})["screen"]
+        r, gg, b = shown.convert("RGB").getpixel((int(g["x"] + g["w"] * 0.5),
+                                                  int(g["y"] + g["h"] * 0.5)))
+    assert b > 150 and r < 110, (r, gg, b)
+
+    # 3) a 16-bit greyscale PNG still: scaled to 8-bit, not clipped to pure black and white
+    png16 = proj / "assets" / "images" / "slide-1.png"
+    deep = Image.new("I;16", (512, 640), 30000)
+    deep.save(png16)
+    out16 = proj / "overlay" / "stills" / "slide-1.png"
+    res = overlay.execute({"mode": "still", "project_dir": str(proj), "scene_id": "slide-1",
+                           "still_path": str(png16), "output_path": str(out16)})
+    assert res.success, res.error
+    with Image.open(out16) as got:
+        val = got.convert("L").getpixel((10, 10))
+    assert 100 < val < 140, f"16-bit still flattened to {val} (30000/257 = 117)"

@@ -82,8 +82,9 @@ layout at once, so leave out `show`, `enter`, `exit`, `at_s` and `duration_s`.
   zone beside the character. Web pages: a wide zone above or below it.
 - `subject_zone`: where the panda / customer stands — never overlapping the screenshot.
 - **Slide copy** is baked into the still, so it must sit outside every screenshot zone. Say where in
-  the still's description ("headline across the top 15%; panda bottom-left; the right 55% below
-  the headline plain white, empty").
+  the still's description ("headline top-left, clear of the logo corner; panda bottom-left; the
+  right half below the logo box plain white, empty"). The logo box in the facts is the whole
+  top-right corner, so nothing — screenshot, card or headline — may reach into it.
 - `frame`: `phone` for app screens, `browser` for web pages, `card` otherwise, `none` only if asked.
 - `crop`: to show only the part of the screenshot that matters, larger.
 - `steps` — regions and points are fractions of the WHOLE screenshot:

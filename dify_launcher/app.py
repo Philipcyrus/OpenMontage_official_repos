@@ -342,9 +342,15 @@ def create_job(body: StartJob, x_dify_token: Optional[str] = Header(None)) -> di
         from dify_launcher import screens
 
         options.pop("media", None)    # the signed links expire; the files now live in the job
+        # The language the JOB will run in, not the raw option: the runner switches a Mandarin
+        # brief sent with a stale language:en to zh, and the agent writes the slides in that
+        # language. job.json drives the placed screenshot cards, so it has to match — and the
+        # default is the prompts' default ("en"), not zh.
+        effective, _coerced = _runner._coerce_language_from_brief(options, body.brief or "")
         try:
-            records = screens.commit(prepared, _projects_dir() / job_id, pipeline=pipeline,
-                                     language=str(options.get("language") or "zh"))
+            records = screens.commit(
+                prepared, _projects_dir() / job_id, pipeline=pipeline,
+                language=str(effective.get("language") or "en").strip().lower())
         except OSError as e:
             raise HTTPException(status_code=500, detail=f"could not store the images: {e}") from e
         inputs = [{"n": r["n"], "name": r["name"]} for r in records]

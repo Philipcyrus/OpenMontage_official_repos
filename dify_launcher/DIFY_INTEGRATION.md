@@ -483,7 +483,7 @@ Long `running` stretches are **normal** — that's why it's async.
 | `401` | bad/missing `X-Dify-Token` | fix the header |
 | `404` | unknown `job_id` | check the id |
 | `400` | `skip` at a gate other than `approve_brand` | only send `skip` at the brand gate |
-| `400` on `POST /jobs` | a problem with `options.media` (not an image, too big, link expired or redirected, host not allowed, not panda-video, Remotion missing) — **no job is created** | show `detail` to the user; re-attach and send again |
+| `400` on `POST /jobs` | a problem with `options.media` (not an image, too big, link expired or redirected, host not allowed, pipeline not panda-video / panda-carousel / panda-image, Remotion missing) — **no job is created** | show `detail` to the user; re-attach and send again |
 | `409` | responded while still `running`, not at a gate, `/brand` at `approve_brand` or before `done` / with nothing to brand | keep polling until `awaiting_human` before `respond`; brand via `/respond` at the brand gate, or `/brand` only after `done` |
 
 ---

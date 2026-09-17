@@ -219,7 +219,8 @@ so_mod.remotion_ready = lambda: (True, "ok")
 plain = client.post("/jobs", json={"brief": brief, "pipeline": "panda-video", "options": {"language": "en"}})
 assert plain.status_code == 200 and "inputs" not in plain.json()
 assert not (PROJECTS / plain.json()["job_id"] / "inputs").exists()
-assert store.load_state(plain.json()["job_id"])["options"] == {"language": "en"}
+_plain_opts = store.load_state(plain.json()["job_id"])["options"]
+assert _plain_opts["language"] == "en" and "media" not in _plain_opts
 print("[ok] POST /jobs: media staged before the job exists; 400 + nothing created for bad media / "
       "wrong pipeline / no Remotion; jobs without media unchanged")
 
@@ -318,7 +319,7 @@ print("[ok] assignments binding (missing / extra / unplaced / moment / beyond pl
 print("[ok] layout checks: captions, logo corner, character area, legibility, zoom, timing, schema")
 
 # carousel / image: slide wording, no caption strip, no timing, logo corner out to the edge
-SLIDE_PHONE = {"zone": {"x": 0.42, "y": 0.20, "w": 0.54, "h": 0.74},
+SLIDE_PHONE = {"zone": {"x": 0.42, "y": 0.25, "w": 0.54, "h": 0.69},
                "subject_zone": {"x": 0.03, "y": 0.40, "w": 0.36, "h": 0.55}, "frame": "phone",
                "crop": {"x": 0, "y": 0.1, "w": 1, "h": 0.5},
                "steps": [{"kind": "blur_region", "region": {"x": 0.06, "y": 0.30, "w": 0.88, "h": 0.034}},
@@ -326,7 +327,7 @@ SLIDE_PHONE = {"zone": {"x": 0.42, "y": 0.20, "w": 0.54, "h": 0.74},
                           "at_s": 99, "duration_s": 5},
                          {"kind": "card", "text": {"zh": "点这里", "en": "Tap"},
                           "zone": {"x": 0.45, "y": 0.94, "w": 0.5, "h": 0.05}}]}
-SLIDE_WEB = {"zone": {"x": 0.04, "y": 0.20, "w": 0.92, "h": 0.46},
+SLIDE_WEB = {"zone": {"x": 0.04, "y": 0.25, "w": 0.92, "h": 0.42},
              "subject_zone": {"x": 0.30, "y": 0.70, "w": 0.40, "h": 0.28}, "frame": "browser"}
 
 
@@ -579,6 +580,7 @@ else:
 #    tests/tools/test_screen_overlay_render.py)
 # ---------------------------------------------------------------------------
 import hashlib  # noqa: E402
+import math  # noqa: E402
 
 
 def _sha(p) -> str:
@@ -682,6 +684,131 @@ try:
     notes = screens.apply_gate(PROJECTS, cjob, "approve_stills", run._mirror_artifacts(cjob, {}))
     assert any(n.startswith("slide 1: the still has the character, props or slide text") for n in notes), notes
 
+    # --- regressions found by the adversarial test pass -----------------------
+    def two_slide_project(job, ids=("s01", "s02")):
+        scenes = []
+        for i, sid in enumerate(ids, 1):
+            scenes.append({"id": sid, "type": "character_scene", "description": "x",
+                           "start_seconds": i - 1, "end_seconds": i, "required_assets": [
+                               {"type": "image", "description": "still", "source": "generate"},
+                               {"type": "image", "source": "provided", "input_id": f"in_{i:02d}",
+                                "description": "shot", "layout": SLIDE_PHONE}]})
+        pj = still_project(job, "panda-carousel",
+                           {"version": "1.0", "metadata": {"aspect_ratio": "4:5"}, "scenes": scenes},
+                           [{"input_id": "in_01", "scenes": [1]}, {"input_id": "in_02", "scenes": [2]}])
+        rows = []
+        for i, sid in enumerate(ids, 1):
+            draw_slide(pj / "assets" / "images" / f"slide-{i}.png", tint=f"#fffff{i}")
+            rows.append({"id": f"a{i}", "type": "image", "path": f"assets/images/slide-{i}.png",
+                         "source_tool": "t", "scene_id": sid})
+        (pj / "artifacts" / "asset_manifest.json").write_text(
+            json.dumps({"version": "1.0", "assets": rows}), encoding="utf-8")
+        return pj
+
+    # a cached composite is published BEFORE any render starts, so an unchanged slide is never
+    # served as the clean still while another slide renders
+    tjob = "job_two_slides"
+    tpj = two_slide_project(tjob)
+    run._mirror_artifacts(tjob, {})
+    placed_1 = _sha(store.artifact_path(tjob, "slide-1.png"))
+    assert placed_1 != _sha(tpj / "assets" / "images" / "slide-1.png")
+    draw_slide(tpj / "assets" / "images" / "slide-2.png", tint="#fffef0")   # only slide 2 changed
+    order_seen = []
+
+    def order_render(project, scene_id, still, out, language):
+        order_seen.append(scene_id)
+        assert _sha(store.artifact_path(tjob, "slide-1.png")) == placed_1, \
+            "slide 1 was served clean while slide 2 rendered"
+        return fake_still_render(project, scene_id, still, out, language)
+
+    screens._render_still = order_render
+    run._mirror_artifacts(tjob, {})
+    assert order_seen == ["s02"], order_seen
+
+    # one slide's failure does not skip the others, and it counts against the retry cap
+    def one_bad_render(project, scene_id, still, out, language):
+        if scene_id == "s01":
+            raise RuntimeError("boom")
+        return fake_still_render(project, scene_id, still, out, language)
+
+    bjob = "job_slide_isolation"
+    bpj = two_slide_project(bjob)
+    screens._render_still = one_bad_render
+    barts = run._mirror_artifacts(bjob, {})
+    bstatus = json.loads((bpj / "overlay" / "stills" / "status.json").read_text(encoding="utf-8"))
+    assert bstatus["s01"]["failures"] == 1 and "boom" in bstatus["s01"]["error"], bstatus
+    assert bstatus["s02"]["composite_sha"], "the second slide must still be placed"
+    assert _sha(store.artifact_path(bjob, "slide-1.png")) == _sha(bpj / "assets" / "images" / "slide-1.png")
+    bnotes = screens.apply_gate(PROJECTS, bjob, "approve_stills", barts)
+    assert any(n.startswith("slide 1: the screenshot could not be placed") for n in bnotes), bnotes
+    # an unreadable still is reported per slide — the other slides keep their notes
+    (bpj / "assets" / "images" / "slide-1.png").write_bytes(b"not an image")
+    unotes = screens.apply_gate(PROJECTS, bjob, "approve_stills", barts)
+    assert any("slide 1: its generated still could not be read" in n for n in unotes), unotes
+    assert not any("checks could not run" in n for n in unotes), unotes
+
+    # scene ids that share a sanitised prefix keep their own caches (no re-render every sync)
+    hjob = "job_prefix_ids"
+    two_slide_project(hjob, ids=("hook", "hook_2"))
+    screens._render_still = fake_still_render
+    hbefore = len(still_renders)
+    for _ in range(3):
+        run._mirror_artifacts(hjob, {})
+    assert sorted(still_renders[hbefore:]) == ["hook", "hook_2"], still_renders[hbefore:]
+
+    # an archived rejected take in the manifest must not hide the still that ships
+    (cpj / "assets" / "images" / "rejected_s01_take2.png").write_bytes(raw1.read_bytes())
+    man = json.loads((cpj / "artifacts" / "asset_manifest.json").read_text(encoding="utf-8"))
+    man["assets"].append({"id": "rej", "type": "image", "scene_id": "s01", "source_tool": "t",
+                          "path": "assets/images/rejected_s01_take2.png"})
+    (cpj / "artifacts" / "asset_manifest.json").write_text(json.dumps(man), encoding="utf-8")
+    rarts = run._mirror_artifacts(cjob, {})
+    assert Image.open(store.artifact_path(cjob, "slide-1.png")).convert("RGB").getpixel(centre) == BLUE
+    assert screens.placement_notes(cpj, cjob, sl.load_scene_plan(cpj), rarts,
+                                   "panda-carousel", "approve_stills") == []
+
+    # a still the manifest does not point at is flagged at approve_stills, not shipped silently
+    nojob = "job_manifest_gap"
+    nopj = two_slide_project(nojob)
+    (nopj / "assets" / "images" / "slide-2.png").rename(nopj / "assets" / "images" / "slide-02.png")
+    narts = run._mirror_artifacts(nojob, {})
+    nnotes = screens.apply_gate(PROJECTS, nojob, "approve_stills", narts)
+    assert any("slide 2: no generated still for it is listed in the asset manifest" in n
+               for n in nnotes), nnotes
+
+    # out of render time: the slide is reported as pending, and the pre-brand pass places it
+    pjob = "job_budget"
+    ppj = two_slide_project(pjob)
+    _real_budget = screens.STILLS_BUDGET_S
+    screens.STILLS_BUDGET_S = -1.0
+    try:
+        parts = run._mirror_artifacts(pjob, {})
+    finally:
+        screens.STILLS_BUDGET_S = _real_budget
+    pstatus = json.loads((ppj / "overlay" / "stills" / "status.json").read_text(encoding="utf-8"))
+    assert pstatus["s01"].get("pending") and not pstatus["s01"].get("composite_sha"), pstatus
+    pnotes = screens.apply_gate(PROJECTS, pjob, "approve_stills", parts)
+    assert any("its screenshot is not on the still yet" in n for n in pnotes), pnotes
+    run._place_screenshots(pjob, parts, math.inf)      # the pass that opens the brand gate
+    assert screens.placement_notes(ppj, pjob, sl.load_scene_plan(ppj), parts,
+                                   "panda-carousel", "approve_stills") == []
+
+    # stills kept outside assets/images: a revise leg still gets the clean file, never the composite
+    sjob = "job_stills_subdir"
+    spj = two_slide_project(sjob)
+    (spj / "assets" / "stills").mkdir(parents=True, exist_ok=True)
+    moved = spj / "assets" / "stills" / "slide-1.png"
+    (spj / "assets" / "images" / "slide-1.png").rename(moved)
+    man = json.loads((spj / "artifacts" / "asset_manifest.json").read_text(encoding="utf-8"))
+    man["assets"][0]["path"] = "assets/stills/slide-1.png"
+    (spj / "artifacts" / "asset_manifest.json").write_text(json.dumps(man), encoding="utf-8")
+    sarts = run._mirror_artifacts(sjob, {"asset_manifest": man})
+    assert "slide-1.png" in (sarts.get("stills") or []), sarts.get("stills")
+    assert Image.open(store.artifact_path(sjob, "slide-1.png")).convert("RGB").getpixel(centre) == BLUE
+    assert R._still_abs_paths(sjob, {"artifacts": sarts}, [1], PROJECTS) == [str(moved.resolve())], \
+        "an edit revise must never be handed the copy with the screenshot"
+
+    screens._render_still = fake_still_render
     # a failing render: shown without the screenshot, flagged, tried at most twice per version
     screens._render_still = lambda *a, **k: (still_renders.append("fail") or (False, "chromium missing"))
     draw_slide(raw1, tint="#fdfdfd")
@@ -690,8 +817,14 @@ try:
     assert still_renders.count("fail") == 2, still_renders
     assert _sha(store.artifact_path(cjob, "slide-1.png")) == _sha(raw1)
     notes = screens.apply_gate(PROJECTS, cjob, "approve_stills", farts)
-    assert any("slide 1: the screenshot could not be placed on the still (chromium missing)" in n
-               for n in notes), notes
+    assert any("slide 1: the screenshot could not be placed on the still (the screenshot layout "
+               "could not be drawn" in n for n in notes), notes
+    assert not any("chromium missing" in n for n in notes), "raw tool output must stay out of the gate"
+    _fail_status = json.loads((cpj / "overlay" / "stills" / "status.json").read_text(encoding="utf-8"))
+    assert "chromium missing" in _fail_status["s01"]["error"], "the cause belongs in status.json"
+    # the brand gate is the last stop before the stamp: it repeats the placement notes
+    assert any("could not be placed" in n
+               for n in screens.apply_gate(PROJECTS, cjob, "approve_brand", farts)), "brand gate note"
 finally:
     screens._render_still = _real_render_still
     cp.get_latest_checkpoint, cp.get_next_stage = _real_latest, _real_next
@@ -716,6 +849,87 @@ for want in ("every placed screenshot goes on the one image", "1 → the image",
     assert want in ifacts, f"image facts missing {want!r}:\n{ifacts}"
 print("[ok] carousel / image: screenshots placed on the stills Dify shows (cached, clean originals "
       "kept for revise), flagged when the area is busy or the render fails; facts in slide / image words")
+
+# ---------------------------------------------------------------------------
+# 10) canvas parsing, the logo keep-out, wording, plan freshness, the job's language
+# ---------------------------------------------------------------------------
+# a caller-set size or an unlisted ratio is measured the way the job will really be produced
+assert sl.canvas_for({"metadata": {"aspect_ratio": "1080x1080"}}, pipeline="panda-carousel") == (1080, 1080)
+assert sl.canvas_for({"metadata": {"aspect_ratio": "1920x1080"}}, pipeline="panda-carousel") == (1920, 1080)
+assert sl.canvas_for({"metadata": {"aspect_ratio": "2:3"}}, pipeline="panda-carousel") == (1080, 1620)
+assert sl.canvas_for({"metadata": {"aspect_ratio": "3:2"}}, pipeline="panda-image") == (1620, 1080)
+assert sl.canvas_for({"metadata": {"aspect_ratio": "junk"}}, pipeline="panda-image") == (1080, 1080)
+assert sl.canvas_for({"metadata": {"aspect_ratio": "1080x1080"}}) == (1080, 1920), "video unchanged"
+assert sl.canvas_for({"metadata": {"aspect_ratio": "4:3"}}) == (1440, 1080), "3:4 / 4:3 now measured"
+for _r in ("1:1", "4:5", "3:4", "9:16", "16:9", "4:3", "2:3", "1080x1080", "832x1248"):
+    assert sl.ratio_canvas(_r) == R._carousel_pixel_size(_r), _r   # one parser, one canvas
+
+# the stills logo keep-out covers the FIXED-PIXEL brand stamp at every real still size
+for _W, _H in ((1024, 1024), (1024, 1280), (896, 1152), (1080, 1350), (2048, 2048), (768, 1344)):
+    _ko = sl.keep_out_for(_W, _H, "panda-carousel")
+    assert "captions" not in _ko, "a still has no caption strip"
+    assert _ko["logo"]["x"] <= 1.0 - sl.LOGO_STAMP_PX[0] / _W + 1e-9, (_W, _H, _ko)
+    assert _ko["logo"]["h"] >= sl.LOGO_STAMP_PX[1] / _H - 1e-9, (_W, _H, _ko)
+assert sl.keep_out_for(1080, 1920)["logo"] == {"x": 0.64, "y": 0.03, "w": 0.33, "h": 0.10}, "video unchanged"
+
+# requests.json wording follows the pipeline; the video strings stay as they were
+assert sl.validate_requests(INPUTS[:1], None) == [
+    "requests.json is missing — the screenshots have not been matched to scenes yet"]
+assert "matched to slides yet" in sl.validate_requests(INPUTS[:1], None, "panda-carousel")[0]
+assert "matched to the image yet" in sl.validate_requests(INPUTS[:1], None, "panda-image")[0]
+_bad_req = [{"input_id": "in_01", "scenes": [0]}, {"input_id": "in_02", "scenes": [1]}]
+_v = " | ".join(sl.validate_requests(INPUTS[:2], _bad_req))
+assert "screenshot 1: scene numbers must be 1 or higher" in _v, _v
+_c = " | ".join(sl.validate_requests(INPUTS[:2], _bad_req, "panda-carousel"))
+assert "screenshot 1: slide numbers must be 1 or higher" in _c, _c
+_i = " | ".join(sl.validate_requests(INPUTS[:2], _bad_req, "panda-image"))
+assert "screenshot 1: use 1 (the image) or leave it unplaced" in _i, _i
+
+# a card in the logo corner, or one too long to fit on its single line, is flagged
+_corner_card = dict(SLIDE_PHONE, steps=[{"kind": "card", "text": {"zh": "点这里", "en": "Tap"},
+                                         "zone": {"x": 0.70, "y": 0.02, "w": 0.28, "h": 0.10}}])
+_cn = car_notes(slide_plan((1, "in_01", _corner_card), (2, "in_02", SLIDE_WEB)))
+assert "card sits in the corner where the Panda logo goes" in _cn, _cn
+_long_card = dict(SLIDE_PHONE, steps=[
+    {"kind": "card", "zone": {"x": 0.45, "y": 0.90, "w": 0.50, "h": 0.06},
+     "text": {"zh": "在设置里点开移动服务然后添加 eSIM 并扫描二维码",
+              "en": "Open Settings, tap Mobile Service, then Add eSIM and scan the QR code"}}])
+_ln = car_notes(slide_plan((1, "in_01", _long_card), (2, "in_02", SLIDE_WEB)))
+assert "text is too long" in _ln, _ln
+
+# a stills revise that rewrites artifacts/scene_plan.json wins over the approved checkpoint copy
+_fp = PROJECTS / "job_plan_freshness"
+(_fp / "artifacts").mkdir(parents=True, exist_ok=True)
+_old_plan = slide_plan((1, "in_01", SLIDE_PHONE), n_scenes=2)
+_new_plan = slide_plan((2, "in_01", SLIDE_PHONE), n_scenes=2)
+(_fp / "checkpoint_scene_plan.json").write_text(json.dumps(
+    {"stage": "scene_plan", "status": "completed", "artifacts": {"scene_plan": _old_plan}}),
+    encoding="utf-8")
+assert sl.screenshot_items(sl.load_scene_plan(_fp))[0]["scene_number"] == 1
+(_fp / "artifacts" / "scene_plan.json").write_text(json.dumps(_new_plan), encoding="utf-8")
+_cp_mtime = (_fp / "checkpoint_scene_plan.json").stat().st_mtime
+os.utime(_fp / "artifacts" / "scene_plan.json", (_cp_mtime + 10, _cp_mtime + 10))
+assert sl.screenshot_items(sl.load_scene_plan(_fp))[0]["scene_number"] == 2, "the newer plan wins"
+os.utime(_fp / "artifacts" / "scene_plan.json", (_cp_mtime - 10, _cp_mtime - 10))
+assert sl.screenshot_items(sl.load_scene_plan(_fp))[0]["scene_number"] == 1, "older file ignored"
+
+# inputs/job.json records the language the JOB runs in — the placed cards read from it
+_zh_brief = "请做一个四页轮播，介绍熊猫移动 eSIM 的激活流程，包含订单页和激活页的截图说明。"
+_rz = client.post("/jobs", json={"brief": _zh_brief, "pipeline": "panda-carousel",
+                                 "options": {"language": "en",
+                                             "media": [{"url": BASE + "/ok.png"}]}})
+assert _rz.status_code == 200, _rz.text
+_zjob = PROJECTS / _rz.json()["job_id"] / "inputs" / "job.json"
+assert json.loads(_zjob.read_text(encoding="utf-8"))["language"] == "zh", \
+    "a Mandarin brief sent with language:en is switched to zh — the cards must follow"
+_ren = client.post("/jobs", json={"brief": brief, "pipeline": "panda-image",
+                                  "options": {"media": [{"url": BASE + "/ok.png"}]}})
+assert _ren.status_code == 200, _ren.text
+_ejob = PROJECTS / _ren.json()["job_id"] / "inputs" / "job.json"
+assert json.loads(_ejob.read_text(encoding="utf-8"))["language"] == "en", "no language option -> en"
+assert screens._job_language(PROJECTS / "does-not-exist") == "en"
+print("[ok] canvas parsing matches the real stills, the logo keep-out covers the stamp on small "
+      "stills, slide / image wording, the newest scene plan wins, job.json carries the job language")
 
 _server.shutdown()
 shutil.rmtree(_TMP, ignore_errors=True)
