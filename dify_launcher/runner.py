@@ -1601,6 +1601,7 @@ class ClaudeCodeRunner(Runner):
         the project's timing.jsonl for the per-project generation-time report."""
         import subprocess
         import time
+        prompt = prompt + self._screenshot_facts(job_id)
         attempts = int(os.environ.get("CLAUDE_MAX_ATTEMPTS", "3"))
         last = ""
         started = time.monotonic()
@@ -1629,6 +1630,31 @@ class ClaudeCodeRunner(Runner):
             raise RuntimeError("claude failed: " + " | ".join(tail))
         finally:
             self._record_timing(job_id, label, round(time.monotonic() - started, 2))
+
+    def _screenshot_facts(self, job_id: str) -> str:
+        """USER SCREENSHOTS facts for jobs with uploads; "" otherwise. Never raises."""
+        if not job_id:
+            return ""
+        try:
+            from dify_launcher import screens
+            return screens.facts(self._projects_dir / job_id)
+        except Exception:  # noqa: BLE001 — facts are an extra; never block a leg
+            return ""
+
+    def _screenshot_question(self, state: dict[str, Any], gate: Optional[str],
+                             arts: dict[str, Any], question: str) -> str:
+        """`question` plus screenshot checks + board for this gate (jobs with uploads only).
+
+        Never raises: this runs inside _sync, between the state mutation and its save.
+        """
+        try:
+            from dify_launcher import screens
+            lang = str((state.get("options") or {}).get("language") or "zh")
+            notes = screens.apply_gate(self._projects_dir, state["job_id"], gate, arts,
+                                       language=lang)
+            return screens.question_with_notes(question, notes) if notes else question
+        except Exception:  # noqa: BLE001 — a check must never break the gate
+            return question
 
     def _write_agent_log(self, job_id: str, label: str, attempt: int, proc: Any) -> None:
         """Persist an agent leg's stdout/stderr to projects/{job}/artifacts/agent_{label}.log.
@@ -1882,9 +1908,10 @@ class ClaudeCodeRunner(Runner):
             _apply_previews(job_id, arts, gate)
             fallback_question = _question_for_gate(
                 gate, stage=stage, artifacts=arts)
+            question = self._screenshot_question(
+                state, gate, arts, _safe_checkpoint_question(latest, fallback_question))
             state.update(status="awaiting_human", stage=stage, gate=gate,
-                         question=_safe_checkpoint_question(
-                             latest, fallback_question), artifacts=arts)
+                         question=question, artifacts=arts)
         elif status == "in_progress" or status not in ("completed",):
             # Mid-generation (or unknown) — keep running. NEVER treat as completed stills-only
             # recovery (that reopened approve_stills while Kling jobs were still rendering).
@@ -1913,9 +1940,10 @@ class ClaudeCodeRunner(Runner):
                 _apply_previews(job_id, arts, gate)
                 fallback_question = _question_for_gate(
                     gate, stage="assets", artifacts=arts)
+                question = self._screenshot_question(
+                    state, gate, arts, _safe_checkpoint_question(latest, fallback_question))
                 state.update(status="awaiting_human", stage="assets", gate=gate,
-                             question=_safe_checkpoint_question(
-                                 latest, fallback_question), artifacts=arts)
+                             question=question, artifacts=arts)
                 return state
             nxt = cp.get_next_stage(self._projects_dir, job_id, _pipeline_of(state))
             _apply_previews(job_id, arts, None)
@@ -2010,7 +2038,18 @@ class ClaudeCodeRunner(Runner):
         vids = _scan(proj / "assets" / "video", (".mp4", ".mov", ".webm"))
         renders = _scan(proj / "renders", (".mp4", ".mov"))
 
+        try:
+            from lib.screen_layout import is_launcher_owned
+        except Exception:  # noqa: BLE001 — never let an import break mirroring
+            def is_launcher_owned(path: Path, project_dir: Path) -> bool:
+                try:
+                    rel = Path(path).resolve().relative_to(Path(project_dir).resolve())
+                except (ValueError, OSError):
+                    return False
+                return bool(rel.parts) and rel.parts[0] in ("inputs", "overlay")
         for p in _paths_in(artifacts):
+            if is_launcher_owned(p, proj):
+                continue        # user screenshots / overlay renders are never stills or clips
             ext = p.suffix.lower()
             if (ext in (".png", ".jpg", ".jpeg") and p not in imgs and not is_superseded_still(p)
                     and not is_storyboard_name(p.name)):

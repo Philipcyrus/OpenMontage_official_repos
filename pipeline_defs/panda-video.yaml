@@ -173,6 +173,7 @@ stages:
     tools_available:
       - panda_render        # ffmpeg lane (default)
       - video_compose       # remotion / hyperframes lanes (runtime-aware)
+      - screen_overlay      # user screenshots laid over their scenes before panda_render (jobs with uploads only)
     checkpoint_required: true
     human_approval_default: true       # 🚦 GATE 5 (approve the finished video)
     review_focus:

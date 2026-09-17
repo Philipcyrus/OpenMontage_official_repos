@@ -1,0 +1,249 @@
+# User screenshots in Panda videos — build plan
+
+**Scope:** `panda-video` jobs started from Dify. **Status:** built on branch `feat/user-screenshots` (not merged, not deployed); tested locally — see §8. **Date:** 2026-09-17.
+
+---
+
+## 1. What we are building
+
+A user attaches several screenshots to the brief in Dify and says which one goes in which scene and
+how to use it ("1 in scene 1, zoom on the Pay button", "3 and 4 in scene 2", "blur the card number").
+The pipeline then:
+
+- puts each screenshot in exactly the scene(s) the user chose — never one they didn't assign, never
+  leaving one out;
+- decides at the **scene plan** where each screenshot sits, how it moves, and where the Panda stands;
+- generates the Panda stills and clips **with that area left empty**;
+- after the edit, lays each screenshot onto its clip with **Remotion**, exactly as the layout says;
+- assembles the video with `panda_render` exactly as today.
+
+Screenshots are never sent to Higgsfield (a video model redraws an image, so UI text would break).
+Placement costs 0 credits and gives the same result on every run.
+
+## 2. Decisions already made
+
+| Decision | Choice |
+|---|---|
+| Which screenshot goes in which scene | The user — in the brief, or at the scene plan gate once the scenes are visible. Claude follows it exactly. |
+| Screenshots the user gave no scene for | Not used. Listed at the script gate as "not placed" so the user can say where. |
+| Who decides the layout | Claude, per scene, at the scene plan, following the user's "how to use it". No fixed template. |
+| How the generated shot relates to the screenshot | The still and clip are generated with space left for it; the screenshot is laid over that space. |
+| When the layout is fixed | At the scene plan gate — the last gate before credits are spent. |
+| Where user files live | `projects/{job}/inputs/` — never under `assets/`. |
+| What assembles the video | `panda_render` (ffmpeg lane), unchanged. Remotion only renders the screenshot scenes' clips. |
+| When screenshots are laid in | At compose, after the edit fixes each scene's length, so overlay timing matches the voice. |
+
+## 3. What must not change
+
+- Jobs **without** screenshots: same prompts, same gates, same render. Enforced by a snapshot test of
+  every prompt builder (§8).
+- `panda_render`, the shared hybrid script/edit directors, the Higgsfield bridge, branding.
+- Nothing from `inputs/` or `overlay/` may ever appear in `stills` or `clips`. The launcher treats every
+  image/video under `assets/`, and any file path in a checkpoint, as generated media
+  (`_mirror_artifacts` in `dify_launcher/runner.py`); user files there would be animated, regenerated on revise,
+  and would upset gate routing.
+
+## 4. The layout — one source of truth
+
+Written by Claude into the approved scene plan, on the scene's `required_assets` item
+(items are already open, and `source: "provided"` already exists — `scene_plan.schema.json:113`).
+Validated by a new `schemas/artifacts/screen_layout.schema.json`.
+
+```json
+{
+  "type": "image",
+  "source": "provided",
+  "input_id": "in_01",
+  "description": "Checkout page — Pay button highlighted",
+  "layout": {
+    "zone":         {"x": 0.40, "y": 0.14, "w": 0.56, "h": 0.56},
+    "subject_zone": {"x": 0.03, "y": 0.28, "w": 0.34, "h": 0.55},
+    "frame": "phone",
+    "show":  {"from_s": 0.0, "to_s": 5.0},
+    "crop":  {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},
+    "enter": {"type": "slide_left", "at_s": 0.3, "duration_s": 0.5},
+    "camera": "locked",
+    "steps": [
+      {"kind": "blur_region",   "region": {"x": 0.08, "y": 0.52, "w": 0.60, "h": 0.05}},
+      {"kind": "cursor_move",   "to": [0.62, 0.81], "at_s": 1.6, "duration_s": 0.6},
+      {"kind": "click_pulse",   "at": [0.62, 0.81], "at_s": 2.2},
+      {"kind": "zoom_to",       "region": {"x": 0.30, "y": 0.70, "w": 0.60, "h": 0.22}, "at_s": 2.4, "duration_s": 0.8},
+      {"kind": "highlight_box", "region": {"x": 0.40, "y": 0.76, "w": 0.44, "h": 0.09}, "at_s": 3.2, "duration_s": 1.6},
+      {"kind": "card", "text": {"zh": "点这里付款", "en": "Tap Pay"},
+       "zone": {"x": 0.42, "y": 0.64, "w": 0.52, "h": 0.05}, "at_s": 3.4, "duration_s": 1.4}
+    ]
+  }
+}
+```
+
+- `zone`, `subject_zone`, card `zone`: fractions of the video frame.
+- Step `region` / points: fractions of the **whole** screenshot (as in `ScreenshotScene`), so changing
+  `crop` or `zoom_to` never invalidates them.
+- `at_s`: seconds from the start of the scene. `blur_region` has no timing — it is on from the first frame.
+- `frame`: `phone | browser | card | none`. Flat Panda look: white body, black keyline, no drop shadow.
+- `show`: when the screenshot is on screen within the scene (optional; default the whole scene).
+- Several screenshots in one scene (one item each): **side by side** (zones don't overlap) or **one after
+  another in the same frame**, like a phone screen changing (zones may overlap only when `show` windows
+  don't). Claude picks unless the user said.
+- One screenshot in several scenes: one item in each scene.
+
+The same layout drives four things, so they cannot disagree: the still/clip prompts (where the Panda
+stands, what stays empty), the gate previews, the checks, and the final Remotion render.
+
+## 5. Stage by stage
+
+### Intake — `POST /jobs`
+- **Dify** sends `options.media: [{"url": "...", "name": "checkout.png"}, ...]` in attachment order.
+- **Launcher** (`dify_launcher/app.py` `create_job`), all **before** a job id exists:
+  1. Count ≤ `SCREENSHOT_MAX_FILES` (env; Dify's own upload limit must allow the same number);
+     Remotion available on this server (Node ≥ 22 + `remotion-composer/node_modules`) —
+     otherwise 400 "screenshots need Remotion on this server".
+  2. Download the links in parallel: only from hosts in `DIFY_FILES_HOSTS`; a relative `/files/...` link
+     is prefixed with `DIFY_FILES_BASE`; no redirects; ≤ 10 MB each and a total cap; whole batch inside
+     ~40 s (Dify HTTP node timeouts are 30–60 s — `DIFY_INTEGRATION.md:162`).
+  3. Real image check (Pillow open + verify; png / jpeg / webp; pixel cap); apply EXIF rotation; strip
+     metadata (location); convert to sRGB PNG.
+  4. Write to a temp dir, then move to `projects/{job}/inputs/in_01.png …` plus `inputs.json`
+     `[{n, input_id, name, width, height, sha256}]`. Any failure → 400 with the reason, nothing created.
+     (`init_project` is idempotent, so creating `inputs/` early is safe.)
+- Public job view gains `inputs: [{n, name}]` so Dify can echo the numbering.
+
+### Script — start leg (gate: `approve_script`)
+- **Prompt facts** (only when `inputs/` exists): one line per screenshot — number, name, size, absolute path.
+- **idea-director** (Panda-owned): view the screenshots (one parallel turn) and turn the user's guidance
+  into `inputs/requests.json`:
+  `[{n, input_id, scenes: [N, ...], moment: "<user's words when they named a moment, not a number>",
+  instruction: "<how to use it, user's words>", shows: "<one line>"}]`. Screenshots are referred to by
+  attachment number or file name. No guidance → `scenes: []`, `moment: ""` (not placed). Scene numbers
+  the user gave are binding, so the brief is structured around them and narration talks about what is
+  on screen.
+- **Launcher**: validate `requests.json`; append a "Your screenshots" list to `script.md`
+  ("1 · checkout.png → scene 1 · zoom on the Pay button", "6 · receipt.png → not placed");
+  `screens_board` (`screens_uploads.png`) shows every upload as a numbered thumbnail with its scene, so "screenshot 7" is
+  unambiguous before anything is planned. Problems go into the gate question.
+
+### Scene plan (gate: `approve_scene_plan`)
+- **Prompt facts**: screenshots, requests, frame size, and the areas to keep clear as fractions —
+  caption strip (`draw_caption`, overlays.py:104) and logo area (`draw_logo`, overlays.py:227),
+  stored per canvas in `KEEP_OUT` (`lib/screen_layout.py`) and re-measured from the vendored drawing
+  code by a contract test. For 1080×1920: captions x 0.03–0.97, y 0.76–0.85; logo x 0.64–0.97, y 0.03–0.13.
+- **scene-plan-director** (Panda-owned): scene N carries exactly the screenshots assigned to N; a
+  `moment` assignment goes in the scene covering that moment (shown for the user to confirm); unplaced
+  screenshots appear nowhere. Write the layout (§4) on each; the scene keeps its normal
+  `source: "generate"` still, composed to leave the zones empty.
+- **Re-assigning**: at this gate the user sees the real scene numbers and can revise ("move 4 to scene 6",
+  "put 6 in scene 3"). The revise leg updates `requests.json` and the layouts; checks and board re-run.
+- **Launcher checks** (§6) and **preview**: `screens_board` (`screens_layouts.png`) — one Remotion still showing every
+  screenshot scene with the screenshot placed, the Panda area marked, and the final state of boxes,
+  blur and cards. New artifact key `screens_board`. `scene_plan.md` lists each layout in words.
+- Approving this gate fixes the layouts. After the stills are approved, moving `zone` or
+  `subject_zone` needs a new still for that scene (paid); everything inside the zone stays free to change.
+
+### Stills (gates: `approve_hero_still`, `approve_stills`)
+- **Prompt facts** per screenshot scene (hero included), e.g. "s03: keep x 0.40–0.95, y 0.10–0.70
+  plain white — no character, props or text; character inside x 0.03–0.37".
+- **asset-director** (Panda-owned): honour those areas in every still prompt.
+- **Launcher**: clear-area check on each screenshot scene's still (cover-cropped to the frame the way
+  `panda_render` does); `screens_board` (`screens_stills.png`) shows each screenshot scene over its
+  still, with any problem noted under the scene. The existing storyboard preview is unchanged.
+
+### Clips (gates: `approve_motion_sample` if on, `approve_assets`)
+- **Prompt facts**: screenshot scenes use a locked camera; the subject stays in its area; background stays plain.
+- **Launcher**: clear-area check on 5 sampled frames of each screenshot scene's clip; `screens_board`
+  (`screens_clips.png`) shows one combined frame per screenshot scene (clip frame + screenshot).
+
+### Edit
+- Unchanged. Screenshot scenes' clips are ordinary clips.
+
+### Compose (gate: `approve_final`)
+- **compose-director** (Panda-owned), new step before `panda_render`: if the approved scene plan has
+  layouts, call `screen_overlay` (mode `compose`) with the exact scene list it is about to pass to
+  `panda_render`. The tool renders `overlay/<scene_id>.mp4` for each screenshot scene — the scene's clip
+  from 0 s for exactly `duration_s` (what `normalize_scene` does), with the screenshot layers on top — and
+  returns the same list with those `media_path`s swapped. `panda_render` is then called as today.
+- How: the clip is normalised with ffmpeg (same cover-crop, held to `duration_s`), Remotion renders the
+  screenshot layers as a transparent PNG sequence (`PandaScreenOverlay`), and ffmpeg composites them at
+  the exact frame size, clip fps, no audio, CRF 12 (`panda_render` re-encodes). On a local test white
+  stayed 255 and the Panda yellow moved by at most 1 level.
+- **Revise at the final gate** ("box later", "bigger", "no blur"): update the layout, re-run
+  `screen_overlay` + `panda_render`. 0 credits.
+
+## 6. Checks (launcher code, not prompts)
+
+| When | Check | If it fails |
+|---|---|---|
+| `POST /jobs` | count, allowed host, size, real image, Remotion available | 400, no job |
+| `approve_script` | `requests.json` valid; every upload listed once; scene numbers ≥ 1; unplaced uploads named | noted in the question + board |
+| `approve_scene_plan` | layout schema; each scene shows exactly the screenshots assigned to it — none missing, none extra; unplaced screenshots nowhere; enough scenes for the highest scene number; zones inside the frame and clear of captions, logo and `subject_zone`; same-frame screenshots don't overlap in time; legible (shown scale not < 0.35× or > 2×); a zoom that barely zooms; step times fit the scene | noted + board |
+| stills gates | screenshot area of each still is clear (busy pixels ≤ 4%, `SCREENSHOT_CLEAR_MAX_BUSY`) | noted + note under the scene on the board |
+| clips gates | same check on 5 frames per clip | noted + board |
+| `approve_final` | each screenshot scene has its overlay clip, rendered from the approved layout (layout hash in a sidecar); the screenshot area of that clip is found in the final video (sampled every 0.25 s, compared against the same area of the clip without the screenshot) | noted |
+| every gate | `inputs/` files unchanged (sha256); nothing from `inputs/` or `overlay/` in stills/clips | noted |
+
+Rules for all checks: they never raise into state handling (render or check before mutating state, or
+guard fully), and they explain the problem in the gate question instead of blocking the human.
+
+## 7. What was built
+
+| Area | File | What | Launcher restart |
+|---|---|---|---|
+| Intake | `dify_launcher/app.py` | `options.media` checked, downloaded and normalised before the job id exists; `inputs` in the job view; `media` dropped from stored options | **yes** |
+| Launcher helpers | `dify_launcher/screens.py` (new) | intake, prompt facts, gate checks, boards, markdown sections | **yes** |
+| Launcher | `dify_launcher/runner.py` | facts appended in `_run_agent` (nothing for jobs without uploads); `inputs/` + `overlay/` skipped in `_mirror_artifacts`; checks + board at every `awaiting_human` gate | **yes** |
+| Shared rules | `lib/screen_layout.py` (new) | geometry (mirrors the TS), assignment + layout rules, keep-out areas, file lookups | **yes** (imported by the launcher) |
+| Schemas | `schemas/artifacts/screen_layout.schema.json`, `screen_requests.schema.json` (new) | §4 layout, `requests.json` | no |
+| Tool | `tools/video/screen_overlay.py` (new, auto-discovered) | modes `board` (uploads / layouts / stills / clips) and `compose` | no |
+| Remotion | `remotion-composer/src/panda/{screenGeometry.ts, ScreenLayer.tsx, PandaScreenOverlay.tsx, PandaScreenBoard.tsx}` (new) + 2 entries in `Root.tsx` | frames (phone / browser / card / none), crop, `zoom_to`, highlight, cursor, click, blur, cards with the CJK font `panda_render` uses | no |
+| Directors | `skills/pipelines/panda-video/{idea,scene-plan,asset,compose}-director.md` | "User screenshots" sections, all starting "only when the prompt has a USER SCREENSHOTS block" | no |
+| Pipeline | `pipeline_defs/panda-video.yaml` | compose `tools_available` += `screen_overlay` | no |
+| Docs | `dify_launcher/DIFY_INTEGRATION.md`, `dify_launcher/README.md`, `deploy/README.md`, `.env.example` | `options.media`, `inputs`, `screens_board`, `DIFY_FILES_HOSTS` / `DIFY_FILES_BASE`, limits, Node 22 for screenshot jobs | no |
+
+The upstream `ScreenshotScene.tsx` is untouched; the Panda composition adds blur, zoom, `at_s` timing
+and the CJK font alongside it.
+
+## 8. Tests (all run locally on 2026-09-17)
+
+| Test | Result |
+|---|---|
+| `python dify_launcher/test_screens.py` (new) — intake (allow-list; redirect / 404 / oversize / fake image / GIF / pixel cap refused; EXIF rotation applied; metadata stripped; nothing created on a bad upload; media only for panda-video; Remotion required); assignment rules; layout rules; TS↔Python geometry; still clear-area; **prompts byte-identical for jobs without uploads**; facts appended with them; `inputs/` and `overlay/` never mirrored; gate notes + board; checks never raise; final-video check finds / flags | pass |
+| `python -m pytest tests/contracts/test_screen_layout.py` (new, 14) — keep-out areas re-measured from `overlays.py` for 4 canvases, schemas valid, this doc's §4 example is a clean layout, geometry, tool discovered without Node, `compose` swaps only screenshot scenes and keeps durations, directors + pipeline wired | pass |
+| `python -m pytest tests/tools/test_screen_overlay_render.py` (new) — real Remotion render: the screenshot lands on the pixels the Python geometry predicts, a short clip is held to the scene length, the board renders | pass |
+| `python dify_launcher/test_claude_adapter.py`, `python dify_launcher/test_dify_flow.py` (existing) | pass |
+| `python -m pytest tests/contracts` | 13 failed / 657 passed — the same 13 failures as `main` (Veo / Google Music / runtime-presentation), plus 14 new passes |
+| Whole-job simulation through the real launcher (scratch script; agent legs simulated, everything else real: intake from an HTTP server, gates, Remotion boards, `screen_overlay`, `panda_render`) | pass — uploads board at the script gate; layout board + logo-corner notes at the scene plan; a still with the character's arm in the screenshot area flagged, cleared after a revise; clips board; final video with both screenshots found |
+
+## 9. Rollout
+
+Local branch → PR on GitHub → merge → the box pulls. Nothing is edited on the box. Everything is inert
+for jobs that do not send `options.media`, and `options.media` is refused until `DIFY_FILES_HOSTS` is set.
+
+**Before merge.** The registry import test passes (a tool that fails to import would break tool lookup
+for every job from the next agent leg — `ToolRegistry.discover()` has no error handling).
+
+**Box readiness (read-only).** In the environment that starts the launcher: `node -v` ≥ 22 ahead of
+the system Node 18 (`deploy/README.md` "Node runtime"); `remotion-composer/node_modules` installed;
+`python -m pytest tests/tools/test_screen_overlay_render.py` passes on the box (the first run downloads
+Remotion's headless Chrome). In Dify: attach one image and note the link the flow receives (absolute or
+`/files/...`) and confirm the box can download it before it expires.
+
+**Deploy.** Pull, wait until no job is mid-leg, **restart the launcher**. Director text applies from the
+next leg after the pull; every new rule starts with "only when the prompt has a USER SCREENSHOTS
+block", so it is inert for normal jobs before the restart. Then one normal job to the scene plan gate
+(unchanged), and one API job with 3 screenshots through every gate to the final video.
+
+**Dify flow.** Set `DIFY_FILES_HOSTS` (+ `DIFY_FILES_BASE` if links are relative) and restart; turn on
+image upload; send `options.media`; show `screens_board` full width. One end-to-end job from the chat.
+
+## 10. Not in v1
+
+- Screenshot inside a generated phone the Panda holds (blank screen + frame-by-frame tracked composite).
+- Screenshot scenes with no Panda shot behind them (needs a no-generation scene and gate-count changes).
+- Carousel and image pipelines (same layout, rendered as a Remotion still).
+- Video uploads, adding screenshots at a later gate, photos as generation references.
+
+## 11. Decisions taken in the build
+
+1. Personal data (card numbers, ICCID / IMEI, phone numbers, emails, names, addresses, account QR codes)
+   is blurred by default — the scene-plan director adds `blur_region` even when the user did not ask;
+   it shows on the layouts board and the user can remove it with a revise.
+2. Failed checks warn in the gate question; they never block the human.

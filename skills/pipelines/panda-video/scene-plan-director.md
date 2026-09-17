@@ -113,6 +113,42 @@ For **each speaking beat**, declare a narration asset with `speaker` (`customer`
 and `script_section_id` pointing at that section. One scene may have up to three narration
 entries (one per brand speaker). Do not collapse multi-speaker dialogue into a single VO asset.
 
+### 7b. User screenshots (only when the prompt has a USER SCREENSHOTS block)
+The user's guidance in `inputs/requests.json` is **binding**: scene N (the N-th scene of this plan)
+carries exactly the screenshots assigned to N — none missing, none extra. A `moment` screenshot goes
+in the scene covering that moment. A screenshot with no guidance appears nowhere. Plan enough scenes
+for the highest assigned number (3–8 s per scene).
+
+For each placement add a **second** item to that scene's `required_assets` — the scene keeps its one
+`source: "generate"` still, composed around the screenshot:
+`{"type": "image", "source": "provided", "input_id": "in_01", "description": "...", "layout": {...}}`
+
+`layout` follows `schemas/artifacts/screen_layout.schema.json` (worked example:
+`docs/user-screenshots-plan.md` §4). Open the screenshot and place things by looking — never guess
+coordinates. You decide the layout, following the user's `instruction`:
+- `zone` (fractions of the frame): where the screenshot sits. Keep it off the caption strip and the
+  logo corner listed in the prompt facts, and big enough to read (the launcher warns below 0.35×).
+  App screenshots: a tall zone beside the character. Web pages: a wide zone above or below it.
+- `subject_zone`: where the Panda / customer stands — never overlapping the screenshot. Write the
+  generated still's description to match ("panda on the left third; right side plain white, empty").
+- `frame`: `phone` for app screens, `browser` for web pages, `card` otherwise, `none` only if asked.
+- `crop`: only to start on part of a large screenshot.
+- `enter` / `exit` / `show`: when it appears. Several screenshots in one scene sit side by side
+  (zones don't overlap) or replace each other in the same zone (`show` windows don't overlap).
+- `steps` — regions and points are fractions of the WHOLE screenshot; `at_s` is seconds into the
+  scene, timed to when the narrator says it:
+  - `highlight_box` on the thing the narrator names; `cursor_move` + `click_pulse` for a tap/click.
+  - `zoom_to` a region to enlarge it. The region grows to the screen's shape, so pick one about as
+    narrow as the screen (a tall phone screen needs a narrow region) or it barely zooms.
+  - `blur_region` over personal data — card numbers, ICCID / IMEI, phone numbers, emails, names,
+    addresses, account QR codes — even when the user did not ask.
+  - `card`: one short key message (≤ 12 CJK characters or 5 English words), `text` with zh and en,
+    zone clear of the character and the captions.
+- `camera`: `"locked"`.
+
+The screenshot is the user's exact text, so the `text_card` rule in §8 does not apply to it. On a
+revise that moves a screenshot ("move 4 to scene 6"), update `inputs/requests.json` **and** the layouts.
+
 ### 8. Coverage, variety & feasibility checks (before submitting)
 - [ ] Scenes span the FULL duration (first at 0s, last at total), no gaps > 1s (unless a beat)
 - [ ] Every script section maps to ≥ 1 scene (or is covered as a multi-voice beat on a scene);
@@ -121,7 +157,8 @@ entries (one per brand speaker). Do not collapse multi-speaker dialogue into a s
       `script_section_id`)
 - [ ] No more than 3 consecutive scenes of the same `type`; ≥ 2 types used
 - [ ] Exactly one `hero_moment`; pacing alternates high-info and breathing-room scenes
-- [ ] Every scene with a still has **exactly one** image `required_asset` (no plate chains)
+- [ ] Every scene with a still has **exactly one** `source: "generate"` image `required_asset` (no plate
+      chains; user screenshots with `source: "provided"` are extra items, not stills)
 - [ ] Every human/panda appearance names the locked Element id; 2D medium is explicit
 - [ ] Every panda+customer scene repeats the 0.58 ±0.05 pair scale, shared ground plane, and
       upright posture lock in description, actions, and required assets

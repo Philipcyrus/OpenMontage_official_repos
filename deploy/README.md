@@ -39,6 +39,13 @@ for two of the three lanes:
 | `remotion` | `video_compose` (React motion graphics) | **Yes — Node ≥ 22** + `remotion-composer` |
 | `hyperframes` | `video_compose` (HTML/CSS/GSAP) | **Yes — Node ≥ 22** + Chrome headless |
 
+**User screenshots also need Node.** A job with `options.media` renders its preview boards and
+lays the screenshots onto their clips with `screen_overlay` (Remotion), on top of the ffmpeg lane.
+`POST /jobs` refuses media with a 400 unless Node ≥ 22 is first on the launcher's PATH and
+`remotion-composer/node_modules` is installed, and unless `DIFY_FILES_HOSTS` names the Dify file
+host (see `.env.example` §1c). Remotion downloads its headless Chrome on the first render — do one
+test render after `npm install`. Jobs without screenshots are unaffected by any of this.
+
 The box ships **system Node 18** (`/usr/bin/node`), which is too old for Remotion/HyperFrames.
 Node 22 is installed **alongside** it via `nvm` (does not replace system Node):
 

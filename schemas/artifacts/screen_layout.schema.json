@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openmontage.dev/schemas/artifacts/screen_layout.schema.json",
+  "title": "Screen layout",
+  "description": "How one user screenshot is laid over a generated Panda shot. Written by the panda-video scene-plan director on a scene_plan required_assets item with source 'provided'. Rendered by tools/video/screen_overlay.py; checked by lib/screen_layout.py. zone / subject_zone / card zone are fractions of the video frame; crop, step regions and points are fractions of the whole screenshot; *_s are seconds from the start of the scene.",
+  "type": "object",
+  "required": ["zone", "frame"],
+  "additionalProperties": false,
+  "$defs": {
+    "box": {
+      "type": "object",
+      "required": ["x", "y", "w", "h"],
+      "additionalProperties": false,
+      "properties": {
+        "x": {"type": "number", "minimum": 0, "maximum": 1},
+        "y": {"type": "number", "minimum": 0, "maximum": 1},
+        "w": {"type": "number", "exclusiveMinimum": 0, "maximum": 1},
+        "h": {"type": "number", "exclusiveMinimum": 0, "maximum": 1}
+      }
+    },
+    "point": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {"type": "number", "minimum": 0, "maximum": 1}
+    },
+    "seconds": {"type": "number", "minimum": 0},
+    "motion": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {"type": "string", "enum": ["none", "fade", "pop", "slide_left", "slide_right", "slide_up", "slide_down"]},
+        "at_s": {"$ref": "#/$defs/seconds"},
+        "duration_s": {"$ref": "#/$defs/seconds"}
+      }
+    },
+    "text": {
+      "oneOf": [
+        {"type": "string", "minLength": 1},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "properties": {"zh": {"type": "string"}, "en": {"type": "string"}}
+        }
+      ]
+    }
+  },
+  "properties": {
+    "zone": {"$ref": "#/$defs/box", "description": "Where the screenshot (with its frame) may sit."},
+    "subject_zone": {"$ref": "#/$defs/box", "description": "Where the character stands; the still/clip keeps it out of zone."},
+    "frame": {"type": "string", "enum": ["phone", "browser", "card", "none"]},
+    "crop": {"$ref": "#/$defs/box", "description": "Part of the screenshot shown at the start (default: all)."},
+    "show": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {"from_s": {"$ref": "#/$defs/seconds"}, "to_s": {"$ref": "#/$defs/seconds"}}
+    },
+    "enter": {"$ref": "#/$defs/motion"},
+    "exit": {"$ref": "#/$defs/motion"},
+    "camera": {"type": "string", "enum": ["locked"]},
+    "steps": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": ["kind", "region"],
+            "additionalProperties": false,
+            "properties": {"kind": {"const": "blur_region"}, "region": {"$ref": "#/$defs/box"}}
+          },
+          {
+            "type": "object",
+            "required": ["kind", "region"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {"const": "highlight_box"},
+              "region": {"$ref": "#/$defs/box"},
+              "at_s": {"$ref": "#/$defs/seconds"},
+              "duration_s": {"$ref": "#/$defs/seconds"}
+            }
+          },
+          {
+            "type": "object",
+            "required": ["kind", "to"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {"const": "cursor_move"},
+              "to": {"$ref": "#/$defs/point"},
+              "from": {"$ref": "#/$defs/point"},
+              "at_s": {"$ref": "#/$defs/seconds"},
+              "duration_s": {"$ref": "#/$defs/seconds"}
+            }
+          },
+          {
+            "type": "object",
+            "required": ["kind"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {"const": "click_pulse"},
+              "at": {"$ref": "#/$defs/point"},
+              "at_s": {"$ref": "#/$defs/seconds"},
+              "duration_s": {"$ref": "#/$defs/seconds"}
+            }
+          },
+          {
+            "type": "object",
+            "required": ["kind", "region"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {"const": "zoom_to"},
+              "region": {"$ref": "#/$defs/box"},
+              "at_s": {"$ref": "#/$defs/seconds"},
+              "duration_s": {"$ref": "#/$defs/seconds"}
+            }
+          },
+          {
+            "type": "object",
+            "required": ["kind", "text", "zone"],
+            "additionalProperties": false,
+            "properties": {
+              "kind": {"const": "card"},
+              "text": {"$ref": "#/$defs/text"},
+              "zone": {"$ref": "#/$defs/box"},
+              "at_s": {"$ref": "#/$defs/seconds"},
+              "duration_s": {"$ref": "#/$defs/seconds"}
+            }
+          }
+        ]
+      }
+    }
+  }
+}
