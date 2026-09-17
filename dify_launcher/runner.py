@@ -138,7 +138,51 @@ def _resolve_assets_gate(phase: Optional[str], arts: dict[str, Any]) -> str:
     return "approve_assets"
 
 
-def _question_for_gate(gate: Optional[str], *, stage: Optional[str] = None) -> str:
+def _lip_sync_warning_suffix(artifacts: Optional[dict[str, Any]]) -> str:
+    """Human-facing unresolved lip-sync summary carried through both media gates."""
+    blob = artifacts if isinstance(artifacts, dict) else {}
+    manifest = blob.get("asset_manifest") if isinstance(blob.get("asset_manifest"), dict) else {}
+    metadata = manifest.get("metadata") if isinstance(manifest.get("metadata"), dict) else {}
+    qa = metadata.get("lip_sync_qa") if isinstance(metadata.get("lip_sync_qa"), dict) else {}
+    warnings = qa.get("unresolved_warnings") if isinstance(qa.get("unresolved_warnings"), list) else []
+    scenes = qa.get("scenes") if isinstance(qa.get("scenes"), dict) else {}
+    affected = [
+        str(scene_id)
+        for scene_id, report in scenes.items()
+        if isinstance(report, dict) and report.get("unresolved_warning")
+    ]
+    if not warnings and not affected:
+        return ""
+    scene_text = ", ".join(affected) if affected else "unknown"
+    return (
+        f" Lip-sync QA warning remains after the bounded correction for scene(s): {scene_text}. "
+        "Review those scenes before deciding; this warning does not block delivery."
+    )
+
+
+def _safe_checkpoint_question(checkpoint: dict[str, Any], fallback: str) -> str:
+    """Compose agent-authored gate copy onto the mandatory launcher question.
+
+    Custom copy is additive only: lip-sync warnings and revise instructions from
+    ``fallback`` must never be dropped when the agent supplies a ``question``.
+    """
+    raw = checkpoint.get("question")
+    if not isinstance(raw, str):
+        return fallback
+    custom = raw.replace("\x00", "").strip()
+    if not custom:
+        return fallback
+    # If the agent already included the mandatory wording, keep their text.
+    if fallback and fallback in custom:
+        return custom[:4000]
+    if not fallback:
+        return custom[:4000]
+    composed = f"{custom} {fallback}".strip()
+    return composed[:4000]
+
+
+def _question_for_gate(gate: Optional[str], *, stage: Optional[str] = None,
+                       artifacts: Optional[dict[str, Any]] = None) -> str:
     """Human-facing question for a gate. Shared by MockRunner and ClaudeCodeRunner._sync.
 
     Mochi / Dify MUST key user-facing \"X is ready\" copy off `gate` (and may use this
@@ -160,11 +204,17 @@ def _question_for_gate(gate: Optional[str], *, stage: Optional[str] = None) -> s
         return ("Approve the MOTION on this one sample clip (camera, animation, how the panda "
                 "moves) before all clips are generated — or request a revision of the motion.")
     if gate == "approve_assets":
-        return ("Approve the generated media (clips + audio), or request revision of "
-                "specific shots (send {\"decision\":\"revise\",\"shots\":[i,...]}).")
+        return (
+            "Approve the generated media (clips + audio), or request revision of "
+            "specific shots (send {\"decision\":\"revise\",\"shots\":[i,...]})."
+            + _lip_sync_warning_suffix(artifacts)
+        )
     if gate == "approve_final":
-        return ("Approve the finished (unbranded) video, or request a revision. "
-                "Branding is the next gate and does not flow through animation.")
+        return (
+            "Approve the finished (unbranded) video, or request a revision. "
+            "Branding is the next gate and does not flow through animation."
+            + _lip_sync_warning_suffix(artifacts)
+        )
     if stage:
         return f"Approve {stage}, or request a revision."
     return "Approve, or request a revision."
@@ -180,6 +230,9 @@ def _budget_cap(state: dict[str, Any]) -> Optional[int]:
         return int(v)
     except (TypeError, ValueError):
         return None
+
+
+_BRAND_SPEAKERS = ("panda", "customer", "narrator")
 
 
 def _resolve_voice_id(narrator: str, language: str) -> Optional[str]:
@@ -202,35 +255,159 @@ def _resolve_voice_id(narrator: str, language: str) -> Optional[str]:
     return vid.strip() if isinstance(vid, str) and vid.strip() else None
 
 
+def _resolve_voice_cast(language: str) -> dict[str, Optional[str]]:
+    """All three brand speaker voice ids for a language (None where unconfigured)."""
+    lang = str(language or "").strip().lower()
+    return {sp: _resolve_voice_id(sp, lang) for sp in _BRAND_SPEAKERS}
+
+
 def _voice_line(options: dict[str, Any]) -> str:
-    """VOICE LOCK — the narration counterpart of CHARACTER LOCK.
+    """VOICE CAST — brand speaker map for multi-voice scripts (CHARACTER LOCK counterpart).
 
     Carried by EVERY prompt whose leg can call ElevenLabs, not just the start prompt: a leg is a
-    cold `claude -p`, so a voice named once at job start is gone by the time the media leg runs."""
+    cold `claude -p`, so a voice named once at job start is gone by the time the media leg runs.
+
+    `options.narrator` is the **default** speaker for sections that omit `speaker`.
+    `options.voice_id` remains a global override that forces every line to one id."""
     opts = options or {}
     lang = str(opts.get("language", "en")).lower()
-    narrator = str(opts.get("narrator", "panda")).lower()
+    default_speaker = str(opts.get("narrator", "panda")).lower()
     fallback = (" Only if ElevenLabs ITSELF is unavailable (an infrastructure failure — never a "
                 "missing id) may you fall back to Higgsfield audio, and you must record that "
                 "decision in decision_log.")
 
     override = opts.get("voice_id")
     if override:
-        return (f"VOICE LOCK — use ElevenLabs voice_id='{override}' (explicit override from the "
-                "job). Use this exact id; never substitute another voice." + fallback)
+        return (f"VOICE CAST — OVERRIDE: use ElevenLabs voice_id='{override}' for EVERY narration "
+                "line (explicit override from the job). Ignore section.speaker brand ids. "
+                "Never substitute another voice." + fallback)
 
-    resolved = _resolve_voice_id(narrator, lang)
-    if resolved:
-        return (f"VOICE LOCK — use ElevenLabs voice_id='{resolved}', the brand voice for "
-                f"narrator='{narrator}' language='{lang}' (resolved by the launcher from "
-                "config/panda-elements.json `voices`). Use this exact id — narration generated "
-                "with any other voice is a defect; do not ship it." + fallback)
+    cast = _resolve_voice_cast(lang)
+    missing = [sp for sp, vid in cast.items() if not vid]
+    if missing:
+        miss = ", ".join(f"{sp}/{lang}" for sp in missing)
+        return (f"VOICE CAST — BLOCKER: language='{lang}' is missing brand voice id(s) in "
+                f"config/panda-elements.json `voices` for: {miss}. Do NOT improvise a voice, do NOT "
+                "borrow a neighbouring language, and do NOT fall back to Higgsfield audio to get "
+                "past this. Generate everything else, then stop at the gate "
+                "(status='awaiting_human') and name the unconfigured speaker/language pair(s) "
+                "in the question.")
 
-    return (f"VOICE LOCK — BLOCKER: narrator='{narrator}' with language='{lang}' resolves to NO "
-            "voice id in config/panda-elements.json `voices`. Do NOT improvise a voice, do NOT "
-            "borrow a neighbouring language, and do NOT fall back to Higgsfield audio to get past "
-            "this. Generate everything else, then stop at the gate (status='awaiting_human') and "
-            "name the unconfigured narrator/language pair in the question.")
+    lines = "\n".join(f"  {sp}={cast[sp]}" for sp in _BRAND_SPEAKERS)
+    default_id = cast.get(default_speaker) or cast["panda"]
+    if default_speaker not in cast or not cast.get(default_speaker):
+        # Unknown default speaker name — still emit the cast, but flag default fallback to panda.
+        default_note = (f"default speaker '{default_speaker}' is not a brand speaker — use "
+                        f"panda={cast['panda']} for untagged sections")
+    else:
+        default_note = (f"default speaker={default_speaker} → voice_id='{default_id}' "
+                        f"(options.narrator)")
+
+    return (f"VOICE CAST — language={lang}; {default_note}\n"
+            f"{lines}\n"
+            "Pick the id from this map using each script section's `speaker` "
+            "(`customer`|`panda`|`narrator`). Untagged sections use the default speaker above. "
+            "One shot may have multiple timed sections (up to all three speakers); generate one "
+            "TTS file per section (e.g. vo-{section_id}-{speaker}.mp3). Narration with any id "
+            "not in this map is a defect; do not ship it." + fallback)
+
+
+def _pair_scale_lock_line() -> str:
+    """Literal panda/customer scale contract carried into every cold media leg."""
+    ratio, tolerance = 0.58, 0.05
+    try:
+        with open(_ENGINE_ROOT / "config" / "panda-elements.json", encoding="utf-8") as fh:
+            lock = (
+                (json.load(fh) or {})
+                .get("character_references", {})
+                .get("pair_scale_lock", {})
+            )
+        ratio = float(lock.get("panda_height_ratio", ratio))
+        tolerance = float(lock.get("ratio_tolerance", tolerance))
+    except (OSError, TypeError, ValueError):
+        pass
+    low, high = ratio - tolerance, ratio + tolerance
+    return (
+        "PAIR SCALE LOCK — binding whenever panda + customer share a frame: standing customer "
+        f"height=1.00; panda ear-top height={ratio:.2f} (acceptable {low:.2f}-{high:.2f}). "
+        "Both feet share the same ground line; panda ear-top aligns around the customer's lower "
+        "chest / upper abdomen. Customer stays upright and relaxed; panda stays upright, broad, "
+        "rounded, short-legged, and bipedal. Preserve this relative scale, body proportions, "
+        "posture, and ground plane in every still and every i2v frame — no growth, shrinkage, "
+        "depth trick, crouch, or camera move that changes apparent ratio. Review every paired "
+        "still plus beginning/middle/end clip frames; persist metadata.character_scale_qa and "
+        "surface scene-specific warnings at the assets gate."
+    )
+
+
+def _audio_lipsync_enabled(options: Optional[dict[str, Any]]) -> bool:
+    """True unless options.audio_lipsync is explicitly false/off (default ON).
+
+    Missing key, None, or blank string all mean ON — only explicit false/0/no/off opt out.
+    """
+    if not options or "audio_lipsync" not in options:
+        return True
+    raw = options.get("audio_lipsync")
+    if raw is None:
+        return True
+    if isinstance(raw, bool):
+        return raw
+    s = str(raw).strip().lower()
+    if s == "":
+        return True
+    return s not in ("false", "0", "no", "off")
+
+
+def _ensure_audio_lipsync_default(options: Optional[dict[str, Any]],
+                                  pipeline: str = "panda-video") -> dict[str, Any]:
+    """Materialize audio_lipsync:true on panda-video when the key was omitted."""
+    opts = dict(options or {})
+    if pipeline == "panda-video" and "audio_lipsync" not in opts:
+        opts["audio_lipsync"] = True
+    return opts
+
+
+def _audio_lipsync_line(options: Optional[dict[str, Any]]) -> str:
+    """AUDIO LIPSYNC — Seedance audio_references for on-screen customer/panda (default on)."""
+    if not _audio_lipsync_enabled(options):
+        return ("AUDIO LIPSYNC — OFF for this job. Keep TTS-first duration-driven i2v with HOLD "
+                "LOCK (mouth frozen) and lay ElevenLabs VO at compose. Do NOT pass "
+                "audio_references.\n")
+    return (
+        "AUDIO LIPSYNC — ON (default; pass options.audio_lipsync:false to opt out). "
+        "TTS-first still mandatory. For on-screen customer/panda speaking scenes that produce "
+        "a video clip: after probing VO duration, use Higgsfield model seedance_2_0 with "
+        "medias start_image=approved still and audio_references=that scene's timing-preserving "
+        "ElevenLabs VO bed (MCP media_upload), generate_audio:false, duration from "
+        "the full-scene timeline allocation (or snap_i2v_duration for a pre-allocation motion sample). "
+        "Prompt: keep 2D + Element LOCK; animate mouth/jaw to lip-sync the attached audio; "
+        "subtle idle only — no walking, no new person, no photoreal/3D. Do NOT mouth-freeze "
+        "(drop HOLD LOCK for these shots only). Narrator-only / text_card / no-face scenes stay "
+        "HOLD or static. Multi-speaker on one clip: build one timing-preserving scene-local bed "
+        "using each section's offset relative to scene start (adelay + amix); preserve pauses "
+        "and overlaps and never join files back-to-back. At compose, move each original VO with "
+        "its allocated scene while preserving that immutable scene-local offset. If audio_references "
+        "upload/generate fails: fall back to HOLD + duration-only i2v, log in decision_log, "
+        "continue. Compose still mutes native AAC (silent when generate_audio:false) and lays "
+        "the same ElevenLabs VO bed.\n"
+    )
+
+
+def _lip_sync_qa_line(options: Optional[dict[str, Any]]) -> str:
+    """Bounded local QA/retry instruction for audio-driven Panda clips."""
+    if not _audio_lipsync_enabled(options):
+        return ""
+    return (
+        "LIP-SYNC QA — before approve_assets, run lipsync_qa on every audio_lipsync:true "
+        "customer/panda clip with its exact scene-local VO bed; mark narrator/HOLD clips skipped. "
+        "Review the sampled mouth frames and persist asset_manifest.metadata.lip_sync_qa. "
+        "On fail_timing, apply and locally re-check the measured edit offset without regeneration. "
+        "On fail_generation, preflight and regenerate only that scene once with the same model, "
+        "VO, still, and duration plus immediate-speaking/face-visible direction; checkpoint the "
+        "retry job id immediately and retain both takes. Never spend on inconclusive/tool failure, "
+        "never submit attempt 3, and never retry passing scenes. Select the better take. A second "
+        "failure still reaches approve_assets with an unresolved warning.\n"
+    )
 
 
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
@@ -244,7 +421,7 @@ def _brief_looks_mandarin(brief: str) -> bool:
 
 def _coerce_language_from_brief(options: Optional[dict[str, Any]],
                                 brief: str) -> tuple[dict[str, Any], bool]:
-    """Brief wins over stale language:en — Mandarin briefs coerce to zh for VOICE LOCK.
+    """Brief wins over stale language:en — Mandarin briefs coerce to zh for VOICE CAST.
 
     Returns (options_copy, coerced). Explicit voice_id wins (no coerce). Non-en language left alone.
     """
@@ -263,7 +440,7 @@ def _coerce_language_from_brief(options: Optional[dict[str, Any]],
 def _apply_language_coerce(state: dict[str, Any]) -> bool:
     """Persist coerced options onto job state. Returns True when language was flipped to zh."""
     opts, coerced = _coerce_language_from_brief(state.get("options"), state.get("brief") or "")
-    state["options"] = opts
+    state["options"] = _ensure_audio_lipsync_default(opts, _pipeline_of(state))
     if coerced:
         state["language_coerced_from_brief"] = True
     return coerced
@@ -275,7 +452,7 @@ def _language_lock_note(options: dict[str, Any], *, coerced: bool = False) -> st
         return ""
     if coerced:
         return ("LANGUAGE — set to zh from Mandarin brief content (overrode stale language:en). "
-                "Use zh narration/captions and the VOICE LOCK id above. Do NOT stop to re-ask "
+                "Use zh narration/captions and the VOICE CAST map above. Do NOT stop to re-ask "
                 "language — write the checkpoint and gate as usual.\n")
     return ("LANGUAGE — zh is locked for this job. Do NOT stop to re-ask language — write the "
             "checkpoint and gate as usual.\n")
@@ -1036,12 +1213,12 @@ class MockRunner(Runner):
         )
         return state
 
-    # --- GATE 4: assets PHASE 3 — animate approved stills + audio + manifest
+    # --- GATE 4: assets PHASE 3 — TTS-first VO, then duration-driven i2v + manifest
     def _do_assets(self, state: dict[str, Any], response: dict[str, Any]) -> dict[str, Any]:
-        """Animate the APPROVED stills into motion clips (and, on the box, voice/music) and
-        record everything in asset_manifest. Real gen is the Higgsfield MCP (image_to_video) +
-        ElevenLabs; the mock renders a short clip per still. Reviewer approves the set or revises
-        specific shots (response.shots) — only those regenerate."""
+        """TTS-first then animate APPROVED stills into motion clips (duration from measured VO)
+        plus music; record everything in asset_manifest. Real gen is ElevenLabs then Higgsfield
+        MCP (image_to_video); the mock renders a short clip per still. Reviewer approves the set
+        or revises specific shots (response.shots) — only those regenerate."""
         job_id = state["job_id"]
         scene_plan = state.get("artifacts", {}).get("scene_plan") or {}
         scenes = scene_plan.get("scenes") or []
@@ -1357,7 +1534,8 @@ class ClaudeCodeRunner(Runner):
                 return self._sync(state)
             if _motion_sample_enabled(state):
                 # one hero clip first — approve the motion before batching all clips
-                self._run_agent(self._motion_sample_prompt(job_id), job_id, "motion_sample")
+                self._run_agent(self._motion_sample_prompt(job_id, state.get("options")),
+                                job_id, "motion_sample")
                 return self._run_until_assets_gate(state, label="motion_sample")
             # motion sample disabled: animate all approved stills straight away
             self._run_agent(self._stills_approved_prompt(job_id, state.get("options")),
@@ -1375,6 +1553,14 @@ class ClaudeCodeRunner(Runner):
                         "remaining clips yet)", response or {}),
                 job_id, "motion_sample_revise")
             return self._run_until_assets_gate(state, label="motion_sample_revise")
+
+        # Approving full media must run edit (ungated) → compose and land on approve_final.
+        # A single continue leg that asks a question and exits leaves status=running/gate=null
+        # (Dify "Agent Door sent no reply"). Cap retries then fail clearly — same pattern as
+        # _run_after_hero_approved.
+        if gate == "approve_assets" and decision == "approve":
+            self._approve_stage(job_id, stage, _pipeline_of(state))
+            return self._run_until_final_gate(state)
 
         if decision == "approve":
             self._approve_stage(job_id, stage, _pipeline_of(state))
@@ -1547,6 +1733,72 @@ class ClaudeCodeRunner(Runner):
             )
         return state
 
+    def _stuck_before_final_gate(self, state: dict[str, Any]) -> bool:
+        """True while the post-approve-assets worker has not reached a terminal/gated state.
+
+        This predicate is only used inside _run_until_final_gate, where assets are already
+        approved. Do not depend on get_next_stage(): a checkpoint/state disagreement was enough
+        to leave a completed edit permanently `running` with no gate.
+        """
+        return state.get("status") == "running" and state.get("gate") is None
+
+    def _final_retry_gate(self, state: dict[str, Any], reason: str) -> dict[str, Any]:
+        """Return a resumable media-approval gate without discarding generated assets."""
+        try:
+            synced = self._sync(state)
+        except Exception:  # keep the original state if checkpoint sync itself is unhealthy
+            synced = dict(state)
+        if synced.get("gate") == "approve_final":
+            return synced
+        synced.update(
+            status="awaiting_human",
+            stage="assets",
+            gate="approve_assets",
+            question=(
+                "Final assembly stalled after clip approval. Generated stills, clips, VO, and "
+                f"music are kept. Approve to retry edit/compose only; Higgsfield media will not "
+                f"be regenerated. Detail: {reason}"
+                + _lip_sync_warning_suffix(synced.get("artifacts"))
+            ),
+        )
+        return synced
+
+    def _run_until_final_gate(self, state: dict[str, Any]) -> dict[str, Any]:
+        """After approve_assets: run edit → compose until approve_final or a resumable retry gate.
+
+        Seen on job_84e41f0738fc: the edit leg asked about a VO overrun and exited without a
+        checkpoint. _sync then left status=running / gate=null / \"stage assets completed; next:
+        edit\" — Dify cannot /respond and shows \"Agent Door sent no reply\". Cap via
+        CLAUDE_EDIT_COMPOSE_MAX (default 3); never leave a dead running poll state or discard
+        paid media.
+        """
+        job_id = state["job_id"]
+        pipeline = _pipeline_of(state)
+        try:
+            self._run_agent(self._assets_approved_prompt(job_id, pipeline), job_id, "edit")
+        except Exception as exc:  # timeout/auth/provider failure remains safely resumable
+            return self._final_retry_gate(state, f"initial edit/compose leg failed: {exc}")
+        max_extra = int(os.environ.get("CLAUDE_EDIT_COMPOSE_MAX", "3"))
+        state = self._sync(state)
+        n = 0
+        while self._stuck_before_final_gate(state) and n < max_extra:
+            n += 1
+            try:
+                self._run_agent(
+                    self._edit_compose_continue_prompt(job_id, pipeline),
+                    job_id, f"edit_continue_{n}")
+            except Exception as exc:
+                return self._final_retry_gate(
+                    state, f"edit/compose continuation {n} failed: {exc}")
+            state = self._sync(state)
+        if self._stuck_before_final_gate(state):
+            return self._final_retry_gate(
+                state,
+                "agent stopped on an ungated edit/compose stage after "
+                f"{max_extra} continuation attempt(s)",
+            )
+        return state
+
     def _stills_after_hero_continue_prompt(self, job_id: str,
                                            state: Optional[dict[str, Any]] = None) -> str:
         pipe = _pipeline_of(state or {})
@@ -1563,9 +1815,12 @@ class ClaudeCodeRunner(Runner):
             "stopped without writing partial_progress.phase=\"stills\". Do NOT reopen or revise "
             "the hero gate. Do NOT ask the human a question — decide and proceed."
             f"{carousel} KEEP the approved hero PNG. Generate any remaining scene stills under "
-            "LOOK LOCK, record them in asset_manifest, rewrite the assets checkpoint "
+            "LOOK LOCK: import the hero style once, preflight all remaining take-1 stills, "
+            "enforce the complete-batch budget, then submit with max 4 Higgsfield jobs in flight "
+            "(2 after a 429), poll the set together, and run take 2 only for unusable take-1 "
+            "results. Record them in asset_manifest, rewrite the assets checkpoint "
             "status='awaiting_human' with top-level partial_progress={{\"phase\":\"stills\"}}, "
-            "and STOP. That is the only valid next pause."
+            f"and STOP. {_pair_scale_lock_line()} That is the only valid next pause."
         )
 
     def _assets_in_progress_prompt(self, job_id: str,
@@ -1574,14 +1829,20 @@ class ClaudeCodeRunner(Runner):
             f"For project_id: {job_id}, the `assets` stage is IN PROGRESS (not awaiting stills). "
             "Read checkpoint_assets.json — especially metadata.partial_progress (motion job ids, "
             "narration/music markers). Do NOT regenerate stills or reopen the stills gate. "
-            "Poll every queued Higgsfield image_to_video job until complete, download clips into "
-            "assets/video/, finish any remaining narration/music, record everything in "
-            "asset_manifest, then rewrite the assets checkpoint status='awaiting_human' WITHOUT "
-            "partial_progress.phase='stills' (and without motion_and_audio_in_flight) so the "
-            "launcher surfaces approve_assets (full media). If jobs are still rendering, update "
-            "the in_progress checkpoint with current job ids and STOP — the launcher will "
-            "re-invoke you. Do NOT use /loop or background timers that exit the turn early.\n\n"
-            + _voice_line(options or {})
+            "TTS-FIRST: finish every missing ElevenLabs VO + audio_probe, then run the full-scene "
+            "allocate_scene_durations timeline allocation before queueing remaining image_to_video. "
+            "Preserve the requested total within ±5% with unequal audio-driven scene lengths and "
+            "persist metadata.timeline_contract. Follow the AUDIO LIPSYNC line below for "
+            "customer/panda clips (seedance_2_0 + audio_references when on). Poll every queued "
+            "Higgsfield job until complete, download clips into assets/video/, finish any remaining "
+            f"music, record everything in asset_manifest. {_pair_scale_lock_line()} Then rewrite the assets checkpoint "
+            "status='awaiting_human' WITHOUT partial_progress.phase='stills' (and without "
+            "motion_and_audio_in_flight) so the launcher surfaces approve_assets (full media). If "
+            "jobs are still rendering, update the in_progress checkpoint with current job ids and "
+            "STOP — the launcher will re-invoke you. Do NOT use /loop or background timers that "
+            "exit the turn early.\n\n"
+            + _voice_line(options or {}) + "\n" + _audio_lipsync_line(options)
+            + _lip_sync_qa_line(options)
         )
 
     def _sync(self, state: dict[str, Any]) -> dict[str, Any]:
@@ -1619,8 +1880,11 @@ class ClaudeCodeRunner(Runner):
             else:
                 gate = _STAGE_GATE.get(stage, f"approve_{stage}")
             _apply_previews(job_id, arts, gate)
+            fallback_question = _question_for_gate(
+                gate, stage=stage, artifacts=arts)
             state.update(status="awaiting_human", stage=stage, gate=gate,
-                         question=_question_for_gate(gate, stage=stage), artifacts=arts)
+                         question=_safe_checkpoint_question(
+                             latest, fallback_question), artifacts=arts)
         elif status == "in_progress" or status not in ("completed",):
             # Mid-generation (or unknown) — keep running. NEVER treat as completed stills-only
             # recovery (that reopened approve_stills while Kling jobs were still rendering).
@@ -1647,8 +1911,11 @@ class ClaudeCodeRunner(Runner):
                 if gate == "approve_stills":
                     self._backfill_assets_phase(job_id, latest, "stills", pp)
                 _apply_previews(job_id, arts, gate)
+                fallback_question = _question_for_gate(
+                    gate, stage="assets", artifacts=arts)
                 state.update(status="awaiting_human", stage="assets", gate=gate,
-                             question=_question_for_gate(gate, stage="assets"), artifacts=arts)
+                             question=_safe_checkpoint_question(
+                                 latest, fallback_question), artifacts=arts)
                 return state
             nxt = cp.get_next_stage(self._projects_dir, job_id, _pipeline_of(state))
             _apply_previews(job_id, arts, None)
@@ -1917,6 +2184,8 @@ class ClaudeCodeRunner(Runner):
                 "and log a render_runtime_selection decision.")
 
         voice_line = _voice_line(options)
+        scale_line = _pair_scale_lock_line()
+        lipsync_line = _audio_lipsync_line(options)
         lang_note = _language_lock_note(options, coerced=language_coerced)
 
         if music is False or str(music).lower() in ("false", "none", "no", "off"):
@@ -1941,7 +2210,8 @@ class ClaudeCodeRunner(Runner):
             "scene; take 2 = i2i of take 1; then STOP and gate. Full rules: "
             "skills/meta/higgsfield-mcp-bridge.md (CHARACTER LOCK, STILLS 2-TAKE HARD RULE, "
             "2D MEDIUM LOCK).\n"
-            f"{voice_line}\n{lang_note}{music_line}\n{runtime_line}\n{budget_line}\n\n"
+            f"{scale_line}\n{voice_line}\n{lipsync_line}{lang_note}{music_line}\n"
+            f"{runtime_line}\n{budget_line}\n\n"
             "Follow pipeline_defs/panda-video.yaml (it names each stage's director skill) "
             "and skills/meta/checkpoint-protocol.md. Execute stages in "
             "order. At every stage whose manifest sets human_approval_default: true, write the "
@@ -1950,7 +2220,8 @@ class ClaudeCodeRunner(Runner):
             "PIPELINE SHAPE: the `scene_plan` stage produces ONLY a structured TEXT plan — NO "
             "media, NO generation tools. The `assets` stage then runs in human-reviewed phases "
             "(cost gates):\n"
-            + self._assets_phases_text(motion_sample, hero_still=hero_still) +
+            + self._assets_phases_text(motion_sample, hero_still=hero_still,
+                                       audio_lipsync=_audio_lipsync_enabled(options)) +
             "Finally compose the approved assets with the `panda_render` tool. Stop at the first gate."
         )
 
@@ -1987,7 +2258,10 @@ class ClaudeCodeRunner(Runner):
                 "top-level partial_progress={\"phase\":\"hero_still\",\"hero_scene_id\":\"…\","
                 "\"look_notes\":[]} and STOP. Do NOT generate other stills yet.\n"
                 "  - assets PHASE 1 (stills): after hero is approved, KEEP the hero PNG; generate "
-                "REMAINING stills under LOOK LOCK (hero as style ref + look_notes). Write "
+                "REMAINING stills under LOOK LOCK (import hero as style ref once + look_notes). "
+                "Preflight all remaining take-1 stills and enforce the complete-batch budget, "
+                "then submit with max 4 Higgsfield jobs in flight (2 after a 429), poll the set "
+                "together, then run take 2 only for unusable take-1 results. Write "
                 "asset_manifest with credits. Checkpoint status='awaiting_human' AND top-level "
                 "partial_progress={\"phase\":\"stills\"} and STOP.\n"
             )
@@ -1998,7 +2272,9 @@ class ClaudeCodeRunner(Runner):
         else:
             assets_shape = (
                 "  - assets: generate ONLY stills via Higgsfield generate_image at that aspect ratio "
-                "(max 2 paid calls per slide; take 2 = i2i). Bake primary-language copy into each "
+                "(max 2 paid calls per slide). Preflight all take-1 stills and enforce the "
+                "complete-batch budget, then submit with max 4 jobs in flight (2 after a 429), "
+                "poll together, then take 2 = i2i only for unusable take 1. Bake primary-language copy into each "
                 "still. Write asset_manifest (images only) with per-still credits and Element IDs. "
                 "Checkpoint status='awaiting_human' AND "
                 "partial_progress={\"phase\":\"stills\"} and STOP.\n"
@@ -2079,12 +2355,15 @@ class ClaudeCodeRunner(Runner):
             "Stop at the first human_approval gate."
         )
 
-    def _assets_phases_text(self, motion_sample: bool, *, hero_still: bool = True) -> str:
+    def _assets_phases_text(self, motion_sample: bool, *, hero_still: bool = True,
+                            audio_lipsync: bool = True) -> str:
+        scale_lock = _pair_scale_lock_line()
         if hero_still:
             hero = (
                 "  PHASE 0 (hero still look-lock): generate ONLY ONE hero still "
                 "(scene with hero_moment, else scene 1) via the Higgsfield MCP bridge. "
-                "CHARACTER LOCK + 2D MEDIUM + STILLS 2-TAKE on that one still. Write the assets "
+                f"CHARACTER LOCK + 2D MEDIUM + STILLS 2-TAKE on that one still. {scale_lock} "
+                "Write the assets "
                 "checkpoint status='awaiting_human' AND top-level "
                 "partial_progress={\"phase\":\"hero_still\",\"hero_scene_id\":\"…\","
                 "\"look_notes\":[]} (NOT nested under asset_manifest.metadata) and STOP. "
@@ -2093,8 +2372,13 @@ class ClaudeCodeRunner(Runner):
             stills = (
                 "  PHASE 1 (stills): only after the hero is approved, KEEP the approved hero PNG. "
                 "Generate REMAINING scene stills under LOOK LOCK (media_import hero as style/look "
-                "reference — not a start-frame that copies composition; bake look_notes into every "
-                "prompt). Same CHARACTER LOCK + 2D MEDIUM + STILLS 2-TAKE per remaining scene. "
+                "reference ONCE — not a start-frame that copies composition; reuse that media id; "
+                f"bake look_notes into every prompt). {scale_lock} "
+                "Preflight all remaining take-1 stills and "
+                "enforce the complete-batch budget, then submit (max 4 Higgsfield jobs in flight; "
+                "reduce to 2 after a 429), poll the set together; do not serialize. Run take 2 "
+                "only for unusable take-1 results. Same CHARACTER LOCK + 2D MEDIUM + STILLS "
+                "2-TAKE per remaining scene. "
                 "Record all stills (incl. hero) in asset_manifest with credits. Write the assets "
                 "checkpoint status='awaiting_human' AND top-level "
                 "partial_progress={\"phase\":\"stills\"} and STOP. Do NOT generate any video yet. "
@@ -2106,28 +2390,65 @@ class ClaudeCodeRunner(Runner):
                 "  PHASE 1 (stills): generate ONLY the stills — one per scene — via the Higgsfield "
                 "MCP bridge (skills/meta/higgsfield-mcp-bridge.md). CHARACTER LOCK: attach "
                 "customer/panda Element IDs as media (never invent, never UUID-in-prompt). "
-                "2D MEDIUM LOCK: styles/panda.yaml flat illustration. STILLS 2-TAKE HARD RULE: "
-                "max 2 paid generate_image per scene; take 2 = i2i of take 1; then write the assets "
+                f"2D MEDIUM LOCK: styles/panda.yaml flat illustration. {scale_lock} "
+                "STILLS 2-TAKE HARD RULE: "
+                "preflight all take-1 stills and enforce the complete-batch budget, then submit "
+                "(max 4 Higgsfield jobs in flight; 2 after a 429), poll the set together, then "
+                "take 2 = i2i only for unusable take 1; max 2 paid generate_image per scene. "
+                "Then write the assets "
                 "checkpoint with status='awaiting_human' AND partial_progress={\"phase\":\"stills\"} "
                 "and STOP. Do NOT generate any video yet.\n")
+        if audio_lipsync:
+            motion_how = (
+                "For customer/panda speaking clips: seedance_2_0 with start_image + "
+                "audio_references=VO, generate_audio:false, lip-sync mouth to audio (no mouth "
+                "HOLD). Narrator/text_card: HOLD or static. Fallback HOLD on failure."
+            )
+            hold_note = "AUDIO LIPSYNC path (see AUDIO LIPSYNC line)"
+            qa_how = (
+                "Then run mandatory lipsync_qa with the exact VO, allow only one local timing "
+                "correction or one paid failed-scene regeneration, retain both takes, and persist "
+                "unresolved warnings; never attempt a third take. "
+            )
+        else:
+            motion_how = (
+                "image_to_video with HOLD LOCK (mouth frozen); duration from measured VO."
+            )
+            hold_note = "HOLD LOCK 2D + locked Elements"
+            qa_how = ""
         if motion_sample:
             return hero + stills + (
-                "  PHASE 2 (motion sample): only after the stills are approved, animate ONE "
-                "representative HERO still into a SINGLE sample clip (image_to_video) so the "
-                "motion/animation can be approved before the full batch. Hold the 2D still and "
-                "locked characters — do not invent a new person or make the clip 3D. Write the "
-                "assets checkpoint status='awaiting_human' AND partial_progress={\"phase\":"
-                "\"motion_sample\"} and STOP — no other clips, no audio yet.\n"
-                "  PHASE 3 (media): only after the motion sample is approved, animate the "
-                "REMAINING stills using the SAME motion approach (hold 2D + locked Elements) + "
-                "generate narration/music (ElevenLabs), record everything (incl. the sample) in "
-                "asset_manifest with per-asset Higgsfield credits, then write the assets "
-                "checkpoint status='awaiting_human' (no phase marker) and STOP.\n")
+                "  PHASE 2 (motion sample): only after the stills are approved, for the HERO "
+                "scene: if it is narrated, TTS-FIRST (ElevenLabs per section + audio_probe) then "
+                "snap i2v duration via lib/i2v_duration.snap_i2v_duration (models_explore allowed "
+                f"list), THEN animate that ONE still ({motion_how}) so the motion/animation can be "
+                "approved before the full batch. "
+                f"{hold_note}. Write the assets checkpoint status='awaiting_human' AND "
+                "partial_progress={\"phase\":\"motion_sample\"} and STOP — no other clips yet "
+                "(sample-scene VO may already exist).\n"
+                "  PHASE 3 (media): only after the motion sample is approved, TTS-FIRST for all "
+                "remaining speaking sections, probe ALL VO, then call "
+                "lib/i2v_duration.allocate_scene_durations once for the full timeline "
+                "(requested total ±5%; unequal scene lengths; approved sample duration fixed), "
+                "THEN animate the "
+                f"REMAINING stills ({motion_how}). Preflight all pending clips and enforce the "
+                "complete-batch budget, then submit as waves (max 4 jobs in flight; 2 after a 429), "
+                "checkpoint scene_id→job_id immediately, poll the set together, and start music "
+                "(ElevenLabs) while i2v jobs are in flight. Record everything "
+                "(incl. the sample) in asset_manifest with per-asset Higgsfield credits "
+                f"and metadata.timeline_contract (keep vo_duration_map for compatibility). {qa_how}Then write the assets checkpoint "
+                "status='awaiting_human' (no phase marker) and STOP.\n")
         return hero + stills + (
-            "  PHASE 2 (media): only after the stills are approved, animate the approved stills "
-            "into motion clips (image_to_video; hold 2D + locked Elements) + generate "
-            "narration/music (ElevenLabs), record everything in asset_manifest, then write the "
-            "assets checkpoint status='awaiting_human' (no 'stills' phase marker) and STOP.\n")
+            "  PHASE 3 (media): only after the stills are approved, TTS-FIRST (ElevenLabs per "
+            "speaking section + audio_probe for ALL VO), then call "
+            "lib/i2v_duration.allocate_scene_durations once for the full timeline (requested "
+            "total ±5%; unequal audio-driven scene lengths), THEN animate approved stills "
+            f"({motion_how}; duration from the allocation). Preflight all pending clips and enforce "
+            "the complete-batch budget, then submit as waves (max 4 jobs in flight; 2 after "
+            "a 429), checkpoint scene_id→job_id immediately, poll the set together, and start "
+            "music while i2v is in flight. Record everything in "
+            f"asset_manifest (incl. metadata.timeline_contract; keep vo_duration_map for compatibility). {qa_how}Then write the assets checkpoint "
+            "status='awaiting_human' (no 'stills' phase marker) and STOP.\n")
 
     def _hero_approved_prompt(self, job_id: str, state: Optional[dict[str, Any]] = None) -> str:
         look_notes = list((state or {}).get("look_notes") or [])
@@ -2149,13 +2470,17 @@ class ClaudeCodeRunner(Runner):
             "reference (confirm the live media role with models_explore — do NOT pass it as a "
             "start-frame that copies composition onto every scene). Match palette, character "
             "rendering, lighting, medium, and wardrobe from the hero; use each remaining scene's "
-            "action/framing from scene_plan; bake look_notes into every remaining prompt. Same "
-            "CHARACTER LOCK + 2D MEDIUM + STILLS 2-TAKE per remaining scene. Record all stills "
+            "action/framing from scene_plan; bake look_notes into every remaining prompt. Reuse "
+            "the one imported hero style id; preflight all remaining take-1 stills and enforce "
+            "the complete-batch budget, then submit (max 4 Higgsfield jobs in flight; reduce to "
+            "2 after a 429), poll together; do not serialize. Take 2 only for unusable take-1 "
+            "results. Same CHARACTER LOCK + 2D MEDIUM + STILLS 2-TAKE per remaining scene. Record all stills "
             "(incl. the approved hero) in asset_manifest with credits. Then rewrite the assets "
             "checkpoint with status='awaiting_human' AND top-level "
             "partial_progress={\"phase\":\"stills\"} (NOT nested under asset_manifest.metadata) "
             "and STOP for full storyboard approval. Do NOT mark assets completed yet. "
-            "Do NOT leave phase=hero_still — that would wrongly re-open the hero gate."
+            f"Do NOT leave phase=hero_still — that would wrongly re-open the hero gate. "
+            f"{_pair_scale_lock_line()}"
         )
 
     def _continue_prompt(self, job_id: str, pipeline: Optional[str] = None) -> str:
@@ -2173,15 +2498,82 @@ class ClaudeCodeRunner(Runner):
             f"(status='awaiting_human', end your turn). If the pipeline is complete, finish.{extra}"
         )
 
+    def _assets_approved_prompt(self, job_id: str, pipeline: Optional[str] = None) -> str:
+        """Prompt after GATE 4 (approve_assets): run ungated edit then compose → approve_final."""
+        p = pipeline or _DEFAULT_PIPELINE
+        return (
+            f"For project_id: {job_id}, the FULL MEDIA phase of the `assets` stage "
+            f"(GATE 4 / approve_assets) is APPROVED on the `{p}` pipeline. "
+            "Do NOT stop to ask the human a question. Do NOT invent a gate. "
+            "`edit` is ungated (human_approval_default:false) — the next human pause is "
+            "compose's approve_final only.\n\n"
+            "1. Read skills/pipelines/panda-video/edit-director.md and "
+            "skills/meta/checkpoint-protocol.md. Build edit_decisions from scene_plan + "
+            "asset_manifest (cut points, caption bands, render_runtime carried UNCHANGED). "
+            "Mute/discard the native AAC track baked into Higgsfield/Kling i2v clips before "
+            "mixing narration+music. Pre-conform off-spec 1076x1928 clips to 1080x1920 via "
+            "an all-top crop (not a centred cover-crop).\n"
+            "2. Use asset_manifest.metadata.timeline_contract as the effective timeline. Scene "
+            "lengths may be unequal, but the final must remain within ±5% of the requested total. "
+            "Record each cut's source_duration_seconds, effective_duration_seconds, and bounded "
+            "post-speech tail_hold_seconds. Reject pacing_revision_required unless the human "
+            "explicitly approved a logged duration exception. Do NOT shorten locked copy, retime "
+            "lip-synced motion, or let a hold cover active speech.\n"
+            "3. Read asset_manifest.metadata.lip_sync_qa. Apply only offsets whose local re-check "
+            "passed: derive the signed delta from attempt-1 expected offset and recompute affected "
+            "VO start_seconds from effective_scene_start + immutable original scene-local offset. "
+            "Never shift picture and VO independently or apply unresolved offsets.\n"
+            "4. Write the edit checkpoint status='completed' (ungated), then immediately "
+            "run compose per skills/pipelines/panda-video/compose-director.md "
+            "(panda_render for ffmpeg / render_runtime already locked). Verify final.mp4, "
+            "write render_report + final_review. Carry unresolved lip-sync scene ids into "
+            "final_review.checks.lip_sync_check and set both its and final_review's top-level "
+            "recommended_action='present_to_user'; do not retry again or block. Checkpoint "
+            "compose status='awaiting_human' for "
+            "approve_final, and END YOUR TURN.\n"
+            "Stdout questions are invisible to Dify — ending without an awaiting_human "
+            "checkpoint leaves the job stuck."
+        )
+
+    def _edit_compose_continue_prompt(self, job_id: str,
+                                      pipeline: Optional[str] = None) -> str:
+        """Re-nudge after a continue leg that asked/exited without reaching approve_final."""
+        p = pipeline or _DEFAULT_PIPELINE
+        return (
+            f"For project_id: {job_id} (`{p}`), clip/media approval ALREADY happened. You "
+            "previously stopped without reaching compose's approve_final gate. Do NOT ask "
+            "the human a question — decide and proceed. "
+            "If edit_decisions is missing, write it now from metadata.timeline_contract "
+            "(unequal audio-driven scene lengths; requested total ±5%; bounded post-speech holds; "
+            "apply only locally validated lip-sync offsets from immutable scene-local timestamps; "
+            "mute native clip audio; all-top crop). Then compose "
+            "to final.mp4, carry unresolved lip-sync scene warnings into final_review with "
+            "recommended_action='present_to_user', and checkpoint compose status='awaiting_human'. "
+            "Do NOT retry lip-sync again and do NOT leave status running with no gate."
+        )
+
     def _stills_approved_prompt(self, job_id: str,
                                 options: Optional[dict[str, Any]] = None) -> str:
         return (
             f"For project_id: {job_id}, the STILLS phase of the `assets` stage is APPROVED. Do NOT "
-            "mark the assets stage completed yet. Animate the approved stills into motion clips "
-            "(image_to_video via the Higgsfield MCP bridge) and generate narration/music "
-            "(ElevenLabs), record every file in asset_manifest, then rewrite the assets checkpoint "
-            "with status='awaiting_human' (WITHOUT the 'stills' phase marker) and STOP for the "
-            "full media approval.\n\n" + _voice_line(options or {})
+            "mark the assets stage completed yet. TTS-FIRST for every speaking script section "
+            "(ElevenLabs + VOICE CAST), probe ALL durations (audio_probe), then call "
+            "lib/i2v_duration.allocate_scene_durations once for the full timeline using the "
+            "requested total, tolerance_fraction=0.05, scene-plan weights, scene-local audio "
+            "bounds, and models_explore allowed durations. THEN animate the approved stills with "
+            "each allocated i2v_duration per the AUDIO LIPSYNC line below "
+            "(seedance_2_0 + audio_references for customer/panda when on; else HOLD LOCK). "
+            "Preflight all pending clips and enforce the complete-batch budget before any submit; "
+            "submit max 4 Higgsfield jobs in flight (2 after a 429), checkpoint every "
+            "scene_id→job_id immediately, and poll the set together instead of serializing. "
+            "Start music while i2v jobs are in flight. Record every file in asset_manifest including "
+            "metadata.timeline_contract and legacy vo_duration_map (plus audio_lipsync on eligible "
+            "clips), then rewrite the "
+            "assets checkpoint with status='awaiting_human' (WITHOUT the 'stills' phase marker) "
+            "and STOP for the full media approval.\n\n"
+            + _pair_scale_lock_line() + "\n"
+            + _voice_line(options or {}) + "\n" + _audio_lipsync_line(options)
+            + _lip_sync_qa_line(options)
         )
 
     def _budget_raised_prompt(self, job_id: str, new_cap: Any) -> str:
@@ -2194,28 +2586,41 @@ class ClaudeCodeRunner(Runner):
             "If it STILL exceeds the cap, do NOT generate — write the budget_hold checkpoint again."
         )
 
-    def _motion_sample_prompt(self, job_id: str) -> str:
+    def _motion_sample_prompt(self, job_id: str,
+                              options: Optional[dict[str, Any]] = None) -> str:
         return (
             f"For project_id: {job_id}, the STILLS phase of the `assets` stage is APPROVED. Do NOT "
-            "mark the assets stage completed yet, and do NOT batch-generate all clips. Animate ONE "
-            "representative HERO still (the most important scene, else scene 1) into a single MOTION "
-            "SAMPLE clip (image_to_video via the Higgsfield MCP bridge) so the reviewer can approve "
-            "the motion/animation feel before committing to the full batch. Record the sample's "
-            "Higgsfield credits on that asset (credits + credits_source='actual'). Then rewrite the "
-            "assets checkpoint with status='awaiting_human' AND partial_progress={\"phase\":"
-            "\"motion_sample\"} and STOP. Generate NO other clips and NO audio yet."
+            "mark the assets stage completed yet, and do NOT batch-generate all clips. For the "
+            "HERO scene: if narrated, TTS-FIRST (ElevenLabs + audio_probe + snap_i2v_duration), "
+            "THEN animate that ONE still into a single MOTION SAMPLE clip per the AUDIO LIPSYNC "
+            "line below (snapped duration). Record the sample's Higgsfield credits on that asset "
+            "(credits + credits_source='actual'). Then rewrite the assets checkpoint with "
+            "status='awaiting_human' AND partial_progress={\"phase\":\"motion_sample\"} and STOP. "
+            "Generate NO other clips yet (sample-scene VO may remain on disk for PHASE 3).\n\n"
+            + _pair_scale_lock_line() + "\n" + _audio_lipsync_line(options)
         )
 
     def _motion_approved_prompt(self, job_id: str,
                                 options: Optional[dict[str, Any]] = None) -> str:
         return (
             f"For project_id: {job_id}, the MOTION SAMPLE is APPROVED. Do NOT mark the assets stage "
-            "completed yet. Animate the REMAINING approved stills into motion clips using the SAME "
-            "motion approach (model + motion params) as the approved sample, then generate "
-            "narration/music (ElevenLabs). Record every file (incl. the already-approved sample) in "
-            "asset_manifest with per-asset Higgsfield credits, then rewrite the assets checkpoint "
-            "with status='awaiting_human' (WITHOUT any phase marker) and STOP for the full media "
-            "approval.\n\n" + _voice_line(options or {})
+            "completed yet. TTS-FIRST for remaining speaking sections (reuse sample-scene VO), "
+            "probe ALL VO, then call allocate_scene_durations once for the full requested timeline "
+            "(±5%; unequal scene lengths; fixed_i2v_duration for the approved sample), THEN animate "
+            "the REMAINING approved stills with their allocated durations per "
+            "the AUDIO LIPSYNC line below (reuse the approved sample's approach when it matches; "
+            "lipsync shots stay on seedance_2_0 + audio_references). Preflight all pending clips "
+            "and enforce the complete-batch budget before any submit; submit max 4 Higgsfield "
+            "jobs in flight (2 after a 429), checkpoint every scene_id→job_id immediately, and "
+            "poll the set together instead of serializing; start music while i2v is in flight. "
+            "Record every file (incl. the already-approved sample) in asset_manifest with "
+            "per-asset Higgsfield credits, metadata.timeline_contract, and legacy vo_duration_map, "
+            "then rewrite the assets "
+            "checkpoint with status='awaiting_human' (WITHOUT any phase marker) and STOP for the "
+            "full media approval.\n\n"
+            + _pair_scale_lock_line() + "\n"
+            + _voice_line(options or {}) + "\n" + _audio_lipsync_line(options)
+            + _lip_sync_qa_line(options)
         )
 
     def _revise_prompt(self, job_id: str, stage: Optional[str], response: dict[str, Any],
@@ -2294,6 +2699,8 @@ class ClaudeCodeRunner(Runner):
                 "partial_progress={\"phase\":\"stills\"} (not nested under metadata) and STOP. "
                 "Do NOT generate video."
             )
+        if is_hero or is_stills:
+            extra += " " + _pair_scale_lock_line()
         return (
             f"Revise stage '{stage}' for project_id: {job_id} per this feedback: {note}.{shot_txt}"
             f"{extra} "

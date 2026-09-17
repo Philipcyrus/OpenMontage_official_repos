@@ -22,6 +22,10 @@
     "checkpoint_policy": { "type": "string", "enum": ["guided", "manual_all", "auto_noncreative"] },
     "human_approval_required": { "type": "boolean" },
     "human_approved": { "type": "boolean" },
+    "question": {
+      "type": "string",
+      "description": "Optional human-facing prompt for an awaiting_human checkpoint."
+    },
     "artifacts": {
       "type": "object",
       "description": "Map of artifact name to artifact data or file path",

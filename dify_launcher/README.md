@@ -100,6 +100,9 @@ DIFY_RUNNER=mock uvicorn dify_launcher.app:app --host 0.0.0.0 --port 8600
   lane (`panda_render`) needs no Node; `remotion`/`hyperframes` need **Node ≥ 22** on the box.
 - `motion_sample` — `false` (default) | `true`. When on, adds the `approve_motion_sample` gate
   (one hero clip approved before the full batch). Default is off; pass `true` to opt in.
+- `audio_lipsync` — `true` (default) | `false`. Video only. On by default: Seedance
+  `audio_references` so on-screen customer/panda mouths follow the ElevenLabs VO
+  (`generate_audio:false`; compose still lays that VO). Pass `false` for HOLD + duration-only.
 - `max_higgsfield_credits` — integer credit ceiling (unset = no cap). Before any Higgsfield
   generation, if cumulative spend would exceed it the agent blocks and pauses at `budget_exceeded`
   (raise the cap / revise / cancel). Hard pre-generation block — never overspends silently.

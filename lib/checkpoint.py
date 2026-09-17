@@ -124,17 +124,36 @@ def _validate_artifacts_for_stage(
     stage: str,
     status: str,
     artifacts: dict[str, Any],
+    partial_progress: Optional[dict] = None,
 ) -> None:
     # Valid stages come from the pipeline manifest (get_pipeline_stages), which
     # can declare stages beyond the 9 canonical ones (e.g. character-animation's
     # `character_design`/`rig_plan`, screen-demo's `real_capture`). Those have no
     # canonical artifact, so look it up defensively — a missing entry means the
     # stage simply has no required artifact, not a crash.
+    #
+    # Stages that sub-gate on `partial_progress.phase` (assets: hero_still,
+    # stills, motion_sample, budget_hold; compose: analogous draft pauses) are
+    # documented (schemas/checkpoints/checkpoint.schema.json) to resolve the
+    # within-stage gate from that phase marker alone — the canonical artifact
+    # (e.g. asset_manifest) only lands at the final phase-less sub-gate
+    # (approve_assets). An awaiting_human checkpoint carrying a phase marker
+    # for one of these stages is therefore exempt from the canonical-artifact
+    # requirement; see skills/pipelines/panda-video/asset-director.md.
+    phase_gated_stages = {"assets", "compose"}
+    has_phase_marker = bool(
+        isinstance(partial_progress, dict) and partial_progress.get("phase")
+    )
     required_artifact = CANONICAL_STAGE_ARTIFACTS.get(stage)
     if (
         required_artifact is not None
         and status in {"completed", "awaiting_human"}
         and required_artifact not in artifacts
+        and not (
+            status == "awaiting_human"
+            and stage in phase_gated_stages
+            and has_phase_marker
+        )
     ):
         raise CheckpointValidationError(
             f"Stage {stage!r} with status {status!r} must include "
@@ -182,7 +201,9 @@ def validate_checkpoint(checkpoint: dict[str, Any]) -> None:
     if not isinstance(artifacts, dict):
         raise CheckpointValidationError("Checkpoint artifacts must be a dictionary")
 
-    _validate_artifacts_for_stage(stage, status, artifacts)
+    _validate_artifacts_for_stage(
+        stage, status, artifacts, checkpoint.get("partial_progress")
+    )
 
     try:
         jsonschema.validate(instance=checkpoint, schema=_load_checkpoint_schema())
@@ -430,6 +451,7 @@ def write_checkpoint(
     checkpoint_policy: str = "guided",
     human_approval_required: bool = False,
     human_approved: bool = False,
+    question: Optional[str] = None,
     review: Optional[dict] = None,
     cost_snapshot: Optional[dict] = None,
     error: Optional[str] = None,
@@ -515,6 +537,8 @@ def write_checkpoint(
     }
     if style_playbook is not None:
         checkpoint["style_playbook"] = style_playbook
+    if question is not None:
+        checkpoint["question"] = question
     if review is not None:
         checkpoint["review"] = review
     if cost_snapshot is not None:

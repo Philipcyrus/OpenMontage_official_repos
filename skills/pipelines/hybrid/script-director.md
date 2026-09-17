@@ -45,6 +45,19 @@ Recommended metadata keys:
 - `narration_sections`
 - `required_support_assets`
 
+### 4b. Brand speaker casting (Panda / VOICE CAST)
+
+When the leg prompt includes a **VOICE CAST** map (panda-video), each script section SHOULD set
+`speaker` to one of `customer` | `panda` | `narrator`:
+
+- Match dialogue to the on-screen character when they speak (customer asks, panda answers).
+- Use `narrator` for off-screen VO / CTA beds.
+- Omit `speaker` only when the whole job uses the job default (`options.narrator`).
+- **Multi-voice shots:** put multiple sections whose time windows fall inside one visual shot
+  (up to all three brand speakers). Prefer sequential timing; overlapping windows are allowed
+  and will mix at compose.
+- One language per job — do not mix EN and ZH lines.
+
 ### 5. Quality Gate
 
 - source-led beats are clearly marked,

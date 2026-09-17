@@ -40,9 +40,19 @@ server has `DIFY_TOKEN` set — omit it in the default open mode.
 ### `GET /health`
 Liveness + mode.
 ```json
-{"status":"ok","runner":"claude","async":true,"montage_door":true}
+{"status":"ok","runner":"claude","async":true,"montage_door":true,
+ "process_started_at":"2026-09-16T21:00:00+00:00",
+ "build_revision":"b693aa196d25b66851c58d8a1106c1736e584f0f",
+ "launcher_code_fingerprint":"4f2c91b3a708fcde"}
 ```
 `runner:"claude"` = real AI. `runner:"mock"` = placeholder mode (no AI, for wiring tests). `async:true` = poll model (see §4). `montage_door:true` = the direct render door (§15) is mounted.
+
+The deployment fields prove which code the running process actually loaded:
+- `process_started_at` must move forward after a launcher restart.
+- `build_revision` is `OPENMONTAGE_BUILD_REVISION` when supplied, otherwise the Git HEAD
+  observed at process start.
+- `launcher_code_fingerprint` hashes the loaded launcher source files. If files change without
+  a restart, `/health` continues reporting the old fingerprint. Treat that as a stale deployment.
 
 ### `POST /jobs` — start a job
 Body:
@@ -271,33 +281,39 @@ after the last content gate — a post-cut overlay, never in generation. `skip` 
 ### `options` (optional) — per-job control
 | key | values | meaning |
 |---|---|---|
-| `language` | `"en"` \| `"zh"` | narration language (video) / primary on-slide language (carousel). **Mandarin briefs with `language:"en"` (or omitted) are coerced to `zh` by the launcher** so VOICE LOCK matches the brief — the agent must not stop to re-ask. Explicit `voice_id` skips coerce. |
-| `narrator` | `"panda"` \| `"customer"` \| `"narrator"` | who speaks (video). `panda` = the mascot, `customer` = the human, `narrator` = the off-screen background voice-over. Note the overlap: the option is named `narrator` and its *value* names the speaker, so a voice-over job is `"narrator": "narrator"` |
-| `voice_id` | ElevenLabs voice id (string) | **explicit override** — use this exact voice, ignore the default |
+| `language` | `"en"` \| `"zh"` | narration language (video) / primary on-slide language (carousel). **Mandarin briefs with `language:"en"` (or omitted) are coerced to `zh` by the launcher** so VOICE CAST matches the brief — the agent must not stop to re-ask. Explicit `voice_id` skips coerce. |
+| `narrator` | `"panda"` \| `"customer"` \| `"narrator"` | **default** speaker for script sections that omit `speaker` (video). `panda` = the mascot, `customer` = the human, `narrator` = the off-screen background voice-over. Note the overlap: the option is named `narrator` and its *value* names the speaker, so a voice-over default is `"narrator": "narrator"` |
+| `voice_id` | ElevenLabs voice id (string) | **explicit override** — force this one voice for every line (ignores brand cast) |
 | `music` | mood string, or `false` | background music via ElevenLabs (`"upbeat, light"`), or `false` to skip |
 | `render_runtime` | `"auto"` \| `"ffmpeg"` \| `"remotion"` \| `"hyperframes"` | which render engine composes the video. Default `"auto"` |
 | `motion_sample` | `false` (default) \| `true` | insert the `approve_motion_sample` gate (video only; default off) |
+| `audio_lipsync` | `true` (default) \| `false` | video only — Seedance `audio_references` so on-screen customer/panda mouths follow ElevenLabs VO (`generate_audio:false`; compose still lays the same VO). Pass `false` for HOLD + duration-only |
 | `hero_still` | `true` (default) \| `false` | insert `approve_hero_still` look-lock (video + carousel; default on). Never for panda-image |
 | `max_higgsfield_credits` | integer, or unset | **hard credit ceiling** for the run |
 | `aspect_ratio` | string | stills canvas, passed through to `generate_image`. Carousel default `"4:5"`; **panda-image** default `"1:1"`. Also `9:16`, `WIDTHxHEIGHT`, … |
 | `gates` | e.g. `["scene_plan", "stills"]` | carousel only — omit `script` to auto-approve GATE 1 |
 
-If `voice_id` is omitted, the engine picks the brand voice from config by `narrator`+`language` —
-`config/panda-elements.json` → `voices[narrator][language]`. All six combinations are populated
-(`panda` / `customer` / `narrator` × `en` / `zh`), so there is no longer a null to fall through.
+If `voice_id` is omitted, the launcher builds a **VOICE CAST** map from
+`config/panda-elements.json` → `voices[speaker][language]` for all three brand speakers
+(`panda` / `customer` / `narrator`). All six combinations are populated, so there is no longer
+a null to fall through. Script sections set `speaker` to pick a cast id; untagged sections use
+`options.narrator`.
 
-**The launcher resolves it, not the agent.** The literal id is interpolated into every prompt whose
-leg can call ElevenLabs — the same way the Higgsfield Element ids are (CHARACTER LOCK) — so the
-agent never looks it up and never chooses. If a `narrator`+`language` pair resolves to **no** id,
-the job does **not** silently downgrade to a generic preset: it generates everything else and stops
-at the assets gate with the unconfigured pair named in `question`. Fix it by passing an explicit
-`voice_id`, or by populating that slot in `config/panda-elements.json`. The only permitted fallback
-is ElevenLabs itself being unavailable — an infrastructure failure, never a missing id.
+**The launcher resolves ids, not the agent.** The cast map (literal voice ids) is interpolated
+into every prompt whose leg can call ElevenLabs — the same way the Higgsfield Element ids are
+(CHARACTER LOCK) — so the agent never looks them up and never invents a voice. If any brand
+speaker is missing for the job `language`, the job does **not** silently downgrade to a generic
+preset: it generates everything else and stops at the assets gate with the unconfigured
+pair(s) named in `question`. Fix by passing an explicit `voice_id`, or by populating that slot
+in `config/panda-elements.json`. The only permitted fallback is ElevenLabs itself being
+unavailable — an infrastructure failure, never a missing id.
 
-> **One job carries one `narrator` and one `language`.** A script with two speakers, or with mixed
-> EN and ZH lines, cannot be expressed by these options alone — pass `voice_id` per run, or split
-> the job. Jobs have shipped with `language:"en", narrator:"panda"` over bilingual two-character
-> content; the voice that comes out is the option's, not the script's.
+> **One language per job; many speakers.** Mixed EN/ZH lines still cannot be expressed in one
+> job. Multi-speaker casting **is** supported: put `speaker` on each script section (and
+> matching narration `required_assets` on the scene plan). One shot may use up to all three
+> brand voices as timed beats. Prefer sequential timing; overlapping windows mix at compose
+> via `panda_render` `audio.voice_tracks`. Brief example: “scene 1 customer asks, panda
+> answers, narrator CTA — all in the same 4s shot.”
 
 **`render_runtime`** (upstream-style engine selection):
 - `"auto"` (default) — the engine picks per the decision matrix + what's installed on the box. For character-mascot ads this resolves to `ffmpeg`.
@@ -412,7 +428,7 @@ Build a **chatflow** (mirrors the existing Mochi v6e pattern with conversation v
 | script | ~1–3 min |
 | scene_plan (text plan) | ~1–3 min |
 | stills (images only, before video) | ~2–6 min |
-| assets (clips + voice/music from approved stills) | ~5–15 min |
+| assets (TTS-first VO, then duration-driven clips + music from approved stills) | ~5–15 min |
 | compose (final) | seconds |
 
 Long `running` stretches are **normal** — that's why it's async.

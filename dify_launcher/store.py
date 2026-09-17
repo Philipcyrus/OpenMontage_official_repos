@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,7 @@ def ensure_job(job_id: str) -> Path:
 
 def save_state(state: dict[str, Any]) -> None:
     d = ensure_job(state["job_id"])
+    state["updated_at"] = datetime.now(timezone.utc).isoformat()
     (d / "state.json").write_text(
         json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8"
     )

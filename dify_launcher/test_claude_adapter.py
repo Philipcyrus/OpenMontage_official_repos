@@ -49,6 +49,51 @@ assert R._motion_sample_enabled({"options": {}}) is False
 assert R._motion_sample_enabled({"options": {"motion_sample": True}}) is True
 assert R._motion_sample_enabled({"options": {"motion_sample": "true"}}) is True
 assert R._motion_sample_enabled({"options": {"motion_sample": False}}) is False
+
+# audio_lipsync defaults ON; explicit false/off restores HOLD-only wording
+assert R._audio_lipsync_enabled({}) is True
+assert R._audio_lipsync_enabled(None) is True
+assert R._audio_lipsync_enabled({"audio_lipsync": True}) is True
+assert R._audio_lipsync_enabled({"audio_lipsync": None}) is True
+assert R._audio_lipsync_enabled({"audio_lipsync": ""}) is True
+assert R._audio_lipsync_enabled({"audio_lipsync": False}) is False
+assert R._audio_lipsync_enabled({"audio_lipsync": "false"}) is False
+assert R._audio_lipsync_enabled({"audio_lipsync": "off"}) is False
+assert "AUDIO LIPSYNC — ON" in R._audio_lipsync_line({})
+assert "audio_references" in R._audio_lipsync_line({})
+assert "generate_audio:false" in R._audio_lipsync_line({})
+assert "seedance_2_0" in R._audio_lipsync_line({})
+_off = R._audio_lipsync_line({"audio_lipsync": False})
+assert "AUDIO LIPSYNC — OFF" in _off
+assert "HOLD" in _off
+assert "Do NOT pass" in _off and "audio_references" in _off
+_sp_on = run._start_prompt("jLips", "a video about eSIM", {}, "panda-video")
+assert "AUDIO LIPSYNC — ON" in _sp_on and "audio_references" in _sp_on
+assert "PAIR SCALE LOCK" in _sp_on and "panda ear-top height=0.58" in _sp_on
+_sp_off = run._start_prompt(
+    "jLipsOff", "a video about eSIM", {"audio_lipsync": False}, "panda-video")
+assert "AUDIO LIPSYNC — OFF" in _sp_off
+assert "HOLD" in _sp_off
+_stills_on = run._stills_approved_prompt("jLips", {})
+assert "AUDIO LIPSYNC — ON" in _stills_on
+assert "lipsync_qa" in _stills_on
+assert "allocate_scene_durations" in _stills_on
+assert "tolerance_fraction=0.05" in _stills_on
+assert "timeline_contract" in _stills_on
+assert "only that scene once" in _stills_on
+assert "attempt 3" in _stills_on
+_stills_off = run._stills_approved_prompt("jLips", {"audio_lipsync": False})
+assert "AUDIO LIPSYNC — OFF" in _stills_off
+assert "lipsync_qa" not in _stills_off
+# Materialize true onto panda-video options when omitted
+_st = {"brief": "eSIM ad", "pipeline": "panda-video", "options": {}}
+R._apply_language_coerce(_st)
+assert _st["options"].get("audio_lipsync") is True
+_st_off = {"brief": "eSIM ad", "pipeline": "panda-video",
+           "options": {"audio_lipsync": False}}
+R._apply_language_coerce(_st_off)
+assert _st_off["options"].get("audio_lipsync") is False
+print("[ok] audio_lipsync default-on; blank/omit stay on; opt-out restores HOLD-only wording")
 assert R._hero_still_enabled({}) is True
 assert R._hero_still_enabled({"options": {}}) is True
 assert R._hero_still_enabled({"options": {"hero_still": False}}) is False
@@ -426,6 +471,70 @@ assert "HERO" in (st.get("question") or ""), st.get("question")
 assert "Approve assets" not in (st.get("question") or "")
 print("[ok] _sync hero_still: single PNG preview, not storyboard")
 
+# Agent-authored gate copy is additive: mandatory launcher wording is preserved.
+_fake_latest.cp = {
+    "stage": "assets",
+    "status": "awaiting_human",
+    "question": "\x00  Approve sc4 hero after reviewing the corrected thumb.  ",
+    "partial_progress": {"phase": "hero_still", "hero_scene_id": "scene-2"},
+    "artifacts": {},
+}
+st = run._sync({"job_id": JOBH})
+assert st["gate"] == "approve_hero_still"
+_q = st.get("question") or ""
+assert "Approve sc4 hero after reviewing the corrected thumb." in _q
+assert "HERO" in _q or "hero" in _q.lower()
+assert "request a revision" in _q.lower()
+assert st["artifacts"].get("stills") == ["hero_scene-2.png"]
+print("[ok] _sync accepts checkpoint question and preserves hero media")
+
+# Custom question must not drop unresolved lip-sync warnings at approve_assets.
+JOBLQ = "jLipSyncQuestion"
+projlq = run._projects_dir / JOBLQ
+(projlq / "assets" / "video").mkdir(parents=True, exist_ok=True)
+(projlq / "artifacts").mkdir(parents=True, exist_ok=True)
+(projlq / "assets" / "video" / "sc4.mp4").write_bytes(b"\x00")
+_fake_latest.cp = {
+    "stage": "assets",
+    "status": "awaiting_human",
+    "question": "Clips look energetic — please approve.",
+    "artifacts": {
+        "asset_manifest": {
+            "version": "1.0",
+            "assets": [],
+            "metadata": {
+                "lip_sync_qa": {
+                    "status": "warning",
+                    "reviewed_scene_count": 1,
+                    "failed_scene_count": 0,
+                    "retry_count": 0,
+                    "unresolved_warnings": ["sc4: soft articulation"],
+                    "scenes": {
+                        "sc4": {
+                            "eligible": True,
+                            "status": "pass",
+                            "attempts": [],
+                            "retry_count": 0,
+                            "selected_take": "original",
+                            "unresolved_warning": "soft articulation",
+                        }
+                    },
+                }
+            },
+        },
+        "clips": ["sc4.mp4"],
+    },
+    "pipeline_type": "panda-video",
+}
+st = run._sync({"job_id": JOBLQ, "pipeline": "panda-video"})
+assert st["gate"] == "approve_assets", st
+_q = st.get("question") or ""
+assert "Clips look energetic" in _q
+assert "Lip-sync QA warning" in _q
+assert "sc4" in _q
+assert "revise" in _q.lower() and "shots" in _q
+print("[ok] _sync keeps lip-sync warning when agent supplies a custom question")
+
 # 3c2) stills-only with NO phase → approve_stills + storyboard (never approve_assets)
 JOBSO = "jStillsOnlyNoPhase"
 projso = run._projects_dir / JOBSO
@@ -503,6 +612,20 @@ assert "top-level" in hap
 phases = run._assets_phases_text(False, hero_still=True)
 assert "hero_still" in phases and "PHASE 0" in phases
 assert "hero_still" not in run._assets_phases_text(False, hero_still=False)
+for batch_prompt in (
+    phases,
+    run._assets_phases_text(True, hero_still=True),
+    hap,
+    run._stills_approved_prompt("jBatch", {}),
+    run._motion_approved_prompt("jBatch", {}),
+):
+    assert "max 4" in batch_prompt, batch_prompt
+    assert "poll" in batch_prompt.lower(), batch_prompt
+    assert "preflight all" in batch_prompt.lower(), batch_prompt
+    assert "PAIR SCALE LOCK" in batch_prompt, batch_prompt
+    assert "character_scale_qa" in batch_prompt, batch_prompt
+assert "timing-preserving" in R._audio_lipsync_line({})
+assert "concat" not in R._audio_lipsync_line({}).lower()
 print("[ok] hero-approved prompt + assets phases text")
 
 
@@ -615,6 +738,118 @@ assert any("continue" in str(x) for x in _cont_labels), _cont_labels
 assert "IN PROGRESS" in run._assets_in_progress_prompt("jCont")
 print("[ok] _run_until_assets_gate re-invokes continue while in_progress")
 
+# 4e) _run_until_final_gate: stuck running → resumable assets gate
+_fc_labels = []
+_real_sync_fc = run._sync
+_real_run_fc = run._run_agent
+_real_stuck = run._stuck_before_final_gate
+_round_fc = {"n": 0}
+
+def _sync_stuck_forever(state):
+    # Always "stage assets completed; next: edit" — the hang from job_84e41f0738fc
+    return {**state, "status": "running", "gate": None, "stage": "assets",
+            "question": "stage assets completed; next: edit", "artifacts": {}}
+
+run._sync = _sync_stuck_forever  # type: ignore[method-assign]
+run._run_agent = (lambda prompt, job_id="", label="":
+                  _fc_labels.append(label))  # type: ignore[method-assign]
+run._stuck_before_final_gate = (lambda st: True)  # type: ignore[method-assign]
+os.environ["CLAUDE_EDIT_COMPOSE_MAX"] = "2"
+st_fail = run._run_until_final_gate(
+    {"job_id": "jEditHang", "pipeline": "panda-video", "options": {}, "artifacts": {}})
+run._sync = _real_sync_fc  # type: ignore[method-assign]
+run._run_agent = _real_run_fc  # type: ignore[method-assign]
+run._stuck_before_final_gate = _real_stuck  # type: ignore[method-assign]
+assert st_fail["status"] == "awaiting_human", st_fail
+assert st_fail.get("gate") == "approve_assets"
+assert "Generated stills, clips, VO, and music are kept" in (st_fail.get("question") or "")
+assert "will not be regenerated" in (st_fail.get("question") or "")
+assert _fc_labels[0] == "edit", _fc_labels
+assert any("edit_continue_" in str(x) for x in _fc_labels), _fc_labels
+assert len([x for x in _fc_labels if str(x).startswith("edit_continue_")]) == 2
+aap = run._assets_approved_prompt("jEditHang", "panda-video")
+assert "Do NOT ask" in aap or "Do NOT stop to ask" in aap, aap
+assert "timeline_contract" in aap
+assert "±5%" in aap
+assert "effective_scene_start + immutable original scene-local offset" in aap
+assert "approve_final" in aap
+edit_cont = run._edit_compose_continue_prompt("jEditHang", "panda-video")
+assert "Do NOT ask" in edit_cont and "approve_final" in edit_cont
+assert "timeline_contract" in edit_cont and "unequal audio-driven" in edit_cont
+cont_vid = run._continue_prompt("jEditHang", "panda-video")
+assert "approve_final" not in cont_vid
+print("[ok] _run_until_final_gate returns resumable approve_assets gate")
+
+# 4ea) an agent timeout/error after clip approval also preserves a resumable gate
+_real_sync_timeout = run._sync
+_real_run_timeout = run._run_agent
+run._sync = (lambda st: {**st, "status": "running", "gate": None,
+                         "stage": "edit", "artifacts": {"clips": ["kept.mp4"]}})  # type: ignore[method-assign]
+
+def _raise_timeout(prompt, job_id="", label=""):
+    raise TimeoutError("compose leg timed out")
+
+run._run_agent = _raise_timeout  # type: ignore[method-assign]
+st_timeout = run._run_until_final_gate(
+    {"job_id": "jEditTimeout", "pipeline": "panda-video", "options": {},
+     "artifacts": {"clips": ["kept.mp4"]}})
+run._sync = _real_sync_timeout  # type: ignore[method-assign]
+run._run_agent = _real_run_timeout  # type: ignore[method-assign]
+assert st_timeout["status"] == "awaiting_human" and st_timeout["gate"] == "approve_assets"
+assert st_timeout["artifacts"]["clips"] == ["kept.mp4"]
+assert "timed out" in st_timeout["question"]
+print("[ok] edit/compose timeout preserves media and returns resumable gate")
+
+# 4f) _run_until_final_gate stops when approve_final appears
+_fc2_labels = []
+_real_sync_fc2 = run._sync
+_real_run_fc2 = run._run_agent
+_real_stuck2 = run._stuck_before_final_gate
+_round_fc2 = {"n": 0}
+
+def _sync_then_final(state):
+    _round_fc2["n"] += 1
+    if _round_fc2["n"] < 2:
+        return {**state, "status": "running", "gate": None, "stage": "assets",
+                "question": "stage assets completed; next: edit", "artifacts": {}}
+    return {**state, "status": "awaiting_human", "gate": "approve_final", "stage": "compose",
+            "question": "Approve the finished (unbranded) video", "artifacts": {"final": "final.mp4"}}
+
+def _stuck_until_final(st):
+    return st.get("status") == "running" and st.get("gate") is None
+
+run._sync = _sync_then_final  # type: ignore[method-assign]
+run._run_agent = (lambda prompt, job_id="", label="":
+                  _fc2_labels.append(label))  # type: ignore[method-assign]
+run._stuck_before_final_gate = _stuck_until_final  # type: ignore[method-assign]
+os.environ["CLAUDE_EDIT_COMPOSE_MAX"] = "5"
+st_ok = run._run_until_final_gate(
+    {"job_id": "jEditOk", "pipeline": "panda-video", "options": {}, "artifacts": {}})
+run._sync = _real_sync_fc2  # type: ignore[method-assign]
+run._run_agent = _real_run_fc2  # type: ignore[method-assign]
+run._stuck_before_final_gate = _real_stuck2  # type: ignore[method-assign]
+assert st_ok["status"] == "awaiting_human" and st_ok["gate"] == "approve_final", st_ok
+assert _fc2_labels[0] == "edit"
+assert any("edit_continue_" in str(x) for x in _fc2_labels), _fc2_labels
+print("[ok] _run_until_final_gate stops at approve_final")
+
+# 4g) approve_assets resume routes through _run_until_final_gate (not bare continue)
+_final_gate_calls = []
+_real_final = run._run_until_final_gate
+_real_approve_aa = run._approve_stage
+run._approve_stage = lambda *a, **k: None  # type: ignore[method-assign]
+run._run_until_final_gate = (lambda st: (_final_gate_calls.append(st) or
+    {**st, "status": "awaiting_human", "gate": "approve_final", "stage": "compose"}))  # type: ignore[method-assign]
+st_aa = run.resume(
+    {"job_id": "jAA", "gate": "approve_assets", "status": "awaiting_human",
+     "pipeline": "panda-video", "stage": "assets", "artifacts": {"clips": ["c.mp4"]}},
+    {"decision": "approve"})
+run._run_until_final_gate = _real_final  # type: ignore[method-assign]
+run._approve_stage = _real_approve_aa  # type: ignore[method-assign]
+assert _final_gate_calls, "approve_assets must call _run_until_final_gate"
+assert st_aa["gate"] == "approve_final"
+print("[ok] approve_assets resume uses _run_until_final_gate")
+
 # 5) legacy gate on resume -> clear migration message (no agent run) --------
 mig = run.resume({"job_id": "jLegacy", "gate": "approve_storyboard", "artifacts": {}},
                  {"decision": "approve"})
@@ -662,39 +897,53 @@ assert "4c01c8f9-6cfb-4d8c-9eb9-74cb61462103" in vid
 assert "STILLS 2-TAKE" in vid
 assert "2D flat" in vid or "2D MEDIUM" in vid
 assert "PHASE 2 (motion sample)" not in vid, "default motion_sample=off must skip sample phase"
-assert "PHASE 2 (media)" in vid
+assert "PHASE 3 (media)" in vid
+assert "TTS-FIRST" in vid
 vid_ms = run._start_prompt("jV", "a video", {"motion_sample": True}, "panda-video")
 assert "PHASE 2 (motion sample)" in vid_ms
+assert "TTS-FIRST" in vid_ms
 print("[ok] start prompts: carousel/image stills-only vs video")
 
-# 6b) VOICE LOCK — the narration counterpart of CHARACTER LOCK. Parity is three things: the
-# LITERAL id sits in the prompt (not an instruction to go look it up), it is present on the legs
-# that actually call ElevenLabs (every leg is a cold `claude -p`, so naming it once at start does
-# not reach them), and an unresolvable narrator/language BLOCKS instead of silently downgrading
-# to a generic preset.
+# 6b) VOICE CAST — the narration counterpart of CHARACTER LOCK. Parity is three things: the
+# LITERAL brand ids sit in the prompt (not an instruction to go look them up), they are present
+# on the legs that actually call ElevenLabs (every leg is a cold `claude -p`, so naming them once
+# at start does not reach them), and an unresolvable speaker/language BLOCKS instead of silently
+# downgrading to a generic preset.
 assert R._resolve_voice_id("panda", "en") == "hMSPJ6ja4HIrFHhCGCMl"
 assert R._resolve_voice_id("customer", "zh") == "BqljjWyTnrioXPCNkCd4"
 assert R._resolve_voice_id("narrator", "zh") == "JZLpE3AGwpKYZI2X65hN"
 assert R._resolve_voice_id("robot", "en") is None
 assert R._resolve_voice_id("panda", "fr") is None
 
+cast_en = R._resolve_voice_cast("en")
+assert cast_en["panda"] == "hMSPJ6ja4HIrFHhCGCMl"
+assert cast_en["customer"] == "cgSgspJ2msm6clMCkdW9"
+assert cast_en["narrator"] == "8Ln42OXYupYsag45MAUy"
+
 _vopts = {"narrator": "panda", "language": "en"}
 vz = run._start_prompt("jV", "a video", _vopts, "panda-video")
-assert "VOICE LOCK" in vz and "hMSPJ6ja4HIrFHhCGCMl" in vz, "start prompt must carry the literal id"
+assert "VOICE CAST" in vz and "hMSPJ6ja4HIrFHhCGCMl" in vz, "start prompt must carry the cast"
+assert "cgSgspJ2msm6clMCkdW9" in vz and "8Ln42OXYupYsag45MAUy" in vz, "all three brand ids"
+assert "default speaker=panda" in vz
 assert "`voices` matching narrator" not in vz, "must be the id itself, not a lookup instruction"
 
 for _p in (run._stills_approved_prompt("jV", _vopts), run._motion_approved_prompt("jV", _vopts)):
-    assert "VOICE LOCK" in _p and "hMSPJ6ja4HIrFHhCGCMl" in _p, "media leg must carry the voice id"
-assert "VOICE LOCK" in run._stills_approved_prompt("jV")        # no options must not crash
-assert "VOICE LOCK" in run._motion_approved_prompt("jV")
+    assert "VOICE CAST" in _p and "hMSPJ6ja4HIrFHhCGCMl" in _p, "media leg must carry the cast"
+assert "VOICE CAST" in run._stills_approved_prompt("jV")        # no options must not crash
+assert "VOICE CAST" in run._motion_approved_prompt("jV")
 
-blk = run._start_prompt("jV", "a video", {"narrator": "robot", "language": "en"}, "panda-video")
-assert "BLOCKER" in blk, "an unresolvable pair must block"
+blk = run._start_prompt("jV", "a video", {"narrator": "robot", "language": "fr"}, "panda-video")
+assert "BLOCKER" in blk, "an unresolvable language must block (missing cast ids)"
 assert "may you fall back to Higgsfield" not in blk, "a missing id must NOT offer the fallback"
 
+# Unknown default speaker with valid language still emits the full cast (default falls to panda note)
+vl_robot_en = R._voice_line({"narrator": "robot", "language": "en"})
+assert "VOICE CAST" in vl_robot_en and "BLOCKER" not in vl_robot_en
+assert "hMSPJ6ja4HIrFHhCGCMl" in vl_robot_en
+
 ovr = run._start_prompt("jV", "a video", {"voice_id": "OVERRIDE123"}, "panda-video")
-assert "OVERRIDE123" in ovr
-print("[ok] VOICE LOCK: literal id in start + media legs; unresolvable pair blocks")
+assert "OVERRIDE123" in ovr and "OVERRIDE" in ovr
+print("[ok] VOICE CAST: three brand ids in start + media legs; unresolvable language blocks")
 
 # Mandarin brief wins over stale language:en
 _zh_brief = ("买哪个套餐才能在中国和美国都能用啊？用 Panda Mobile 就好啦，有 OnePool，"
@@ -704,6 +953,8 @@ assert not R._brief_looks_mandarin("Panda Mobile eSIM before you fly")
 opts_c, coerced = R._coerce_language_from_brief({"language": "en", "narrator": "panda"}, _zh_brief)
 assert coerced and opts_c["language"] == "zh"
 assert "MI36FIkp9wRP7cpWKPTl" in R._voice_line(opts_c)
+assert "BqljjWyTnrioXPCNkCd4" in R._voice_line(opts_c)
+assert "JZLpE3AGwpKYZI2X65hN" in R._voice_line(opts_c)
 opts_en, coerced_en = R._coerce_language_from_brief(
     {"language": "en", "narrator": "panda"}, "Panda waves at the airport")
 assert not coerced_en and opts_en["language"] == "en"
@@ -722,7 +973,7 @@ assert "language: zh" in sp_zh
 assert "MI36FIkp9wRP7cpWKPTl" in sp_zh
 assert "Do NOT stop to re-ask language" in sp_zh
 assert "stale language:en" in sp_zh
-print("[ok] Mandarin brief coerces language:en → zh; VOICE LOCK + start prompt note")
+print("[ok] Mandarin brief coerces language:en → zh; VOICE CAST + start prompt note")
 
 # 7) _pipeline_of / gate-collapse helpers -----------------------------------
 assert R._pipeline_of({}) == "panda-video"

@@ -32,14 +32,14 @@ extensions:
   custom_tools: true               # we add montage_svc_compose + the higgsfield_mcp bridge
 
 required_skills:
-  # NOTE: idea/script/edit reuse hybrid's directors (functional in production). Panda-specific
-  # versions are a future specialization, not a blocker.
+  # NOTE: idea/script reuse hybrid's directors where noted. Edit is panda-video-specific
+  # (ungated → compose; VO overrun default) — not hybrid footage-led edit.
   - pipelines/hybrid/executive-producer
   - pipelines/panda-video/idea-director          # OUR internal idea (no gate); replaces hybrid's gated one
   - pipelines/hybrid/script-director
   - pipelines/panda-video/scene-plan-director    # OUR text-only scene planner (no media)
   - pipelines/panda-video/asset-director         # OUR asset generator (all media -> asset_manifest)
-  - pipelines/hybrid/edit-director
+  - pipelines/panda-video/edit-director          # OUR ungated edit → compose (not hybrid footage edit)
   - pipelines/panda-video/compose-director       # OUR runtime-routed compose (ffmpeg/remotion/hyperframes)
   - meta/higgsfield-mcp-bridge                   # OUR bridge protocol (ported from OpenMontage-main)
   - meta/reviewer
@@ -120,17 +120,20 @@ stages:
       - asset_manifest
     tools_available:
       - image_selector           # PHASE 0/1: stills per scene (still-gen via the Higgsfield MCP bridge)
-      - higgsfield_mcp_video     # PHASE 2/3: OUR MCP bridge (image_to_video motion clips)
+      - elevenlabs_tts           # PHASE 2/3: TTS-FIRST — generate VO before i2v so clip duration can follow audio
+      - audio_probe              # PHASE 2/3: probe all VO before full-timeline duration allocation
+      - higgsfield_mcp_video     # PHASE 2/3: OUR MCP bridge (image_to_video); duration from audio-driven allocation
+      - lipsync_qa               # PHASE 3: local timing analysis + mouth-frame evidence before approve_assets
       - seedance_video
-      - elevenlabs_tts           # PHASE 3: narration
       - music_gen                # PHASE 3: background music (ElevenLabs Music)
     checkpoint_required: true
     human_approval_default: true       # 🚦 GATES 2.5, 3, 3.5 & 4
     review_focus:
       - "PHASE 0 (hero still): one look-lock still approved before the full storyboard (default on; hero_still:false skips)"
       - "PHASE 1 (stills): one still per scene, on-brand (styles/panda.yaml) and character-consistent (panda Elements), before any video is generated"
-      - "PHASE 2 (motion sample): one hero clip approves the motion/animation before the full batch (only if motion_sample:true; default off)"
-      - "PHASE 3 (media): every required asset exists on disk and is listed in asset_manifest (path + scene_id)"
+      - "PAIR SCALE LOCK: whenever panda + customer share a frame, panda ground-to-ear-top is 0.58 ±0.05 of standing customer ground-to-head height; feet share one ground line; upright canonical postures persist through stills and clips"
+      - "PHASE 2 (motion sample): one hero clip approves the motion/animation before the full batch (only if motion_sample:true; default off); narrated sample scenes TTS + duration snap before i2v"
+      - "PHASE 3 (media): TTS-first then full-timeline duration allocation — unequal scene lengths follow measured audio while final duration stays within ±5% of the user's request; when audio_lipsync on (default), customer/panda clips use seedance_2_0 + audio_references + generate_audio:false; every required asset on disk in asset_manifest (path + scene_id)"
       - "Budget: cumulative Higgsfield credits stay within max_higgsfield_credits (if set); overruns hard-block before spend, not after"
       - Narration covers all script sections; music (if any) sits under the VO
       - Reviewer can approve the set or request revision of specific scenes/shots (regenerate only those)
@@ -141,7 +144,7 @@ stages:
   # on-box availability). Compose reads it and routes. Carry it forward UNCHANGED unless a
   # render_runtime_selection decision is logged (silent swap = governance violation).
   - name: edit
-    skill: pipelines/hybrid/edit-director
+    skill: pipelines/panda-video/edit-director
     required_artifacts_in:
       - scene_plan
       - asset_manifest

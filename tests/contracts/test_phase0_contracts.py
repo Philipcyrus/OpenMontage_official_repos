@@ -612,9 +612,9 @@ class TestLegPromptDirectorRouting:
     The carve-out test above proves "Follow AGENT_GUIDE.md" is gone. It cannot prove the
     replacement route is complete — and once it was not: the video prompt advertised
     `skills/pipelines/panda-video/*-director.md`, but panda-video.yaml routes `script` to
-    `pipelines/hybrid/script-director` and `edit` to `pipelines/hybrid/edit-director`.
-    Neither lives in that directory, so leg 1 — the most-run leg in the system — was sent
-    to a folder that did not hold its director. Every suite passed anyway, because they
+    `pipelines/hybrid/script-director` (edit is now `pipelines/panda-video/edit-director`).
+    Script does not live in that directory, so leg 1 — the most-run leg in the system — was
+    sent to a folder that did not hold every director. Every suite passed anyway, because they
     only ever asked whether a string was present.
 
     The rule: do not advertise a directory that does not hold them all. A prompt may name

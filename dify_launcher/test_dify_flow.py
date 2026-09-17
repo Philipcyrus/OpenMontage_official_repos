@@ -21,11 +21,14 @@ Run:  python dify_launcher/test_dify_flow.py
 from __future__ import annotations
 
 import hashlib
+import importlib
 import os
 import sys
 from pathlib import Path
 
-os.environ.setdefault("DIFY_RUNNER", "mock")
+# This is explicitly the no-LLM wiring test; never inherit a developer/service runner.
+os.environ["DIFY_RUNNER"] = "mock"
+os.environ["DIFY_ASYNC"] = "0"
 _ENGINE_ROOT = Path(__file__).resolve().parents[1]
 if str(_ENGINE_ROOT) not in sys.path:
     sys.path.insert(0, str(_ENGINE_ROOT))
@@ -33,9 +36,12 @@ if str(_ENGINE_ROOT) not in sys.path:
 from PIL import Image
 from fastapi.testclient import TestClient
 
-from dify_launcher.app import app
+from dify_launcher import app as launcher_app
 from dify_launcher import store
 from schemas.artifacts import validate_artifact
+
+launcher_app = importlib.reload(launcher_app)
+app = launcher_app.app
 
 c = TestClient(app)
 

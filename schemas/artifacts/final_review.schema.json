@@ -77,6 +77,45 @@
             }
           }
         },
+        "lip_sync_check": {
+          "type": "object",
+          "description": "Optional Panda pre-compose lip-sync QA carried into final review. Unresolved results are warnings, not an automatic delivery block.",
+          "required": [
+            "status",
+            "scenes_reviewed",
+            "unresolved_scene_ids",
+            "warnings",
+            "recommended_action"
+          ],
+          "properties": {
+            "status": {
+              "type": "string",
+              "enum": ["pass", "warning", "not_applicable"]
+            },
+            "scenes_reviewed": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "unresolved_scene_ids": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "offsets_applied_seconds": {
+              "type": "object",
+              "additionalProperties": { "type": "number" }
+            },
+            "warnings": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "recommended_action": {
+              "type": "string",
+              "enum": ["present_to_user"],
+              "description": "After the bounded retry, unresolved lip-sync is explicitly presented to the user."
+            }
+          },
+          "additionalProperties": false
+        },
         "promise_preservation": {
           "type": "object",
           "description": "Delivery promise and renderer governance checks",

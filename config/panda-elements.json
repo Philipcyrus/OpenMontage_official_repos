@@ -14,6 +14,17 @@
     },
     "customer": {
       "turnaround": "brand/panda-mobile/customer/Customer-V3-Hero-Turnaround-v1.png"
+    },
+    "pair_scale_lock": {
+      "_note": "Binding composition lock measured from the approved panda/customer frame supplied by the user. Applies whenever both characters share a frame.",
+      "human_height_units": 1.0,
+      "panda_height_ratio": 0.58,
+      "ratio_tolerance": 0.05,
+      "ground_plane": "Both characters' feet rest on the same ground line; do not fake the ratio with foreground/background depth.",
+      "vertical_alignment": "Panda ear-top aligns around the standing customer's lower chest / upper abdomen.",
+      "human_posture": "Upright relaxed stance, level shoulders, natural head-to-body proportion, feet planted.",
+      "panda_posture": "Upright bipedal mascot stance, broad rounded torso, short planted legs, canonical head-to-body proportion.",
+      "motion_rule": "Preserve the approved still's relative scale, body proportions, posture, and shared ground plane through every frame; no growth, shrinkage, depth drift, crouch, or camera move that changes apparent ratio."
     }
   },
   "higgsfield": {
@@ -51,7 +62,7 @@
     }
   },
   "voices": {
-    "_note": "PRODUCTION narration = ElevenLabs. Requires ELEVENLABS_API_KEY (or an ElevenLabs MCP) on the box; without it the agent falls back to Higgsfield seed_audio (a generic preset — NOT the brand voice). Look up `voices[narrator][language]`; the launcher passes narrator/language from the Dify job `options`. THREE speakers are defined — `panda` (the mascot), `customer` (the human), and `narrator` (the off-screen background voice-over) — each in `en` and `zh`. Note the naming overlap: the job option is called `narrator` and its VALUE names the speaker, so an off-screen voice-over job is `options.narrator = \"narrator\"`.",
+    "_note": "PRODUCTION narration = ElevenLabs. Requires ELEVENLABS_API_KEY (or an ElevenLabs MCP) on the box; without it the agent falls back to Higgsfield seed_audio (a generic preset — NOT the brand voice). The launcher interpolates a VOICE CAST map of all three speakers for the job language into every ElevenLabs leg. `options.narrator` is the DEFAULT speaker for script sections that omit `speaker`; section.speaker picks customer|panda|narrator per line (multi-voice shots allowed). Note the naming overlap: the job option is called `narrator` and its VALUE names the speaker, so an off-screen voice-over default is `options.narrator = \"narrator\"`. Explicit `options.voice_id` overrides the whole cast.",
     "provider": "elevenlabs",
     "panda": { "en": "hMSPJ6ja4HIrFHhCGCMl", "zh": "MI36FIkp9wRP7cpWKPTl" },
     "customer": { "en": "cgSgspJ2msm6clMCkdW9", "zh": "BqljjWyTnrioXPCNkCd4" },
