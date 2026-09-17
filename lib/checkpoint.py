@@ -430,6 +430,7 @@ def write_checkpoint(
     checkpoint_policy: str = "guided",
     human_approval_required: bool = False,
     human_approved: bool = False,
+    question: Optional[str] = None,
     review: Optional[dict] = None,
     cost_snapshot: Optional[dict] = None,
     error: Optional[str] = None,
@@ -515,6 +516,8 @@ def write_checkpoint(
     }
     if style_playbook is not None:
         checkpoint["style_playbook"] = style_playbook
+    if question is not None:
+        checkpoint["question"] = question
     if review is not None:
         checkpoint["review"] = review
     if cost_snapshot is not None:

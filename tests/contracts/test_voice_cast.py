@@ -184,33 +184,37 @@ def test_premix_voice_tracks_builds_adelay_amix(monkeypatch, tmp_path):
     b = tmp_path / "b.wav"
     a.write_bytes(b"RIFF")
     b.write_bytes(b"RIFF")
-    out = tmp_path / "mix.m4a"
+    out = tmp_path / "mix.wav"
 
     calls: list[list[str]] = []
 
     def fake_run(cmd, capture_output=True, text=True):
         calls.append(list(cmd))
-        out.write_bytes(b"fake-aac")
 
         class R:
             returncode = 0
             stderr = ""
-            stdout = ""
+            stdout = "2.0\n" if Path(cmd[0]).name == "ffprobe" else ""
 
+        if Path(cmd[0]).name == "ffmpeg":
+            out.write_bytes(b"fake-wav")
         return R()
 
     monkeypatch.setattr(sp, "run", fake_run)
 
     pr._premix_voice_tracks(
         [{"path": str(a), "at_s": 0, "speaker": "customer"},
-         {"path": str(b), "at_s": 0.5, "speaker": "panda"}],
+         {"path": str(b), "at_s": 3, "speaker": "panda"}],
         out,
     )
     assert out.is_file()
     assert calls, "ffmpeg should be invoked for multi-track premix"
-    joined = " ".join(calls[0])
-    assert "adelay=500|500" in joined
+    ffmpeg_calls = [cmd for cmd in calls if Path(cmd[0]).name == "ffmpeg"]
+    assert len(ffmpeg_calls) == 1
+    joined = " ".join(ffmpeg_calls[0])
+    assert "adelay=3000|3000" in joined
     assert "amix=inputs=2" in joined
+    assert "atrim=0:5.000" in joined
 
 
 def test_panda_render_schema_exposes_voice_tracks():

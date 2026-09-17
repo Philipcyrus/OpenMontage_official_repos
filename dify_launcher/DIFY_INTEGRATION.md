@@ -40,9 +40,19 @@ server has `DIFY_TOKEN` set — omit it in the default open mode.
 ### `GET /health`
 Liveness + mode.
 ```json
-{"status":"ok","runner":"claude","async":true,"montage_door":true}
+{"status":"ok","runner":"claude","async":true,"montage_door":true,
+ "process_started_at":"2026-09-16T21:00:00+00:00",
+ "build_revision":"b693aa196d25b66851c58d8a1106c1736e584f0f",
+ "launcher_code_fingerprint":"4f2c91b3a708fcde"}
 ```
 `runner:"claude"` = real AI. `runner:"mock"` = placeholder mode (no AI, for wiring tests). `async:true` = poll model (see §4). `montage_door:true` = the direct render door (§15) is mounted.
+
+The deployment fields prove which code the running process actually loaded:
+- `process_started_at` must move forward after a launcher restart.
+- `build_revision` is `OPENMONTAGE_BUILD_REVISION` when supplied, otherwise the Git HEAD
+  observed at process start.
+- `launcher_code_fingerprint` hashes the loaded launcher source files. If files change without
+  a restart, `/health` continues reporting the old fingerprint. Treat that as a stale deployment.
 
 ### `POST /jobs` — start a job
 Body:

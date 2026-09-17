@@ -99,8 +99,9 @@ write_checkpoint(pipeline_dir, project_id, stage, status, artifacts, *,
                  pipeline_type=None, style_playbook=None,
                  checkpoint_policy="guided",
                  human_approval_required=False, human_approved=False,
+                 question=None,
                  review=None, cost_snapshot=None, error=None,
-                 metadata=None) -> Path
+                 metadata=None, partial_progress=None) -> Path
 
 read_checkpoint(pipeline_dir, project_id, stage) -> dict | None
 
@@ -150,6 +151,9 @@ stage without `human_approved=True` raises a `GATE VIOLATION` error.)
 When `human_approval_default: true`:
 
 1. **Write the checkpoint with `status="awaiting_human"`** (not `completed`).
+   Use the optional `question` keyword for concise gate-specific human copy when needed
+   (for example, naming affected scene IDs). `question` is a checkpoint field accepted by
+   `write_checkpoint`; do not hand-write launcher job state or add arbitrary top-level keys.
 
 2. **Present a summary** to the human:
    ```

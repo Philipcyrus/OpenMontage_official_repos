@@ -53,6 +53,68 @@ def _safe_id(s: str) -> str:
     return out or "run"
 
 
+def _duration_bounds(target_s: float, tolerance_fraction: float) -> tuple[float, float]:
+    target = float(target_s)
+    tolerance = float(tolerance_fraction)
+    if target <= 0:
+        raise ValueError("target_duration_s must be positive")
+    if not 0 <= tolerance < 1:
+        raise ValueError("duration_tolerance_fraction must be in [0, 1)")
+    return target * (1.0 - tolerance), target * (1.0 + tolerance)
+
+
+def expected_timeline_duration(
+    scenes: list[dict[str, Any]], transition: dict[str, Any] | None = None
+) -> float:
+    """Return assembled visual duration after transition overlap."""
+    if not scenes:
+        raise ValueError("scenes cannot be empty")
+    durations = [float(scene["duration_s"]) for scene in scenes]
+    if any(duration <= 0 for duration in durations):
+        raise ValueError("every scene duration_s must be positive")
+    for scene, duration in zip(scenes, durations):
+        audio_end = float(scene.get("audio_end_s") or 0.0)
+        if audio_end > duration + 1e-6:
+            raise ValueError(
+                f"scene audio_end_s {audio_end:.3f}s exceeds effective duration "
+                f"{duration:.3f}s"
+            )
+        source_duration = scene.get("source_duration_s")
+        if (
+            scene.get("audio_lipsync")
+            and source_duration is not None
+            and audio_end > float(source_duration) + 1e-6
+        ):
+            raise ValueError(
+                f"lip-synced scene audio ends at {audio_end:.3f}s after source motion "
+                f"{float(source_duration):.3f}s; a frozen hold would cover active speech"
+            )
+    tr = transition or {}
+    overlap = (
+        max(0.0, float(tr.get("duration_s", 0.5)))
+        if tr.get("type", "xfade") == "xfade"
+        else 0.0
+    )
+    if overlap and any(duration <= overlap for duration in durations):
+        raise ValueError("transition overlap must be shorter than every scene")
+    return sum(durations) - overlap * max(0, len(durations) - 1)
+
+
+def _target_duration_error(
+    actual_s: float, target_s: float | None, tolerance_fraction: float
+) -> str | None:
+    if target_s is None:
+        return None
+    lower, upper = _duration_bounds(target_s, tolerance_fraction)
+    if lower - 1e-6 <= actual_s <= upper + 1e-6:
+        return None
+    return (
+        f"timeline duration {actual_s:.3f}s is outside requested "
+        f"{float(target_s):.3f}s ±{float(tolerance_fraction) * 100:.1f}% "
+        f"({lower:.3f}-{upper:.3f}s)"
+    )
+
+
 def _premix_voice_tracks(
     tracks: list[dict[str, Any]],
     out_path: Path,
@@ -185,6 +247,21 @@ class PandaRender(BaseTool):
                     "properties": {
                         "media_path": {"type": "string"},
                         "duration_s": {"type": "number"},
+                        "source_duration_s": {
+                            "type": "number",
+                            "minimum": 0,
+                            "description": "Measured source clip duration before conformance.",
+                        },
+                        "audio_end_s": {
+                            "type": "number",
+                            "minimum": 0,
+                            "description": "Scene-local end of narration; must fit effective duration.",
+                        },
+                        "audio_lipsync": {
+                            "type": "boolean",
+                            "default": False,
+                            "description": "When true, active audio must also fit source motion before any tail hold.",
+                        },
                         "captions": {
                             "type": "object",
                             "properties": {"zh": {"type": "string"}, "en": {"type": "string"}},
@@ -230,6 +307,17 @@ class PandaRender(BaseTool):
                 },
             },
             "run_id": {"type": "string", "description": "Optional; derived from output name if omitted."},
+            "target_duration_s": {
+                "type": "number",
+                "exclusiveMinimum": 0,
+                "description": "Requested final duration; when set, preflight and ffprobe must remain within tolerance.",
+            },
+            "duration_tolerance_fraction": {
+                "type": "number",
+                "minimum": 0,
+                "exclusiveMaximum": 1,
+                "default": 0.05,
+            },
             "output_path": {"type": "string"},
         },
     }
@@ -242,6 +330,19 @@ class PandaRender(BaseTool):
 
     def execute(self, inputs: dict[str, Any]) -> ToolResult:
         start = time.time()
+        scenes_in: list[dict[str, Any]] = list(inputs["scenes"])
+        transition_in: dict[str, Any] = inputs.get("transition") or {}
+        target_duration = inputs.get("target_duration_s")
+        duration_tolerance = float(inputs.get("duration_tolerance_fraction", 0.05))
+        try:
+            expected_duration = expected_timeline_duration(scenes_in, transition_in)
+            preflight_error = _target_duration_error(
+                expected_duration, target_duration, duration_tolerance
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            return ToolResult(success=False, error=f"panda_render duration preflight failed: {exc}")
+        if preflight_error:
+            return ToolResult(success=False, error=f"panda_render duration preflight failed: {preflight_error}")
 
         from montage_svc import storage as st
         from montage_svc.render.pipelines import run_compose
@@ -262,7 +363,6 @@ class PandaRender(BaseTool):
             # --- 1) stage every media file into the run's media/ dir ----------
             st.ensure_run(run_id)
 
-            scenes_in = inputs["scenes"]
             scene_models: list[Scene] = []
             for i, sc in enumerate(scenes_in):
                 src = Path(sc["media_path"])
@@ -301,7 +401,7 @@ class PandaRender(BaseTool):
                 sfx_models.append(Sfx(media_id=sid, at_s=float(s.get("at_s", 0)), db=float(s.get("db", 0))))
 
             # --- 2) build the validated request ------------------------------
-            tr = inputs.get("transition") or {}
+            tr = transition_in
             req = ComposeRequest(
                 run_id=run_id,
                 version=1,
@@ -345,6 +445,17 @@ class PandaRender(BaseTool):
         from tools.video._shared import probe_output
 
         probed = probe_output(output_path)
+        actual_duration = float(probed.get("duration_seconds") or 0.0)
+        postflight_error = _target_duration_error(
+            actual_duration, target_duration, duration_tolerance
+        )
+        if postflight_error:
+            return ToolResult(
+                success=False,
+                error=f"panda_render duration postflight failed: {postflight_error}",
+                artifacts=[str(output_path)],
+                duration_seconds=round(time.time() - start, 2),
+            )
         return ToolResult(
             success=True,
             data={
@@ -355,6 +466,13 @@ class PandaRender(BaseTool):
                 "output_path": str(output_path),
                 "format": "mp4",
                 "voice_track_count": len(voice_tracks) if voice_tracks else (1 if audio_in.get("voice_path") else 0),
+                "expected_timeline_duration_seconds": round(expected_duration, 3),
+                "target_duration_seconds": (
+                    round(float(target_duration), 3)
+                    if target_duration is not None
+                    else None
+                ),
+                "duration_tolerance_fraction": duration_tolerance,
                 **probed,
             },
             artifacts=[str(output_path)],

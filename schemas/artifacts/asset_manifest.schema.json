@@ -58,7 +58,275 @@
       }
     },
     "total_cost_usd": { "type": "number", "minimum": 0 },
-    "metadata": { "type": "object" }
+    "metadata": {
+      "type": "object",
+      "properties": {
+        "timeline_contract": {
+          "$ref": "#/$defs/timelineContract"
+        },
+        "character_scale_qa": {
+          "$ref": "#/$defs/characterScaleQa"
+        },
+        "lip_sync_qa": {
+          "type": "object",
+          "description": "Pre-compose QA for eligible Panda speaking clips. A warning never blocks final delivery.",
+          "required": [
+            "status",
+            "reviewed_scene_count",
+            "failed_scene_count",
+            "retry_count",
+            "scenes",
+            "unresolved_warnings"
+          ],
+          "properties": {
+            "status": {
+              "type": "string",
+              "enum": ["pass", "warning", "not_applicable"]
+            },
+            "reviewed_scene_count": { "type": "integer", "minimum": 0 },
+            "failed_scene_count": { "type": "integer", "minimum": 0 },
+            "retry_count": {
+              "type": "integer",
+              "minimum": 0,
+              "description": "Paid retries across this manifest. Each scene independently enforces retry_count <= 1."
+            },
+            "scenes": {
+              "type": "object",
+              "additionalProperties": { "$ref": "#/$defs/lipSyncSceneReview" }
+            },
+            "unresolved_warnings": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": true
+    }
   },
-  "additionalProperties": false
+  "additionalProperties": false,
+  "$defs": {
+    "timelineContract": {
+      "type": "object",
+      "description": "Audio-driven effective timeline constrained to the user's requested total-duration band.",
+      "required": [
+        "version",
+        "target_duration_seconds",
+        "tolerance_fraction",
+        "minimum_duration_seconds",
+        "maximum_duration_seconds",
+        "transition_overlap_seconds",
+        "output_duration_seconds",
+        "status",
+        "within_target_band",
+        "scenes"
+      ],
+      "properties": {
+        "version": { "type": "string", "const": "1.0" },
+        "target_duration_seconds": { "type": "number", "exclusiveMinimum": 0 },
+        "tolerance_fraction": { "type": "number", "minimum": 0, "exclusiveMaximum": 1 },
+        "minimum_duration_seconds": { "type": "number", "minimum": 0 },
+        "maximum_duration_seconds": { "type": "number", "exclusiveMinimum": 0 },
+        "transition_overlap_seconds": { "type": "number", "minimum": 0 },
+        "output_duration_seconds": { "type": "number", "minimum": 0 },
+        "status": {
+          "type": "string",
+          "enum": [
+            "within_target_band",
+            "within_target_band_with_holds",
+            "pacing_revision_required"
+          ]
+        },
+        "within_target_band": { "type": "boolean" },
+        "scenes": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/timelineScene" }
+        }
+      },
+      "additionalProperties": false
+    },
+    "timelineScene": {
+      "type": "object",
+      "required": [
+        "scene_id",
+        "planned_duration_seconds",
+        "audio_start_seconds",
+        "audio_end_seconds",
+        "vo_seconds",
+        "i2v_duration",
+        "effective_duration_seconds",
+        "effective_start_seconds",
+        "effective_end_seconds",
+        "tail_hold_seconds",
+        "safe_tail_seconds"
+      ],
+      "properties": {
+        "scene_id": { "type": "string", "minLength": 1 },
+        "narrative_role": { "type": ["string", "null"] },
+        "planned_duration_seconds": { "type": "number", "exclusiveMinimum": 0 },
+        "audio_start_seconds": { "type": "number", "minimum": 0 },
+        "audio_end_seconds": { "type": "number", "minimum": 0 },
+        "vo_seconds": { "type": "number", "minimum": 0 },
+        "i2v_duration": { "type": "integer", "minimum": 1 },
+        "effective_duration_seconds": { "type": "number", "exclusiveMinimum": 0 },
+        "effective_start_seconds": { "type": "number", "minimum": 0 },
+        "effective_end_seconds": { "type": "number", "exclusiveMinimum": 0 },
+        "tail_hold_seconds": { "type": "number", "minimum": 0 },
+        "safe_tail_seconds": { "type": "number", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "characterScaleQa": {
+      "type": "object",
+      "description": "Visual QA for the binding panda/customer relative scale, posture, and shared ground plane.",
+      "required": [
+        "status",
+        "human_height_units",
+        "panda_height_ratio",
+        "ratio_tolerance",
+        "shared_ground_plane_required",
+        "scenes"
+      ],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["pass", "warning", "not_applicable"]
+        },
+        "human_height_units": { "type": "number", "const": 1.0 },
+        "panda_height_ratio": { "type": "number", "const": 0.58 },
+        "ratio_tolerance": { "type": "number", "const": 0.05 },
+        "shared_ground_plane_required": { "type": "boolean", "const": true },
+        "scenes": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/characterScaleSceneReview"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "characterScaleSceneReview": {
+      "type": "object",
+      "required": [
+        "contains_pair",
+        "still_status",
+        "clip_status",
+        "notes"
+      ],
+      "properties": {
+        "contains_pair": { "type": "boolean", "const": true },
+        "still_status": {
+          "type": "string",
+          "enum": ["pass", "warning"]
+        },
+        "clip_status": {
+          "type": "string",
+          "enum": ["pass", "warning", "not_applicable"]
+        },
+        "estimated_panda_height_ratio": {
+          "type": ["number", "null"],
+          "minimum": 0
+        },
+        "shared_ground_plane": { "type": ["boolean", "null"] },
+        "posture_consistent": { "type": ["boolean", "null"] },
+        "frame_paths": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "notes": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "lipSyncSceneReview": {
+      "type": "object",
+      "required": [
+        "eligible",
+        "status",
+        "attempts",
+        "retry_count",
+        "selected_take",
+        "unresolved_warning"
+      ],
+      "properties": {
+        "eligible": { "type": "boolean" },
+        "skip_reason": { "type": "string" },
+        "status": {
+          "type": "string",
+          "enum": ["pass", "fail_timing", "fail_generation", "inconclusive", "skipped"]
+        },
+        "attempts": {
+          "type": "array",
+          "maxItems": 2,
+          "items": { "$ref": "#/$defs/lipSyncAttempt" }
+        },
+        "retry_count": { "type": "integer", "minimum": 0, "maximum": 1 },
+        "selected_take": {
+          "type": ["string", "null"],
+          "enum": ["original", "retry", null]
+        },
+        "validated_audio_offset_seconds": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "description": "Applied by edit only when the QA result is fail_timing with concrete onset evidence."
+        },
+        "retry_job_id": { "type": ["string", "null"] },
+        "retry_credits": { "type": "number", "minimum": 0 },
+        "unresolved_warning": { "type": ["string", "null"] }
+      },
+      "additionalProperties": false
+    },
+    "lipSyncAttempt": {
+      "type": "object",
+      "required": ["attempt", "take", "video_asset_id", "status", "evidence"],
+      "properties": {
+        "attempt": { "type": "integer", "minimum": 1, "maximum": 2 },
+        "take": { "type": "string", "enum": ["original", "retry"] },
+        "video_asset_id": { "type": "string" },
+        "status": {
+          "type": "string",
+          "enum": ["pass", "fail_timing", "fail_generation", "inconclusive"]
+        },
+        "measured_av_offset_seconds": { "type": ["number", "null"] },
+        "recommended_audio_offset_seconds": {
+          "type": ["number", "null"],
+          "minimum": 0
+        },
+        "job_id": { "type": ["string", "null"] },
+        "credits": { "type": "number", "minimum": 0 },
+        "evidence": {
+          "type": "object",
+          "required": [
+            "expected_audio_offset_seconds",
+            "speech_onset_seconds",
+            "speech_end_seconds",
+            "frame_paths",
+            "mouth_visible_ratio",
+            "active_speech_samples",
+            "closed_mouth_active_samples",
+            "distinct_mouth_shapes",
+            "notes"
+          ],
+          "properties": {
+            "expected_audio_offset_seconds": { "type": "number", "minimum": 0 },
+            "speech_onset_seconds": { "type": ["number", "null"], "minimum": 0 },
+            "speech_end_seconds": { "type": ["number", "null"], "minimum": 0 },
+            "frame_paths": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "mouth_visible_ratio": { "type": ["number", "null"], "minimum": 0, "maximum": 1 },
+            "active_speech_samples": { "type": "integer", "minimum": 0 },
+            "closed_mouth_active_samples": { "type": "integer", "minimum": 0 },
+            "distinct_mouth_shapes": { "type": "integer", "minimum": 0 },
+            "observed_mouth_onset_seconds": { "type": ["number", "null"], "minimum": 0 },
+            "notes": { "type": "string" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    }
+  }
 }

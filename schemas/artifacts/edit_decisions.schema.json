@@ -17,6 +17,21 @@
           "source": { "type": "string", "description": "Source file path or asset-manifest ID" },
           "in_seconds": { "type": "number", "minimum": 0 },
           "out_seconds": { "type": "number", "minimum": 0 },
+          "source_duration_seconds": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Measured source media duration before timeline conformance."
+          },
+          "effective_duration_seconds": {
+            "type": "number",
+            "exclusiveMinimum": 0,
+            "description": "Allocated on-screen duration passed to the renderer; may include a safe post-speech tail hold."
+          },
+          "tail_hold_seconds": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Final-frame hold after source motion ends; never used to cover active lip-synced speech."
+          },
           "speed": { "type": "number", "minimum": 0.1, "default": 1.0 },
           "layer": {
             "type": "string",
@@ -107,6 +122,14 @@
                   "asset_id": { "type": "string" },
                   "start_seconds": { "type": "number", "minimum": 0 },
                   "end_seconds": { "type": "number", "minimum": 0 },
+                  "scene_id": {
+                    "type": "string",
+                    "description": "Scene whose lip-sync QA may authorize a timing correction."
+                  },
+                  "lip_sync_offset_applied_seconds": {
+                    "type": "number",
+                    "description": "Signed delta applied to the original absolute script timestamp after a validated QA timing correction."
+                  },
                   "speaker": {
                     "type": "string",
                     "enum": ["customer", "panda", "narrator"],

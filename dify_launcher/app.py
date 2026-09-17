@@ -24,9 +24,13 @@ Sync vs async:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import subprocess
 import threading
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Callable, Literal, Optional
 
 from fastapi import FastAPI, Header, HTTPException
@@ -73,6 +77,109 @@ _RUNNING: set[str] = set()
 _LOCK = threading.Lock()
 
 
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _loaded_revision() -> str:
+    configured = os.environ.get("OPENMONTAGE_BUILD_REVISION", "").strip()
+    if configured:
+        return configured
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(Path(__file__).resolve().parents[1]),
+            capture_output=True,
+            text=True,
+            timeout=2,
+        )
+        if proc.returncode == 0 and proc.stdout.strip():
+            return proc.stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return "unknown"
+
+
+def _launcher_code_fingerprint() -> str:
+    digest = hashlib.sha256()
+    for path in (Path(__file__), Path(_runner.__file__ or "")):
+        try:
+            digest.update(path.resolve().read_bytes())
+        except OSError:
+            digest.update(f"unreadable:{path}".encode())
+    return digest.hexdigest()[:16]
+
+
+_PROCESS_STARTED_AT = _utc_now()
+_LOADED_REVISION = _loaded_revision()
+_LAUNCHER_CODE_FINGERPRINT = _launcher_code_fingerprint()
+
+
+def _job_is_active(job_id: str) -> bool:
+    with _LOCK:
+        return job_id in _RUNNING
+
+
+def _clear_processing_markers(state: dict[str, Any]) -> dict[str, Any]:
+    state.pop("_recovery_gate", None)
+    state.pop("_recovery_stage", None)
+    state.pop("_processing_operation", None)
+    if state.get("processing_started_at"):
+        state["processing_finished_at"] = _utc_now()
+    return state
+
+
+def _recover_worker_result(
+    result: dict[str, Any],
+    original: dict[str, Any],
+    reason: str,
+) -> dict[str, Any]:
+    """Never let an exiting async worker strand a job in `running`."""
+    recovered = dict(result)
+    gate = (
+        recovered.get("gate")
+        or recovered.get("_recovery_gate")
+        or original.get("gate")
+    )
+    # Backward-compatible repair for jobs written before recovery metadata existed.
+    # In Panda, a running edit/compose state with generated clips can only originate
+    # from the approved-assets gate; retrying there preserves all paid media.
+    if (
+        not gate
+        and recovered.get("pipeline") == "panda-video"
+        and recovered.get("stage") in {"edit", "compose"}
+        and recovered.get("artifacts", {}).get("clips")
+    ):
+        gate = "approve_assets"
+    stage = (
+        recovered.get("stage")
+        or recovered.get("_recovery_stage")
+        or original.get("stage")
+    )
+    if gate:
+        recovered.update(
+            status="awaiting_human",
+            stage=stage,
+            gate=gate,
+            question=(
+                f"Background processing stopped before the next gate ({reason}). "
+                "Existing checkpoints and generated media are kept; approve to resume "
+                "from the latest checkpoint."
+            ),
+        )
+    else:
+        recovered.update(
+            status="failed",
+            stage=stage,
+            gate=None,
+            question=(
+                f"Background processing stopped without a resumable gate ({reason}). "
+                "The job is no longer running; inspect its checkpoints before retrying."
+            ),
+        )
+    return _clear_processing_markers(recovered)
+
+
 def _auth(tok: Optional[str]) -> None:
     if _TOKEN and tok != _TOKEN:
         raise HTTPException(status_code=401, detail="bad or missing X-Dify-Token")
@@ -100,19 +207,30 @@ def _public(state: dict[str, Any]) -> dict[str, Any]:
         "stage": state.get("stage"),
         "gate": state.get("gate"),
         "question": state.get("question"),
+        "worker_active": _job_is_active(job_id),
+        "processing_started_at": state.get("processing_started_at"),
+        "processing_finished_at": state.get("processing_finished_at"),
+        "updated_at": state.get("updated_at"),
         "artifacts": links,
     }
 
 
 def _bg(job_id: str, fn: Callable[..., dict[str, Any]], state: dict[str, Any],
         arg: Optional[dict[str, Any]] = None) -> None:
-    """Run one agent leg in the background; persist the result (or a failed state)."""
+    """Run one agent leg; an exiting worker must persist a terminal or human-gated state."""
     try:
         result = fn(state) if arg is None else fn(state, arg)
+        persisted = store.load_state(job_id) or {}
+        if persisted.get("processing_started_at") and not result.get("processing_started_at"):
+            result["processing_started_at"] = persisted["processing_started_at"]
+        if result.get("status") == "running":
+            result = _recover_worker_result(result, state, "worker returned status=running")
+        else:
+            result = _clear_processing_markers(result)
         store.save_state(result)
     except Exception as e:  # noqa: BLE001 — surface any leg failure to the poller
         st = store.load_state(job_id) or state
-        st.update(status="failed", gate=None, question=f"error: {e}")
+        st = _recover_worker_result(st, state, f"error: {e}")
         store.save_state(st)
     finally:
         with _LOCK:
@@ -120,9 +238,12 @@ def _bg(job_id: str, fn: Callable[..., dict[str, Any]], state: dict[str, Any],
 
 
 def _spawn(job_id: str, fn: Callable[..., dict[str, Any]], state: dict[str, Any],
-           arg: Optional[dict[str, Any]] = None) -> None:
+           arg: Optional[dict[str, Any]] = None,
+           processing_state: Optional[dict[str, Any]] = None) -> None:
     with _LOCK:
         _RUNNING.add(job_id)
+    if processing_state is not None:
+        store.save_state(processing_state)
     threading.Thread(target=_bg, args=(job_id, fn, state, arg), daemon=True).start()
 
 
@@ -162,7 +283,10 @@ def _resolve_pipeline(name: Optional[str]) -> str:
 @app.get("/health")
 def health() -> dict[str, Any]:
     return {"status": "ok", "runner": _RUNNER_NAME, "async": _ASYNC,
-            "montage_door": _MONTAGE_DOOR}
+            "montage_door": _MONTAGE_DOOR,
+            "process_started_at": _PROCESS_STARTED_AT,
+            "build_revision": _LOADED_REVISION,
+            "launcher_code_fingerprint": _LAUNCHER_CODE_FINGERPRINT}
 
 
 @app.post("/jobs")
@@ -177,9 +301,12 @@ def create_job(body: StartJob, x_dify_token: Optional[str] = Header(None)) -> di
         "stage": None, "gate": None, "artifacts": {},
     }
     if _ASYNC:
+        state["_processing_operation"] = "start"
+        state["processing_started_at"] = _utc_now()
         state["question"] = "starting — poll GET /jobs/{id} until status is awaiting_human"
-        store.save_state(state)       # persist first so GET works immediately
-        _spawn(job_id, _RUNNER.start, state)
+        # Reserve the in-process worker before publishing `running`, avoiding a GET race
+        # that could otherwise mistake a not-yet-started job for an orphan.
+        _spawn(job_id, _RUNNER.start, state, processing_state=state)
         return _public(state)
     state = _RUNNER.start(state)
     store.save_state(state)
@@ -192,6 +319,10 @@ def get_job(job_id: str, x_dify_token: Optional[str] = Header(None)) -> dict[str
     state = store.load_state(job_id)
     if not state:
         raise HTTPException(status_code=404, detail="job not found")
+    if state.get("status") == "running" and not _job_is_active(job_id):
+        state = _recover_worker_result(
+            state, state, "persisted running state has no active worker")
+        store.save_state(state)
     return _public(state)
 
 
@@ -210,10 +341,23 @@ def respond(job_id: str, body: Respond, x_dify_token: Optional[str] = Header(Non
     if body.decision == "skip" and state.get("gate") != "approve_brand":
         raise HTTPException(status_code=400, detail="skip is only valid at the approve_brand gate")
     if _ASYNC:
-        running = {**state, "status": "running",
-                   "question": "processing — poll GET /jobs/{id} until status changes"}
-        store.save_state(running)
-        _spawn(job_id, _RUNNER.resume, state, body.model_dump())
+        running = {
+            **state,
+            "status": "running",
+            "gate": None,
+            "question": "processing — poll GET /jobs/{id} until status changes",
+            "_recovery_gate": state.get("gate"),
+            "_recovery_stage": state.get("stage"),
+            "_processing_operation": f"resume:{state.get('gate') or 'unknown'}",
+            "processing_started_at": _utc_now(),
+        }
+        _spawn(
+            job_id,
+            _RUNNER.resume,
+            state,
+            body.model_dump(),
+            processing_state=running,
+        )
         return _public(running)
     try:
         state = _RUNNER.resume(state, body.model_dump())

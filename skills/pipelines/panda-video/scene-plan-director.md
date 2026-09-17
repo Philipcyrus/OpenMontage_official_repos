@@ -57,6 +57,12 @@ diagram/text_card/native scenes, an aspect may be "N/A" but ONLY explicitly.
    never as "foreground"). Default medium is **2D flat** matching the turnaround sheets — no
    photoreal airport / Pixar hall.
 4. **Spatial framing** — shot size + position-in-frame + depth (FG/MG/BG) + how they change.
+   Whenever panda + customer share a frame, copy the binding `pair_scale_lock` from
+   `config/panda-elements.json`: customer standing height = 1.00, panda ear-top height = 0.58
+   (acceptable 0.53–0.63), both feet on the same ground plane, panda ear-top around the
+   customer's lower chest / upper abdomen. State it in `description`, relevant
+   `character_actions[].notes`, and image/video `required_assets`; do not rely on an implied
+   phrase such as "panda beside customer."
 5. **Camera** — capture in `shot_language`: `shot_size`, `camera_movement`, `lens_mm`,
    `lighting_key`, `depth_of_field`, `color_temperature`. For the default 2D flat look, mark
    `lens_mm` and `depth_of_field` **N/A** — do not write 35mm / DoF / photoreal cinema language
@@ -79,7 +85,9 @@ Specify on-brand look, character consistency and composition **in words**: which
 the on-model 2D appearance, and the reference Element id from `config/panda-elements.json`
 that the assets stage MUST attach as media. Set the top-level `style_playbook` to the Panda style.
 Never render. Map phrase aliases (human / traveller / customer / panda / mascot / …) to the
-locked IDs — see `phrase_aliases` in `config/panda-elements.json`.
+locked IDs — see `phrase_aliases` in `config/panda-elements.json`. Treat `pair_scale_lock` as
+part of CHARACTER LOCK, not optional art direction. The same ratio, upright postures, and shared
+ground plane must appear in every two-character scene regardless of shot size.
 
 ### 6. Narration duration budget (so the VO fits the video)
 If the video is narrated, the narration MUST fit the runtime:
@@ -88,9 +96,9 @@ If the video is narrated, the narration MUST fit the runtime:
 3. Budget **2.0–2.5 words/sec** (calm/reassuring) or **2.5–3.0 words/sec** (energetic).
 4. Allocate words per scene proportional to its seconds; keep opening/closing scenes light.
 Validate: total words within budget; no scene's narration overflows its slot. (Word budget is a
-**prior** only. In assets, measured ElevenLabs duration is the **authority** for Higgsfield i2v
-`duration` and any hold extend — see TTS-first in `asset-director.md`. A large overrun after TTS
-means extend the scene hold at edit, or revise the script — do not expect prompt-only lip sync.)
+**prior** only. In assets, measured ElevenLabs duration drives the full-scene allocation while
+the requested total stays within ±5% — see TTS-first in `asset-director.md`. A large overrun
+after TTS requires the bounded speed retry or a pacing revision; do not expect prompt-only lip sync.)
 
 ### 7. Declare `required_assets` per scene
 For each scene that needs a still, list **exactly one** `{type: "image", description: "...",
@@ -115,6 +123,8 @@ entries (one per brand speaker). Do not collapse multi-speaker dialogue into a s
 - [ ] Exactly one `hero_moment`; pacing alternates high-info and breathing-room scenes
 - [ ] Every scene with a still has **exactly one** image `required_asset` (no plate chains)
 - [ ] Every human/panda appearance names the locked Element id; 2D medium is explicit
+- [ ] Every panda+customer scene repeats the 0.58 ±0.05 pair scale, shared ground plane, and
+      upright posture lock in description, actions, and required assets
 - [ ] Every `required_asset` is feasible with the assets-stage tools
 - [ ] Any scene with exact on-screen TEXT (CTA, phone number, price) is `type: "text_card"` — never
       `generated` (image models hallucinate text)

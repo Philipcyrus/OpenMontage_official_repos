@@ -125,6 +125,32 @@ Do **not** use `student_ugc_element_id` (still TODO).
 5. A still or clip of a human or panda **without** that Element in `medias` is a
    defect; do not ship it. Log the IDs on the `asset_manifest` row.
 
+### PAIR SCALE + POSTURE LOCK (binding)
+
+Whenever panda + customer share a frame, apply
+`config/panda-elements.json.character_references.pair_scale_lock` in addition to both Element
+references:
+
+- standing customer height = **1.00**;
+- panda ground-to-ear-top height = **0.58**, acceptable range **0.53–0.63**;
+- both characters' feet sit on the **same ground line** — never fake the ratio by moving one
+  character into foreground/background;
+- panda ear-top aligns around the customer's lower chest / upper abdomen;
+- customer remains upright and relaxed with natural proportions;
+- panda remains an upright bipedal mascot with broad rounded torso, canonical large head, and
+  short planted legs.
+
+Repeat the numeric ratio and ground-plane instruction in every two-character still prompt.
+Element attachment alone does not lock relative composition. Review each returned still before
+acceptance: outside-range scale, mismatched ground plane, crouching, stretched anatomy, or
+toy-sized/oversized panda is unusable and qualifies for the existing take-2 i2i correction.
+
+For image-to-video, use the approved still as `start_image` and explicitly preserve its exact
+relative scale, posture, body proportions, and ground plane through the final frame. Camera
+movement or depth drift that changes apparent ratio is a failure. Record the still and clip
+checks in `asset_manifest.metadata.character_scale_qa`; a remaining take-2 defect is surfaced at
+the assets gate, never silently called consistent.
+
 ## LOOK LOCK (after approve_hero_still)
 
 When remaining storyboard stills follow an approved hero PNG: `media_import` that hero as a
@@ -136,10 +162,16 @@ composition onto every scene. Bake `look_notes` from hero revises into every rem
 
 Per scene, per stills round (first GATE 3 pass, or a later human `revise` on that scene):
 
-1. **Take 1** — one `generate_image` of the *shipped* still (both characters in one
-   T2I if the scene needs both). Attach Element IDs in the MCP media slot; never put
-   UUIDs in the prompt.
-2. If take 1 is unusable: **take 2 is i2i of take 1** (one change). Never a fresh T2I.
+1. **Take 1 wave** — preflight one `generate_image` for every remaining scene and
+   enforce the budget against that complete take-1 batch before submitting any job.
+   Then submit with at most **4 jobs in flight**. Poll the set together instead of
+   waiting for one image before submitting the next. Both characters belong in one
+   T2I when the scene needs both. Attach Element IDs in the MCP media slot; never put
+   UUIDs in the prompt. After an approved hero, import it once as a style/look
+   reference and reuse that media id across the batch.
+2. After the take-1 wave returns, review each result. Only an unusable take 1 gets a
+   **take 2**, which is i2i of take 1 (one change), never a fresh T2I. Take-2 jobs may
+   form their own wave but must never be submitted speculatively before take 1 review.
 3. **Stop.** Ship take 2 if it exists, else take 1. Write `approve_stills` and end
    the turn. Flag remaining defects in the gate `question` — do not generate again.
 4. A third paid `generate_image` for that scene in this round is a **defect**. Known
@@ -164,13 +196,19 @@ and panda turnaround sheets — same medium for people, mascot, props, and set. 
 - Override only if the **user brief** explicitly asks for 3D / photoreal / live-action;
   log that in `decision_log`.
 
-## Per-clip generation loop
+## Per-wave generation loop
 
-For each scene/clip the `scene_plan` requires:
+Preflight every pending clip required by the `scene_plan` before the first submit,
+then process those clips in waves. The normal concurrency cap is **4 in-flight
+Higgsfield jobs**. If any submit returns a rate-limit / 429 response, lower the cap
+to **2** for the rest of that agent leg. Do not change model, prompt, duration, or
+quality settings merely to gain concurrency.
 
-0. **TTS-first duration (panda-video speaking scenes)** — generate that scene’s ElevenLabs VO
-   and probe it **before** step 1. Set `duration` from `lib.i2v_duration.snap_i2v_duration`
-   (allowed values from `models_explore`). See `skills/pipelines/panda-video/asset-director.md`.
+0. **TTS-first duration (panda-video)** — generate and probe all scene VO **before** preflight,
+   then call `lib.i2v_duration.allocate_scene_durations` once for the full timeline. Set each
+   `duration` from its allocation (allowed values from `models_explore`) so scene lengths follow
+   audio while the final cut remains within ±5% of the requested total. Preserve scene-local
+   audio offsets. See `skills/pipelines/panda-video/asset-director.md`.
 
 ### Audio lip-sync (panda-video)
 
@@ -178,39 +216,59 @@ When job option `audio_lipsync` is on (**default**), on-screen `customer`/`panda
 use **`seedance_2_0`** with:
 
 - `medias` role **`start_image`** = approved still
-- `medias` role **`audio_references`** = that scene’s ElevenLabs VO (MCP-uploaded)
+- `medias` role **`audio_references`** = that scene’s timing-preserving ElevenLabs
+  VO bed (MCP-uploaded)
 - **`generate_audio: false`** — do not invent a second audio bed
 - Prompt: 2D + Element LOCK; animate mouth/jaw to lip-sync the attached audio (no mouth HOLD)
+
+For a scene with multiple dialogue files, build **one timing-preserving scene-local
+VO bed** before upload. Place every source at its script offset relative to scene start
+(`relative_at_s = section.start_seconds - scene.start_seconds`), retain leading and
+inter-line silence, and mix overlapping lines. Use the same `adelay` + `amix` semantics
+as `tools.video.panda_render._premix_voice_tracks`; never join files back-to-back. A
+customer line at 0–2s and panda line at 3–5s therefore produces a 5s bed with the
+2–3s pause intact.
 
 `kling3_0` has **no** audio input role — do not use it for lipsync shots. Narrator / text_card /
 lipsync-off jobs keep HOLD LOCK (mouth frozen) with duration-only alignment.
 
-Compose still **mutes** native AAC (noop when silent) and **lays the same ElevenLabs VO** so
-picture and brand voice stay matched. On `audio_references` failure: fall back to HOLD +
+Compose still **mutes** native AAC (noop when silent) and lays the original ElevenLabs
+files at the same script offsets used to make the reference bed. This keeps picture and
+brand voice on one timeline. On `audio_references` failure: fall back to HOLD +
 duration-only and log it.
 
-1. **Preflight cost** — call `generate_video` with
-   `{model, prompt, duration, aspect_ratio, count:1, get_cost:true}` (plus medias when lipsync). Sum the
-   credits across all clips and check against `balance`. Report the total to the
-   user against the budget before committing to a batch. **Retain the per-clip
-   credit number** — it must be written into that asset's `asset_manifest` entry
-   (`credits`, `credits_source: "actual"`) for the per-project cost report.
-2. **Submit** — call `generate_video` (omit `get_cost`) with the final params.
-   Capture the returned `job_id`. For image-to-video, first either
-   `generate_image` or `media_import_url` to get a `media_id`, then pass it via
-   the model's declared start-image media role.
-3. **Poll** — `job_status` (or `show_generations`) until `completed`. Handle
-   `failed`/`nsfw`/`cancelled` as a blocker, not a silent skip.
-4. **Reveal** — `reveal_generation` / `job_display` to get the clip CDN URL.
-5. **Ingest** — call the registry tool `higgsfield_mcp_video.execute({...})`
+1. **Preflight the whole pending batch** — call `generate_video` with
+   `{model, prompt, duration, aspect_ratio, count:1, get_cost:true}` (plus medias when
+   lipsync) for every pending clip. Sum requested credits, combine them with
+   already-spent credits, and apply the BUDGET HARD RULE **before any submit**.
+   Retain every clip's preflight credit number for its `asset_manifest` row.
+2. **Submit the first wave** — submit up to 4 independent `generate_video` calls in
+   parallel (omit `get_cost`). Capture each returned `job_id` keyed by `scene_id`.
+   For image-to-video, register the approved still and optional audio bed first,
+   then pass those media ids in the model's declared roles.
+3. **Checkpoint in-flight work immediately** — write an `assets` checkpoint with
+   `status="in_progress"` and `metadata.partial_progress.motion_jobs`, mapping every
+   `scene_id` to its `job_id`, creative parameters, credits, and output path. A timeout
+   or cold resume must poll these ids; it must not submit duplicate paid generations.
+4. **Poll the set** — query `job_status` or `show_generations` for all in-flight ids
+   until each reaches `completed`, `failed`, `nsfw`, or `cancelled`. Do not serialize
+   submit → poll → ingest one clip at a time.
+5. **Reveal + ingest successes** — use `reveal_generation` / `job_display` for each
+   completed job, then call `higgsfield_mcp_video.execute({...})`
    with the same creative params **plus**:
-   - `video_url`: the CDN URL from step 4 (or `source_path` if you downloaded it
+   - `video_url`: the CDN URL (or `source_path` if you downloaded it
      yourself),
-   - `job_id`: from step 2,
+   - `job_id`: captured at submit,
    - `output_path`: the project asset path, e.g.
      `projects/<name>/assets/video/<scene-id>.mp4`.
    The tool downloads, runs ffprobe, and returns a standard `ToolResult` with
    width/height/duration/codec for the `asset_manifest`.
+6. **Handle partial failure without replaying the wave** — keep and ingest every
+   success. Record failed scene ids and provider states in the checkpoint / gate
+   question; never silently skip them and never resubmit successful jobs. Regenerate
+   only failed scenes after the approved recovery decision.
+7. **Start the next wave** — when more than 4 clips remain, repeat with the next set
+   only after capacity is available.
 
 If you invoke `higgsfield_mcp_video` with no `video_url`/`source_path`, it
 returns `success=False` with an `agent_action_required` payload restating these

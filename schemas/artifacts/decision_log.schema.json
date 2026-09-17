@@ -38,6 +38,9 @@
               "motion_commitment",
               "concept_selection",
               "voice_selection",
+              "pacing",
+              "approval_policy",
+              "character_lock",
               "capability_extension",
               "playbook_override",
               "visual_accuracy_check"

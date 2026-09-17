@@ -6,6 +6,9 @@ from pathlib import Path
 
 import yaml
 
+from lib.i2v_duration import allocate_scene_durations
+from schemas.artifacts import validate_artifact
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -62,11 +65,68 @@ def test_motion_sample_tts_before_sample_when_narrated():
     assert "duration" in lower
 
 
-def test_edit_director_prefers_prealigned_vo_slots():
+def test_edit_director_prefers_audio_driven_effective_timeline():
     text = (ROOT / "skills/pipelines/panda-video/edit-director.md").read_text(
         encoding="utf-8"
     )
     lower = text.lower()
-    assert "tts-first" in lower or "pre-aligned" in lower or "prealigned" in lower
+    assert "timeline_contract" in text
+    assert "audio-driven" in lower
     assert "mute" in lower
     assert "hold" in lower
+
+
+def test_panda_directors_require_audio_driven_target_band():
+    asset = (ROOT / "skills/pipelines/panda-video/asset-director.md").read_text(
+        encoding="utf-8"
+    )
+    edit = (ROOT / "skills/pipelines/panda-video/edit-director.md").read_text(
+        encoding="utf-8"
+    )
+    compose = (ROOT / "skills/pipelines/panda-video/compose-director.md").read_text(
+        encoding="utf-8"
+    )
+    combined = " ".join((asset, edit, compose))
+    assert "allocate_scene_durations" in asset
+    assert "timeline_contract" in combined
+    assert "±5%" in combined
+    assert "effective_scene_start + original_scene_local_offset" in edit
+    assert "target_duration_s" in compose
+
+
+def test_typed_timeline_contract_validates_in_asset_manifest():
+    timeline = allocate_scene_durations(
+        [
+            {
+                "scene_id": "sc1",
+                "vo_seconds": 6.5,
+                "audio_end_seconds": 6.5,
+                "allowed_durations": list(range(5, 11)),
+                "planned_duration_seconds": 9,
+            },
+            {
+                "scene_id": "sc2",
+                "vo_seconds": 4.0,
+                "audio_end_seconds": 4.0,
+                "allowed_durations": list(range(5, 11)),
+                "planned_duration_seconds": 9,
+            },
+        ],
+        18,
+    )
+    validate_artifact(
+        "asset_manifest",
+        {
+            "version": "1.0",
+            "assets": [
+                {
+                    "id": "sc1_video",
+                    "type": "video",
+                    "path": "assets/video/sc1.mp4",
+                    "source_tool": "higgsfield_mcp",
+                    "scene_id": "sc1",
+                }
+            ],
+            "metadata": {"timeline_contract": timeline},
+        },
+    )

@@ -69,14 +69,22 @@ assert "HOLD" in _off
 assert "Do NOT pass" in _off and "audio_references" in _off
 _sp_on = run._start_prompt("jLips", "a video about eSIM", {}, "panda-video")
 assert "AUDIO LIPSYNC — ON" in _sp_on and "audio_references" in _sp_on
+assert "PAIR SCALE LOCK" in _sp_on and "panda ear-top height=0.58" in _sp_on
 _sp_off = run._start_prompt(
     "jLipsOff", "a video about eSIM", {"audio_lipsync": False}, "panda-video")
 assert "AUDIO LIPSYNC — OFF" in _sp_off
 assert "HOLD" in _sp_off
 _stills_on = run._stills_approved_prompt("jLips", {})
 assert "AUDIO LIPSYNC — ON" in _stills_on
+assert "lipsync_qa" in _stills_on
+assert "allocate_scene_durations" in _stills_on
+assert "tolerance_fraction=0.05" in _stills_on
+assert "timeline_contract" in _stills_on
+assert "only that scene once" in _stills_on
+assert "attempt 3" in _stills_on
 _stills_off = run._stills_approved_prompt("jLips", {"audio_lipsync": False})
 assert "AUDIO LIPSYNC — OFF" in _stills_off
+assert "lipsync_qa" not in _stills_off
 # Materialize true onto panda-video options when omitted
 _st = {"brief": "eSIM ad", "pipeline": "panda-video", "options": {}}
 R._apply_language_coerce(_st)
@@ -463,6 +471,20 @@ assert "HERO" in (st.get("question") or ""), st.get("question")
 assert "Approve assets" not in (st.get("question") or "")
 print("[ok] _sync hero_still: single PNG preview, not storyboard")
 
+# Agent-authored gate copy is optional and safely preferred over the canonical fallback.
+_fake_latest.cp = {
+    "stage": "assets",
+    "status": "awaiting_human",
+    "question": "\x00  Approve sc4 hero after reviewing the corrected thumb.  ",
+    "partial_progress": {"phase": "hero_still", "hero_scene_id": "scene-2"},
+    "artifacts": {},
+}
+st = run._sync({"job_id": JOBH})
+assert st["gate"] == "approve_hero_still"
+assert st["question"] == "Approve sc4 hero after reviewing the corrected thumb."
+assert st["artifacts"].get("stills") == ["hero_scene-2.png"]
+print("[ok] _sync accepts checkpoint question and preserves hero media")
+
 # 3c2) stills-only with NO phase → approve_stills + storyboard (never approve_assets)
 JOBSO = "jStillsOnlyNoPhase"
 projso = run._projects_dir / JOBSO
@@ -540,6 +562,20 @@ assert "top-level" in hap
 phases = run._assets_phases_text(False, hero_still=True)
 assert "hero_still" in phases and "PHASE 0" in phases
 assert "hero_still" not in run._assets_phases_text(False, hero_still=False)
+for batch_prompt in (
+    phases,
+    run._assets_phases_text(True, hero_still=True),
+    hap,
+    run._stills_approved_prompt("jBatch", {}),
+    run._motion_approved_prompt("jBatch", {}),
+):
+    assert "max 4" in batch_prompt, batch_prompt
+    assert "poll" in batch_prompt.lower(), batch_prompt
+    assert "preflight all" in batch_prompt.lower(), batch_prompt
+    assert "PAIR SCALE LOCK" in batch_prompt, batch_prompt
+    assert "character_scale_qa" in batch_prompt, batch_prompt
+assert "timing-preserving" in R._audio_lipsync_line({})
+assert "concat" not in R._audio_lipsync_line({}).lower()
 print("[ok] hero-approved prompt + assets phases text")
 
 
@@ -652,7 +688,7 @@ assert any("continue" in str(x) for x in _cont_labels), _cont_labels
 assert "IN PROGRESS" in run._assets_in_progress_prompt("jCont")
 print("[ok] _run_until_assets_gate re-invokes continue while in_progress")
 
-# 4e) _run_until_final_gate: stuck running → continue → fail (never hung running)
+# 4e) _run_until_final_gate: stuck running → resumable assets gate
 _fc_labels = []
 _real_sync_fc = run._sync
 _real_run_fc = run._run_agent
@@ -674,19 +710,45 @@ st_fail = run._run_until_final_gate(
 run._sync = _real_sync_fc  # type: ignore[method-assign]
 run._run_agent = _real_run_fc  # type: ignore[method-assign]
 run._stuck_before_final_gate = _real_stuck  # type: ignore[method-assign]
-assert st_fail["status"] == "failed", st_fail
-assert st_fail.get("gate") is None
-assert "approve_final" in (st_fail.get("question") or "")
+assert st_fail["status"] == "awaiting_human", st_fail
+assert st_fail.get("gate") == "approve_assets"
+assert "Generated stills, clips, VO, and music are kept" in (st_fail.get("question") or "")
+assert "will not be regenerated" in (st_fail.get("question") or "")
 assert _fc_labels[0] == "edit", _fc_labels
 assert any("edit_continue_" in str(x) for x in _fc_labels), _fc_labels
 assert len([x for x in _fc_labels if str(x).startswith("edit_continue_")]) == 2
 aap = run._assets_approved_prompt("jEditHang", "panda-video")
 assert "Do NOT ask" in aap or "Do NOT stop to ask" in aap, aap
-assert "extend" in aap.lower() and ("hold" in aap.lower() or "PACING" in aap)
-assert "Do NOT ask" in run._edit_compose_continue_prompt("jEditHang", "panda-video")
+assert "timeline_contract" in aap
+assert "±5%" in aap
+assert "effective_scene_start + immutable original scene-local offset" in aap
+assert "approve_final" in aap
+edit_cont = run._edit_compose_continue_prompt("jEditHang", "panda-video")
+assert "Do NOT ask" in edit_cont and "approve_final" in edit_cont
+assert "timeline_contract" in edit_cont and "unequal audio-driven" in edit_cont
 cont_vid = run._continue_prompt("jEditHang", "panda-video")
-assert "ungated" in cont_vid.lower() or "Do NOT" in cont_vid
-print("[ok] _run_until_final_gate fails instead of hung running")
+assert "approve_final" not in cont_vid
+print("[ok] _run_until_final_gate returns resumable approve_assets gate")
+
+# 4ea) an agent timeout/error after clip approval also preserves a resumable gate
+_real_sync_timeout = run._sync
+_real_run_timeout = run._run_agent
+run._sync = (lambda st: {**st, "status": "running", "gate": None,
+                         "stage": "edit", "artifacts": {"clips": ["kept.mp4"]}})  # type: ignore[method-assign]
+
+def _raise_timeout(prompt, job_id="", label=""):
+    raise TimeoutError("compose leg timed out")
+
+run._run_agent = _raise_timeout  # type: ignore[method-assign]
+st_timeout = run._run_until_final_gate(
+    {"job_id": "jEditTimeout", "pipeline": "panda-video", "options": {},
+     "artifacts": {"clips": ["kept.mp4"]}})
+run._sync = _real_sync_timeout  # type: ignore[method-assign]
+run._run_agent = _real_run_timeout  # type: ignore[method-assign]
+assert st_timeout["status"] == "awaiting_human" and st_timeout["gate"] == "approve_assets"
+assert st_timeout["artifacts"]["clips"] == ["kept.mp4"]
+assert "timed out" in st_timeout["question"]
+print("[ok] edit/compose timeout preserves media and returns resumable gate")
 
 # 4f) _run_until_final_gate stops when approve_final appears
 _fc2_labels = []

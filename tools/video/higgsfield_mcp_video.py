@@ -188,11 +188,36 @@ class HiggsFieldMCPVideo(BaseTool):
             ),
             data={
                 "agent_action_required": {
-                    "step_1": "mcp__...__generate_video with params {model, prompt, duration, aspect_ratio, count:1, get_cost:true} to preflight credits",
-                    "step_2": "mcp__...__generate_video (get_cost omitted) to submit the job; capture job_id",
-                    "step_3": "poll mcp__...__job_status (or show_generations) until completed",
-                    "step_4": "mcp__...__reveal_generation / job_display to obtain the clip CDN url",
-                    "step_5": f"re-invoke higgsfield_mcp_video with the same params PLUS video_url=<cdn url>, job_id=<id>, output_path=<project assets path>",
+                    "step_1": (
+                        "Preflight every pending clip before the first submit with "
+                        "mcp__...__generate_video {model, prompt, duration, aspect_ratio, "
+                        "count:1, get_cost:true}; sum credits and enforce the project cap"
+                    ),
+                    "step_2": (
+                        "Submit up to 4 independent mcp__...__generate_video calls in parallel "
+                        "(get_cost omitted); capture each job_id keyed by scene_id. If a submit "
+                        "returns 429, use max 2 in flight for the rest of this leg"
+                    ),
+                    "step_3": (
+                        "Immediately checkpoint scene_id -> job_id under "
+                        "metadata.partial_progress.motion_jobs so resume polls rather than "
+                        "duplicates paid work"
+                    ),
+                    "step_4": (
+                        "Poll the complete in-flight set with mcp__...__job_status (or "
+                        "show_generations) until each job is terminal; do not serialize clips"
+                    ),
+                    "step_5": (
+                        "For each success, use mcp__...__reveal_generation / job_display to "
+                        "obtain the CDN url, then re-invoke higgsfield_mcp_video with the same "
+                        "params PLUS video_url=<cdn url>, job_id=<id>, "
+                        "output_path=<project assets path>"
+                    ),
+                    "step_6": (
+                        "Keep all successes on partial failure and report only failed scene_ids; "
+                        "never replay successful jobs"
+                    ),
+                    "max_in_flight": 4,
                     "suggested_model": model,
                     "operation": operation,
                     "estimated_credits": round(est_credits, 1),

@@ -26,10 +26,23 @@ compose in the **same** headless leg. This is **not** the hybrid footage-led edi
 
 ## Process
 
-### 1. Lock cut points from the scene plan
+### 1. Build cuts from the audio-driven timeline
 
-One primary cut per scene clip in `asset_manifest`. Carry `render_runtime` from the existing
-decision / scene_plan metadata **unchanged** (silent swap = governance violation).
+One primary cut per scene clip in `asset_manifest`. Read
+`asset_manifest.metadata.timeline_contract`; it is the authoritative effective timeline once
+assets are approved. It may assign unequal scene lengths, but its total must remain within ±5%
+of the user's requested duration. If its status is `pacing_revision_required` or
+`within_target_band` is false, do not compose unless the human explicitly approved a duration
+exception recorded in `decision_log`.
+
+For each cut, keep `in_seconds=0`, set `out_seconds` no later than the measured source media end,
+and record `source_duration_seconds`, allocated `effective_duration_seconds`, and
+`tail_hold_seconds`. Compose uses the effective duration: the renderer may clone the final frame
+after source motion ends or trim only the post-speech tail. Never trim the head, change clip
+speed, or trim through `audio_end_seconds`.
+
+Carry `render_runtime` from the existing decision / scene_plan metadata **unchanged** (silent
+swap = governance violation).
 
 ### 2. Audio and frame pre-conform (compose inputs)
 
@@ -44,32 +57,50 @@ From `asset_manifest.metadata.edit_decisions_for_compose` (or equivalent notes):
 
 Do **not** assume a single narration file. For every narration asset / script section:
 
-1. Add an `audio.narration.segments[]` entry with `asset_id`, `start_seconds` (from the
-   section), optional `end_seconds`, and `speaker` when known.
+1. Add an `audio.narration.segments[]` entry with `asset_id`, its effective `start_seconds`,
+   optional `end_seconds`, and `speaker` when known.
 2. At compose, pass **all** VO files as `panda_render` `audio.voice_tracks`:
    `[{ "path": "<vo file>", "at_s": <start_seconds> }, …]` under the music bed.
-3. Prefer sequential timing inside a shot; overlapping `at_s` windows mix (true multi-track).
+3. Derive the immutable scene-local source offset:
+   `relative_at_s = section.start_seconds - scene.start_seconds`. Then place compose VO at
+   `timeline_contract.scene.effective_start_seconds + relative_at_s`. The effective scene may
+   move because earlier scenes have unequal audio-driven durations; moving picture and VO
+   together preserves the exact offset used by the Seedance reference bed. Overlapping windows
+   mix (true multi-track). Use `lib.i2v_duration.effective_audio_start` so resume always
+   recomputes from source timestamps rather than a previously shifted result.
 4. If only one VO file exists (legacy single-speaker jobs), `audio.voice_path` alone is fine.
 
-### 3. VO / slot overrun (PACING RISK)
+### 2c. Validated lip-sync timing corrections
 
-Prefer **TTS-first pre-aligned slots** from assets: read
-`asset_manifest.metadata.vo_duration_map` (per scene `vo_seconds`, `i2v_duration`,
-`hold_extend_seconds`). When `hold_extend_seconds > 0`, extend that scene's on-screen hold by
-at least that amount so the full VO plays after the i2v clip ends. Mute native clip AAC and lay
-the ElevenLabs bed as today — do not keep Higgsfield native audio. **AUDIO LIPSYNC clips**
+Read `asset_manifest.metadata.lip_sync_qa.scenes`. Apply an offset only when all are true:
+
+- the scene has `validated_audio_offset_seconds`;
+- its selected result is `pass` after the local timing re-check; and
+- attempt 1 contains `evidence.expected_audio_offset_seconds`.
+
+For narration segments belonging to that scene, calculate
+`delta = validated_audio_offset_seconds - attempt_1.evidence.expected_audio_offset_seconds`,
+then set `start_seconds = effective_scene_start + original_scene_local_offset + delta`. Record `scene_id` and the
+signed `lip_sync_offset_applied_seconds` on each changed segment. Do not shift clips, music,
+unrelated scenes, unresolved/inconclusive results, or any segment lacking validated evidence.
+Never replace the source timestamp cumulatively on resume: always recompute from immutable
+scene-plan section/scene timestamps plus the current effective scene start.
+
+### 3. Target-duration and VO safety
+
+Prefer the full-scene allocation in `asset_manifest.metadata.timeline_contract`; use legacy
+`vo_duration_map` only for old jobs that lack it. The allocator has already selected supported
+i2v durations and bounded post-speech holds while preserving the requested total-duration band.
+Mute native clip AAC and lay the ElevenLabs bed as today — do not keep Higgsfield native audio.
+**AUDIO LIPSYNC clips**
 (`metadata.audio_lipsync: true` / Seedance with `generate_audio:false`) are silent or discardable
 AAC; mouths were driven by the same VO file you lay here — still mute + lay VO (do not skip the
 bed thinking native audio carries brand voice).
 
-If `known_issues` / PACING RISK still flags narration that overruns its visual slot (map missing
-or incomplete):
-
-- **DEFAULT:** extend that scene's on-screen hold so the **locked** CTA / VO copy finishes
-  (total runtime may exceed the brief's nominal seconds).
-- Log the choice in `decision_log` (`category` such as `pacing` / subject naming the scene).
-- Do **not** shorten locked copy.
-- Do **not** wait for an a/b/c answer — GATE 4 (`approve_assets`) already meant proceed.
+For a legacy job, a missing/incomplete map, or any discovered VO overrun, preserve the complete
+VO and stop for a pacing revision rather than silently making the master substantially short or
+long. Do not shorten locked copy, retime a generated lip-sync clip, or create a hold while the
+on-screen mouth should still be articulating.
 
 ### 4. Captions and overlays
 
@@ -86,9 +117,10 @@ clips here.
 ## Success criteria
 
 - `edit_decisions` validates; `render_runtime` unchanged from prior lock
-- Every narration asset is listed in `audio.narration.segments` with `start_seconds` (and
-  `speaker` when multi-voice)
-- VO overrun resolved by extending hold (or N/A if all VO fits); prefer
-  `vo_duration_map` hold extends from TTS-first assets when present
+- Every narration asset is listed in `audio.narration.segments` at its effective scene start plus
+  immutable scene-local offset (and `speaker` when multi-voice)
+- Only the scene allocator and QA-validated offset alter a narration's global timestamp; its
+  relationship to the speaking clip remains unchanged
+- Effective timeline stays within ±5% of the requested duration and no hold covers active speech
 - Native clip audio muted in the edit plan; frame pre-conform noted for compose
 - Same headless turn reaches compose `awaiting_human` — never a bare question exit

@@ -69,6 +69,16 @@ require 22.
 
 The launcher loads its **code and `.env` at startup**, so you MUST restart it after ANY of:
 code change, `git pull`, or editing `.env` (e.g. `DIFY_RUNNER=mock` → `claude`, or the token).
+After restarting, do not rely on `status:"ok"` alone. Compare `/health`:
+
+- `process_started_at` must be newer than the deployment.
+- `build_revision` must match `git rev-parse HEAD` (or the explicitly deployed
+  `OPENMONTAGE_BUILD_REVISION`).
+- `launcher_code_fingerprint` must change when `dify_launcher/app.py` or
+  `dify_launcher/runner.py` changed.
+
+This catches the failure mode where the working tree was updated but uvicorn still serves
+the previously imported launcher code.
 
 **nohup (dev / manual) — full sequence with Node 22:**
 ```bash
@@ -98,6 +108,7 @@ nohup python -m uvicorn dify_launcher.app:app --host 0.0.0.0 --port 8501 \
 
 # verify + watch log
 sleep 2 && curl -s http://127.0.0.1:8501/health
+git rev-parse HEAD
 tail -f ~/launcher.log
 ```
 Restart = stop then start. Switch runner: edit `DIFY_RUNNER` in `.env`, then restart.

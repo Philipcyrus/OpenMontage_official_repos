@@ -6,6 +6,8 @@ from tests.contracts.test_phase0_contracts import sample_artifact
 from lib.checkpoint import (
     CheckpointValidationError,
     init_project,
+    read_checkpoint,
+    validate_checkpoint,
     write_checkpoint,
 )
 
@@ -120,6 +122,32 @@ def test_in_progress_heartbeat_is_not_blocked_by_prerequisites(tmp_path) -> None
     )
 
     assert path.exists()
+
+
+def test_human_question_round_trips_but_unknown_fields_stay_strict(tmp_path) -> None:
+    init_project(
+        "run",
+        title="Run",
+        pipeline_type="framework-smoke",
+        pipeline_dir=tmp_path,
+    )
+    write_checkpoint(
+        tmp_path,
+        "run",
+        "research",
+        "awaiting_human",
+        {"research_brief": sample_artifact("research_brief")},
+        pipeline_type="framework-smoke",
+        question="Approve the generated hero still?",
+    )
+
+    checkpoint = read_checkpoint(tmp_path, "run", "research")
+    assert checkpoint is not None
+    assert checkpoint["question"] == "Approve the generated hero still?"
+
+    checkpoint["unexpected_launcher_field"] = True
+    with pytest.raises(CheckpointValidationError, match="Additional properties"):
+        validate_checkpoint(checkpoint)
 
 
 def test_unknown_style_playbook_fails_before_project_creation(tmp_path) -> None:
