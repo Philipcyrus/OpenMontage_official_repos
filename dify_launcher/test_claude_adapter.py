@@ -891,6 +891,7 @@ assert "089ddcec-c375-4299-8a65-6d8b757dd81a" in img
 assert "Max 2 paid" in img
 vid = run._start_prompt("jV", "a video", {}, "panda-video")
 assert "produce a video" in vid
+assert "aspect_ratio: 9:16" in vid
 assert "STILLS-ONLY" not in vid
 assert "089ddcec-c375-4299-8a65-6d8b757dd81a" in vid
 assert "4c01c8f9-6cfb-4d8c-9eb9-74cb61462103" in vid
@@ -899,6 +900,10 @@ assert "2D flat" in vid or "2D MEDIUM" in vid
 assert "PHASE 2 (motion sample)" not in vid, "default motion_sample=off must skip sample phase"
 assert "PHASE 3 (media)" in vid
 assert "TTS-FIRST" in vid
+vid16 = run._start_prompt("jV16", "youtube explainer", {"aspect_ratio": "16:9"}, "panda-video")
+assert "aspect_ratio: 16:9" in vid16
+assert "1920x1080" in vid16
+assert "Do NOT silently switch to 9:16" in vid16
 vid_ms = run._start_prompt("jV", "a video", {"motion_sample": True}, "panda-video")
 assert "PHASE 2 (motion sample)" in vid_ms
 assert "TTS-FIRST" in vid_ms
@@ -995,10 +1000,22 @@ assert R._carousel_aspect({}) == "4:5"
 assert R._carousel_aspect({"aspect_ratio": "9:16"}) == "9:16"
 assert R._stills_aspect({}, pipeline="panda-image") == "1:1"
 assert R._stills_aspect({"aspect_ratio": "9:16"}, pipeline="panda-image") == "9:16"
+assert R._stills_aspect({}, pipeline="panda-video") == "9:16"
+assert R._stills_aspect({"aspect_ratio": "16:9"}, pipeline="panda-video") == "16:9"
+assert R._stills_aspect({}, pipeline="panda-carousel") == "4:5"
+assert R._master_resolution("16:9") == "1920x1080"
+assert R._master_resolution("9:16") == "1080x1920"
+assert R._master_resolution(options={"aspect_ratio": "1:1"}, pipeline="panda-video") == "1080x1080"
 assert R._carousel_pixel_size("1:1") == (1080, 1080)
 assert R._carousel_pixel_size("4:5") == (1080, 1350)
 assert R._carousel_pixel_size("9:16") == (1080, 1920)
+assert R._carousel_pixel_size("16:9") == (1920, 1080)
 assert R._carousel_pixel_size("1080x1080") == (1080, 1080)
+aap16 = run._assets_approved_prompt(
+    "jAspect", "panda-video",
+    state={"pipeline": "panda-video", "options": {"aspect_ratio": "16:9"}},
+)
+assert "1920x1080" in aap16 and "1080x1920" not in aap16
 print("[ok] stills aspect helpers")
 
 # 8) stills revise prompt: EDIT vs FRESH + still path; infer-if-omitted ------

@@ -38,7 +38,10 @@ IDs chosen. See CHARACTER LOCK in `skills/meta/higgsfield-mcp-bridge.md`.
 only if the brief explicitly asks for 3D / photoreal / live-action — then log it in `decision_log`.
 
 ### 2. Deliverable & format
-Fix `deliverable_mix`: aspect ratio (e.g. 9:16 vertical), target duration, language, and any cutdowns.
+Fix `deliverable_mix`: **aspect ratio from `options.aspect_ratio`** (default **`9:16`** when
+omitted; pass through caller values such as `16:9`, `1:1`, `4:5`, `WIDTHxHEIGHT` — never rewrite),
+target duration, language, and any cutdowns. Record the chosen aspect in `deliverable_mix` so
+scene_plan / assets / compose use the same canvas.
 
 ### 3. Runtime & provider decisions (log them)
 - **Render runtime:** honor the `render_runtime` job option; if `auto`, note the intended lane per
@@ -56,6 +59,7 @@ Recommended keys: `concept`, `deliverable_mix`, `language`, `narrator`, `support
 ### 5. Quality check (self, no human pause)
 - [ ] The concept is stated concretely and traceable to the brief
 - [ ] Deliverable format + duration + language are explicit
+- [ ] Aspect ratio matches `options.aspect_ratio` (default `9:16`) and is logged in `deliverable_mix`
 - [ ] Human/panda phrases resolved to locked Element IDs; `character_lock` logged
 - [ ] Visual medium is 2D flat unless the brief explicitly overrides
 - [ ] Render runtime + provider decisions are logged in `decision_log`

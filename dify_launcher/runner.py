@@ -559,7 +559,8 @@ def _still_abs_paths(job_id: str, state: Optional[dict[str, Any]], shots: list[A
     return paths
 
 
-# carousel slide canvas — caller sets options.aspect_ratio (default 4:5). Do not coerce to 4:5/1:1.
+# Canvas sizes — caller sets options.aspect_ratio. Do not coerce a caller-set ratio.
+# Defaults (when omitted): video 9:16, carousel 4:5, image 1:1.
 _CAROUSEL_PIXEL_SIZES = {
     "1:1": (1080, 1080),
     "4:5": (1080, 1350),
@@ -573,9 +574,14 @@ _CAROUSEL_PIXEL_SIZES = {
 def _stills_aspect(options: Optional[dict[str, Any]] = None,
                    state: Optional[dict[str, Any]] = None,
                    pipeline: Optional[str] = None) -> str:
-    """Job option `aspect_ratio`. Default 1:1 for panda-image, 4:5 otherwise. Pass-through."""
+    """Job option `aspect_ratio`. Pipeline defaults; caller-set values pass through."""
     p = pipeline or _pipeline_of(state or {})
-    default = "1:1" if p == "panda-image" else "4:5"
+    if p == "panda-image":
+        default = "1:1"
+    elif p == "panda-video":
+        default = "9:16"
+    else:
+        default = "4:5"  # panda-carousel
     opts = options if options is not None else ((state or {}).get("options") or {})
     raw = str((opts or {}).get("aspect_ratio") or default).strip()
     return raw or default
@@ -583,12 +589,12 @@ def _stills_aspect(options: Optional[dict[str, Any]] = None,
 
 def _carousel_aspect(options: Optional[dict[str, Any]] = None,
                      state: Optional[dict[str, Any]] = None) -> str:
-    """Job option `aspect_ratio`, default 4:5 (carousel / video). Pass-through."""
-    return _stills_aspect(options=options, state=state)
+    """Job option `aspect_ratio` (carousel default 4:5). Pass-through."""
+    return _stills_aspect(options=options, state=state, pipeline="panda-carousel")
 
 
 def _carousel_pixel_size(ratio: str) -> tuple[int, int]:
-    """Mock placeholder size for a carousel ratio. Unknown W:H → 1080 on the short side."""
+    """Pixel size for a canvas ratio. Unknown W:H → 1080 on the short side."""
     key = str(ratio or "4:5").strip().lower().replace(" ", "")
     if key in _CAROUSEL_PIXEL_SIZES:
         return _CAROUSEL_PIXEL_SIZES[key]
@@ -605,6 +611,17 @@ def _carousel_pixel_size(ratio: str) -> tuple[int, int]:
                 return (1080, max(1, round(1080 * b / a)))
             return (max(1, round(1080 * a / b)), 1080)
     return _CAROUSEL_PIXEL_SIZES["4:5"]
+
+
+def _master_resolution(ratio: Optional[str] = None,
+                       options: Optional[dict[str, Any]] = None,
+                       state: Optional[dict[str, Any]] = None,
+                       pipeline: Optional[str] = None) -> str:
+    """Master canvas as ``WxH`` for panda_render / pre-conform (from options.aspect_ratio)."""
+    if not ratio:
+        ratio = _stills_aspect(options=options, state=state, pipeline=pipeline)
+    w, h = _carousel_pixel_size(ratio)
+    return f"{w}x{h}"
 
 
 def _script_to_markdown(script: dict[str, Any]) -> str:
@@ -1066,9 +1083,8 @@ class MockRunner(Runner):
             if n >= 3 and i == 1:
                 scene["hero_moment"] = True
             scenes.append(scene)
-        scene_plan = {"version": "1.0", "scenes": scenes}
-        if stills_only:
-            scene_plan["metadata"] = {"aspect_ratio": _stills_aspect(state=state)}
+        scene_plan = {"version": "1.0", "scenes": scenes,
+                      "metadata": {"aspect_ratio": _stills_aspect(state=state)}}
         store.artifact_path(job_id, "scene_plan.json").write_text(
             json.dumps(scene_plan, indent=2), encoding="utf-8")
         # Surface the plan inline (dict) so Dify can review it as TEXT — no stills here.
@@ -1341,10 +1357,7 @@ class MockRunner(Runner):
                             existing: Optional[list[str]] = None) -> list[str]:
         from PIL import Image, ImageDraw
         colors = [(11, 11, 11), (253, 197, 13), (30, 30, 30)]
-        if state and _is_stills_terminal(state):
-            size = _carousel_pixel_size(_stills_aspect(state=state))
-        else:
-            size = (1080, 1920)
+        size = _carousel_pixel_size(_stills_aspect(state=state)) if state else (1080, 1920)
         if existing:
             names = [_still_basename(x) for x in existing]
             while len(names) < n:
@@ -1775,7 +1788,8 @@ class ClaudeCodeRunner(Runner):
         job_id = state["job_id"]
         pipeline = _pipeline_of(state)
         try:
-            self._run_agent(self._assets_approved_prompt(job_id, pipeline), job_id, "edit")
+            self._run_agent(self._assets_approved_prompt(job_id, pipeline, state=state),
+                            job_id, "edit")
         except Exception as exc:  # timeout/auth/provider failure remains safely resumable
             return self._final_retry_gate(state, f"initial edit/compose leg failed: {exc}")
         max_extra = int(os.environ.get("CLAUDE_EDIT_COMPOSE_MAX", "3"))
@@ -1785,7 +1799,7 @@ class ClaudeCodeRunner(Runner):
             n += 1
             try:
                 self._run_agent(
-                    self._edit_compose_continue_prompt(job_id, pipeline),
+                    self._edit_compose_continue_prompt(job_id, pipeline, state=state),
                     job_id, f"edit_continue_{n}")
             except Exception as exc:
                 return self._final_retry_gate(
@@ -1877,6 +1891,12 @@ class ClaudeCodeRunner(Runner):
                         and not (isinstance(latest.get("partial_progress"), dict)
                                  and latest["partial_progress"].get("phase"))):
                     self._backfill_assets_phase(job_id, latest, "stills", pp)
+                # Thin hero/stills pause: agent omitted artifacts.stills but PNGs exist on disk.
+                if (phase in ("hero_still", "stills")
+                        and arts.get("stills")
+                        and not (isinstance(latest.get("artifacts"), dict)
+                                 and latest["artifacts"].get("stills"))):
+                    self._backfill_stills_artifacts(job_id, latest, arts["stills"], pp)
             else:
                 gate = _STAGE_GATE.get(stage, f"approve_{stage}")
             _apply_previews(job_id, arts, gate)
@@ -1940,6 +1960,35 @@ class ClaudeCodeRunner(Runner):
             cp.write_checkpoint(
                 self._projects_dir, job_id, "assets", "awaiting_human",
                 latest.get("artifacts") or {},
+                pipeline_type=latest.get("pipeline_type") or _DEFAULT_PIPELINE,
+                human_approval_required=True, human_approved=False,
+                partial_progress=merged,
+            )
+        except (OSError, ValueError, TypeError):
+            pass
+
+    def _backfill_stills_artifacts(
+        self,
+        job_id: str,
+        latest: dict[str, Any],
+        stills: list[str],
+        pp: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Persist disk-scanned still basenames into a thin hero/stills checkpoint once."""
+        from lib import checkpoint as cp
+        arts = dict(latest.get("artifacts") or {})
+        arts["stills"] = list(stills)
+        merged = dict(pp or {})
+        if isinstance(latest.get("partial_progress"), dict):
+            for k, v in latest["partial_progress"].items():
+                merged.setdefault(k, v)
+        phase = merged.get("phase")
+        if not phase:
+            return
+        try:
+            cp.write_checkpoint(
+                self._projects_dir, job_id, "assets", "awaiting_human",
+                arts,
                 pipeline_type=latest.get("pipeline_type") or _DEFAULT_PIPELINE,
                 human_approval_required=True, human_approved=False,
                 partial_progress=merged,
@@ -2187,6 +2236,8 @@ class ClaudeCodeRunner(Runner):
         scale_line = _pair_scale_lock_line()
         lipsync_line = _audio_lipsync_line(options)
         lang_note = _language_lock_note(options, coerced=language_coerced)
+        ratio = _stills_aspect(options, pipeline=pipeline)
+        master = _master_resolution(ratio)
 
         if music is False or str(music).lower() in ("false", "none", "no", "off"):
             music_line = "MUSIC — do NOT add a background music bed for this job."
@@ -2198,7 +2249,13 @@ class ClaudeCodeRunner(Runner):
         return (
             f"Run the `{pipeline}` pipeline to produce a video.\n"
             f"project_id: {job_id}\nBrief: {brief}\n"
-            f"language: {lang}    narrator: {narrator}\n\n"
+            f"language: {lang}    narrator: {narrator}    aspect_ratio: {ratio}\n\n"
+            "ASPECT / CANVAS — MANDATORY: honor the job's aspect_ratio end-to-end. Record it on "
+            f"scene_plan.metadata.aspect_ratio as '{ratio}'. Pass the same ratio to Higgsfield "
+            "generate_image / generate_video (confirm via models_explore). Compose with "
+            f"panda_render resolution='{master}'. Do NOT silently switch to 9:16 or another "
+            "canvas. If the chosen model cannot produce this aspect, STOP and escalate — do not "
+            "rewrite the ratio.\n"
             "BRAND — MANDATORY, do NOT improvise: read config/panda-elements.json and USE its "
             "Higgsfield reference Element IDs — customer "
             "`089ddcec-c375-4299-8a65-6d8b757dd81a`, panda "
@@ -2256,13 +2313,15 @@ class ClaudeCodeRunner(Runner):
                 "  - assets PHASE 0 (hero look-lock): generate ONLY ONE hero still "
                 "(hero_moment scene, else scene 1). Checkpoint status='awaiting_human' AND "
                 "top-level partial_progress={\"phase\":\"hero_still\",\"hero_scene_id\":\"…\","
-                "\"look_notes\":[]} and STOP. Do NOT generate other stills yet.\n"
+                "\"look_notes\":[]}; artifacts.stills MUST list the hero basename "
+                "(full asset_manifest not required until later). STOP. Do NOT generate other stills yet.\n"
                 "  - assets PHASE 1 (stills): after hero is approved, KEEP the hero PNG; generate "
                 "REMAINING stills under LOOK LOCK (import hero as style ref once + look_notes). "
                 "Preflight all remaining take-1 stills and enforce the complete-batch budget, "
                 "then submit with max 4 Higgsfield jobs in flight (2 after a 429), poll the set "
-                "together, then run take 2 only for unusable take-1 results. Write "
-                "asset_manifest with credits. Checkpoint status='awaiting_human' AND top-level "
+                "together, then run take 2 only for unusable take-1 results. List all basenames in "
+                "artifacts.stills; write asset_manifest with credits when present. Checkpoint "
+                "status='awaiting_human' AND top-level "
                 "partial_progress={\"phase\":\"stills\"} and STOP.\n"
             )
             shape_line = (
@@ -2366,7 +2425,10 @@ class ClaudeCodeRunner(Runner):
                 "Write the assets "
                 "checkpoint status='awaiting_human' AND top-level "
                 "partial_progress={\"phase\":\"hero_still\",\"hero_scene_id\":\"…\","
-                "\"look_notes\":[]} (NOT nested under asset_manifest.metadata) and STOP. "
+                "\"look_notes\":[]} (NOT nested under asset_manifest.metadata). "
+                "artifacts MUST list the hero PNG basename under artifacts.stills "
+                "(full schema-valid asset_manifest is NOT required until PHASE 3 / "
+                "approve_assets). STOP. "
                 "Do NOT generate other stills or any video yet.\n"
             )
             stills = (
@@ -2379,10 +2441,12 @@ class ClaudeCodeRunner(Runner):
                 "reduce to 2 after a 429), poll the set together; do not serialize. Run take 2 "
                 "only for unusable take-1 results. Same CHARACTER LOCK + 2D MEDIUM + STILLS "
                 "2-TAKE per remaining scene. "
-                "Record all stills (incl. hero) in asset_manifest with credits. Write the assets "
+                "Record all stills (incl. hero) under artifacts.stills (basenames) and in "
+                "asset_manifest with credits when present. Write the assets "
                 "checkpoint status='awaiting_human' AND top-level "
                 "partial_progress={\"phase\":\"stills\"} and STOP. Do NOT generate any video yet. "
-                "Do NOT mark assets completed yet.\n"
+                "Do NOT mark assets completed yet. Full schema-valid asset_manifest is required "
+                "at PHASE 3 / approve_assets, not at this storyboard pause.\n"
             )
         else:
             hero = ""
@@ -2396,8 +2460,9 @@ class ClaudeCodeRunner(Runner):
                 "(max 4 Higgsfield jobs in flight; 2 after a 429), poll the set together, then "
                 "take 2 = i2i only for unusable take 1; max 2 paid generate_image per scene. "
                 "Then write the assets "
-                "checkpoint with status='awaiting_human' AND partial_progress={\"phase\":\"stills\"} "
-                "and STOP. Do NOT generate any video yet.\n")
+                "checkpoint with status='awaiting_human' AND partial_progress={\"phase\":\"stills\"}, "
+                "artifacts.stills listing every PNG basename, and STOP. Do NOT generate any video "
+                "yet. Full schema-valid asset_manifest is required at PHASE 3 / approve_assets.\n")
         if audio_lipsync:
             motion_how = (
                 "For customer/panda speaking clips: seedance_2_0 with start_image + "
@@ -2498,9 +2563,11 @@ class ClaudeCodeRunner(Runner):
             f"(status='awaiting_human', end your turn). If the pipeline is complete, finish.{extra}"
         )
 
-    def _assets_approved_prompt(self, job_id: str, pipeline: Optional[str] = None) -> str:
+    def _assets_approved_prompt(self, job_id: str, pipeline: Optional[str] = None,
+                                state: Optional[dict[str, Any]] = None) -> str:
         """Prompt after GATE 4 (approve_assets): run ungated edit then compose → approve_final."""
         p = pipeline or _DEFAULT_PIPELINE
+        master = _master_resolution(state=state, pipeline=p)
         return (
             f"For project_id: {job_id}, the FULL MEDIA phase of the `assets` stage "
             f"(GATE 4 / approve_assets) is APPROVED on the `{p}` pipeline. "
@@ -2511,8 +2578,9 @@ class ClaudeCodeRunner(Runner):
             "skills/meta/checkpoint-protocol.md. Build edit_decisions from scene_plan + "
             "asset_manifest (cut points, caption bands, render_runtime carried UNCHANGED). "
             "Mute/discard the native AAC track baked into Higgsfield/Kling i2v clips before "
-            "mixing narration+music. Pre-conform off-spec 1076x1928 clips to 1080x1920 via "
-            "an all-top crop (not a centred cover-crop).\n"
+            f"mixing narration+music. Pre-conform off-spec clips to {master} via "
+            "an all-top crop (not a centred cover-crop). Pass that same resolution to "
+            "panda_render.\n"
             "2. Use asset_manifest.metadata.timeline_contract as the effective timeline. Scene "
             "lengths may be unequal, but the final must remain within ±5% of the requested total. "
             "Record each cut's source_duration_seconds, effective_duration_seconds, and bounded "
@@ -2525,7 +2593,8 @@ class ClaudeCodeRunner(Runner):
             "Never shift picture and VO independently or apply unresolved offsets.\n"
             "4. Write the edit checkpoint status='completed' (ungated), then immediately "
             "run compose per skills/pipelines/panda-video/compose-director.md "
-            "(panda_render for ffmpeg / render_runtime already locked). Verify final.mp4, "
+            f"(panda_render resolution='{master}' / render_runtime already locked). Verify "
+            "final.mp4, "
             "write render_report + final_review. Carry unresolved lip-sync scene ids into "
             "final_review.checks.lip_sync_check and set both its and final_review's top-level "
             "recommended_action='present_to_user'; do not retry again or block. Checkpoint "
@@ -2536,9 +2605,11 @@ class ClaudeCodeRunner(Runner):
         )
 
     def _edit_compose_continue_prompt(self, job_id: str,
-                                      pipeline: Optional[str] = None) -> str:
+                                      pipeline: Optional[str] = None,
+                                      state: Optional[dict[str, Any]] = None) -> str:
         """Re-nudge after a continue leg that asked/exited without reaching approve_final."""
         p = pipeline or _DEFAULT_PIPELINE
+        master = _master_resolution(state=state, pipeline=p)
         return (
             f"For project_id: {job_id} (`{p}`), clip/media approval ALREADY happened. You "
             "previously stopped without reaching compose's approve_final gate. Do NOT ask "
@@ -2546,8 +2617,9 @@ class ClaudeCodeRunner(Runner):
             "If edit_decisions is missing, write it now from metadata.timeline_contract "
             "(unequal audio-driven scene lengths; requested total ±5%; bounded post-speech holds; "
             "apply only locally validated lip-sync offsets from immutable scene-local timestamps; "
-            "mute native clip audio; all-top crop). Then compose "
-            "to final.mp4, carry unresolved lip-sync scene warnings into final_review with "
+            f"mute native clip audio; all-top crop to {master}). Then compose "
+            f"to final.mp4 with panda_render resolution='{master}', carry unresolved lip-sync "
+            "scene warnings into final_review with "
             "recommended_action='present_to_user', and checkpoint compose status='awaiting_human'. "
             "Do NOT retry lip-sync again and do NOT leave status running with no gate."
         )

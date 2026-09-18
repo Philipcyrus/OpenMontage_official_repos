@@ -232,7 +232,15 @@ class PandaRender(BaseTool):
         "properties": {
             "profile": {"type": "string", "default": "ugc",
                         "description": "Render profile. 'ugc' = clean/no-brand (default). 'bgc' would brand at compose time — avoid; branding is a separate step."},
-            "resolution": {"type": "string", "default": "1080x1920"},
+            "resolution": {
+                "type": "string",
+                "default": "1080x1920",
+                "description": (
+                    "Master canvas WxH. Compose must pass the job's options.aspect_ratio "
+                    "canvas (e.g. 9:16→1080x1920, 16:9→1920x1080). Default 1080x1920 is only "
+                    "a last-resort fallback when omitted."
+                ),
+            },
             "fps": {"type": "integer", "default": 30,
                     "description": "Target fps. 60 triggers minterpolate (slow); use 30 for straight assembly."},
             "grade": {"type": "string", "default": "none"},

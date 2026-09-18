@@ -129,6 +129,129 @@ def _clear_processing_markers(state: dict[str, Any]) -> dict[str, Any]:
     return state
 
 
+_ASSETS_PHASE_GATES = {
+    "hero_still": "approve_hero_still",
+    "stills": "approve_stills",
+    "motion_sample": "approve_motion_sample",
+    "budget_hold": "budget_exceeded",
+}
+
+
+def _truthy_option(options: dict[str, Any], key: str, default: Any = False) -> bool:
+    v = options.get(key, default)
+    return str(v).lower() not in ("false", "0", "no", "off", "")
+
+
+def _next_recovery_target(
+    state: dict[str, Any], decision: str
+) -> tuple[Optional[str], Optional[str]]:
+    """(gate, stage) to reopen if an async leg dies after leaving the current gate.
+
+    Approve advances recovery to the *next* expected human pause. Revise/skip/cancel
+    keep the current gate so paid media is not skipped.
+    """
+    gate = state.get("gate")
+    stage = state.get("stage")
+    if decision != "approve":
+        return (gate if isinstance(gate, str) else None,
+                stage if isinstance(stage, str) else None)
+
+    pipeline = state.get("pipeline") or "panda-video"
+    options = state.get("options") if isinstance(state.get("options"), dict) else {}
+    hero_on = _truthy_option(options, "hero_still", True)
+    motion_on = _truthy_option(options, "motion_sample", False)
+    stills_terminal = pipeline in ("panda-carousel", "panda-image")
+
+    if gate == "approve_script":
+        return "approve_scene_plan", "scene_plan"
+    if gate == "approve_scene_plan":
+        if pipeline == "panda-image" or not hero_on:
+            return "approve_stills", "assets"
+        return "approve_hero_still", "assets"
+    if gate == "approve_hero_still":
+        return "approve_stills", "assets"
+    if gate == "approve_stills":
+        if stills_terminal:
+            return "approve_brand", "brand"
+        if motion_on:
+            return "approve_motion_sample", "assets"
+        return "approve_assets", "assets"
+    if gate == "approve_motion_sample":
+        return "approve_assets", "assets"
+    if gate == "approve_assets":
+        return "approve_final", "compose"
+    if gate == "approve_final":
+        return "approve_brand", "brand"
+    if gate == "budget_exceeded":
+        return "budget_exceeded", "assets"
+    return (gate if isinstance(gate, str) else None,
+            stage if isinstance(stage, str) else None)
+
+
+def _running_ack_question(gate: Optional[str], decision: str) -> str:
+    """Non-empty question so Agent Door never treats a long async hop as 'no reply'."""
+    if decision == "revise":
+        return "processing — revising; poll GET /jobs/{id} until status changes"
+    if decision == "skip":
+        return "processing — finishing without brand; poll GET /jobs/{id}"
+    if decision == "cancel":
+        return "processing — cancelling; poll GET /jobs/{id}"
+    by_gate = {
+        "approve_script": "processing — writing scene plan; poll GET /jobs/{id}",
+        "approve_scene_plan": (
+            "processing — generating look-lock / storyboard stills; poll GET /jobs/{id}"
+        ),
+        "approve_hero_still": (
+            "processing — generating storyboard stills; poll GET /jobs/{id}"
+        ),
+        "approve_stills": "processing — generating clips; poll GET /jobs/{id}",
+        "approve_motion_sample": (
+            "processing — generating remaining clips; poll GET /jobs/{id}"
+        ),
+        "approve_assets": (
+            "processing — editing and composing final; poll GET /jobs/{id}"
+        ),
+        "approve_final": "processing — opening brand gate; poll GET /jobs/{id}",
+        "approve_brand": "processing — applying brand; poll GET /jobs/{id}",
+        "budget_exceeded": "processing — resuming under budget; poll GET /jobs/{id}",
+    }
+    return by_gate.get(
+        gate or "",
+        "processing — poll GET /jobs/{id} until status changes",
+    )
+
+
+def _disk_recovery_pause(job_id: str) -> Optional[tuple[str, str]]:
+    """Prefer an on-disk later human pause over an earlier text gate / stale recovery.
+
+    Returns (gate, stage) when checkpoint_assets/compose is awaiting_human.
+    """
+    try:
+        from lib import checkpoint as cp
+        from lib.paths import PROJECTS_DIR
+    except ImportError:
+        return None
+
+    compose = cp.read_checkpoint(PROJECTS_DIR, job_id, "compose", soft=True)
+    if isinstance(compose, dict) and compose.get("status") == "awaiting_human":
+        return "approve_final", "compose"
+
+    assets = cp.read_checkpoint(PROJECTS_DIR, job_id, "assets", soft=True)
+    if not isinstance(assets, dict) or assets.get("status") != "awaiting_human":
+        return None
+
+    partial = assets.get("partial_progress")
+    phase = partial.get("phase") if isinstance(partial, dict) else None
+    if phase in _ASSETS_PHASE_GATES:
+        return _ASSETS_PHASE_GATES[phase], "assets"
+
+    arts = assets.get("artifacts") if isinstance(assets.get("artifacts"), dict) else {}
+    # Phase-less full-media pause: require manifest; clips optional but preferred.
+    if arts.get("asset_manifest"):
+        return "approve_assets", "assets"
+    return None
+
+
 def _recover_worker_result(
     result: dict[str, Any],
     original: dict[str, Any],
@@ -136,8 +259,12 @@ def _recover_worker_result(
 ) -> dict[str, Any]:
     """Never let an exiting async worker strand a job in `running`."""
     recovered = dict(result)
+    job_id = recovered.get("job_id") or original.get("job_id")
+    disk_pause = _disk_recovery_pause(str(job_id)) if job_id else None
+
     gate = (
-        recovered.get("gate")
+        (disk_pause[0] if disk_pause else None)
+        or recovered.get("gate")
         or recovered.get("_recovery_gate")
         or original.get("gate")
     )
@@ -152,7 +279,8 @@ def _recover_worker_result(
     ):
         gate = "approve_assets"
     stage = (
-        recovered.get("stage")
+        (disk_pause[1] if disk_pause else None)
+        or recovered.get("stage")
         or recovered.get("_recovery_stage")
         or original.get("stage")
     )
@@ -282,16 +410,28 @@ def _resolve_pipeline(name: Optional[str]) -> str:
 
 @app.get("/health")
 def health() -> dict[str, Any]:
+    current_fp = _launcher_code_fingerprint()
+    code_stale = current_fp != _LAUNCHER_CODE_FINGERPRINT
     return {"status": "ok", "runner": _RUNNER_NAME, "async": _ASYNC,
             "montage_door": _MONTAGE_DOOR,
             "process_started_at": _PROCESS_STARTED_AT,
             "build_revision": _LOADED_REVISION,
-            "launcher_code_fingerprint": _LAUNCHER_CODE_FINGERPRINT}
+            "launcher_code_fingerprint": _LAUNCHER_CODE_FINGERPRINT,
+            "launcher_code_fingerprint_on_disk": current_fp,
+            "code_stale": code_stale}
 
 
 @app.post("/jobs")
 def create_job(body: StartJob, x_dify_token: Optional[str] = Header(None)) -> dict[str, Any]:
     _auth(x_dify_token)
+    if _launcher_code_fingerprint() != _LAUNCHER_CODE_FINGERPRINT:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "launcher code changed on disk since process start (code_stale); "
+                "restart uvicorn before starting new jobs"
+            ),
+        )
     job_id = store.new_job_id()
     store.ensure_job(job_id)          # create the job + artifacts dir before the runner writes
     pipeline = _resolve_pipeline(body.pipeline)
@@ -357,13 +497,14 @@ def respond(job_id: str, body: Respond, x_dify_token: Optional[str] = Header(Non
     if body.decision == "skip" and state.get("gate") != "approve_brand":
         raise HTTPException(status_code=400, detail="skip is only valid at the approve_brand gate")
     if _ASYNC:
+        recovery_gate, recovery_stage = _next_recovery_target(state, body.decision)
         running = {
             **state,
             "status": "running",
             "gate": None,
-            "question": "processing — poll GET /jobs/{id} until status changes",
-            "_recovery_gate": state.get("gate"),
-            "_recovery_stage": state.get("stage"),
+            "question": _running_ack_question(state.get("gate"), body.decision),
+            "_recovery_gate": recovery_gate,
+            "_recovery_stage": recovery_stage,
             "_processing_operation": f"resume:{state.get('gate') or 'unknown'}",
             "processing_started_at": _utc_now(),
         }
