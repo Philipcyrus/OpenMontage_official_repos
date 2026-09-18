@@ -566,6 +566,7 @@ def final_notes(project_dir: Path, plan: Optional[dict[str, Any]], recs: list[di
         return notes
 
     # 1) every screenshot scene was composed, from the layout the plan holds now
+    unrendered: set[str] = set()
     for scene_id, group in grouped.items():
         n = group[0]["scene_number"]
         clip = sl.overlay_dir(project_dir) / f"{_safe_scene(scene_id)}.mp4"
@@ -573,6 +574,7 @@ def final_notes(project_dir: Path, plan: Optional[dict[str, Any]], recs: list[di
         if not clip.is_file() or not isinstance(meta, dict):
             notes.append(f"scene {n}: its screenshots were not rendered — compose must run "
                          "screen_overlay before panda_render")
+            unrendered.add(scene_id)
             continue
         if meta.get("layout_hash") != sl.layout_hash(group, recs):
             notes.append(f"scene {n}: the screenshot layout changed after it was rendered — "
@@ -604,6 +606,9 @@ def final_notes(project_dir: Path, plan: Optional[dict[str, Any]], recs: list[di
 
     overlap = float((tl.get("transition") or {}).get("duration_s") or 0.0)
     items = {(it["scene_id"], it["input_id"]): it for it in sl.screenshot_items(plan)}
+    # Every screenshot the plan places must end with an outcome — found, flagged, or "could not
+    # be checked". One the timeline does not place at all would otherwise just be skipped.
+    accounted: set[tuple[str, str]] = set()
     for row in tl.get("scenes") or []:
         scene_id = str(row.get("scene_id") or "")
         shots = row.get("screenshots") or []
@@ -622,8 +627,11 @@ def final_notes(project_dir: Path, plan: Optional[dict[str, Any]], recs: list[di
             if it is None or rec is None:
                 continue
             label = f"scene {n} (screenshot {rec.get('n')})"
+            accounted.add((scene_id, str(shot.get("input_id"))))
             box = _shot_box(it, rec, W, H, grouped[scene_id][0].get("captions"))
             if box is None:
+                notes.append(f"{label}: could not be verified in the final video — too little of "
+                             "it shows above the caption to compare; please check it by eye")
                 continue
             window = (float(_num(shot.get("from_s")) or 0.0),
                       float(_num(shot.get("to_s")) or scene_dur))
@@ -662,6 +670,9 @@ def final_notes(project_dir: Path, plan: Optional[dict[str, Any]], recs: list[di
                 if diff <= min(FINAL_MATCH_MAX_DIFF, 0.5 * baseline):
                     matched += 1
             if checked == 0:
+                notes.append(f"{label}: could not be verified in the final video — at {shown} "
+                             "the screenshot looks too much like the clip behind it to tell them "
+                             "apart; please check it by eye")
                 continue
             if matched == 0:
                 notes.append(f"{label}: it is not in the final video at {shown}, where the plan "
@@ -670,6 +681,14 @@ def final_notes(project_dir: Path, plan: Optional[dict[str, Any]], recs: list[di
                 notes.append(f"{label}: it is only there for part of {shown} "
                              f"({matched} of {checked} checks found it) — check the video around "
                              "that moment")
+
+    for it in sl.screenshot_items(plan):
+        key = (it["scene_id"], it["input_id"])
+        if key in accounted or it["scene_id"] in unrendered or it["input_id"] not in by_id:
+            continue
+        notes.append(f"scene {it['scene_number']} (screenshot {by_id[it['input_id']].get('n')}): "
+                     "could not be checked in the final video — compose's timeline does not say "
+                     "where it is; re-run compose, or check it by eye")
     return notes
 
 

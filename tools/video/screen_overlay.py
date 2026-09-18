@@ -380,6 +380,10 @@ class ScreenOverlay(BaseTool):
         language = inputs.get("language") or "zh"
         out_dir = sl.overlay_dir(project)
         scenes_out: list[dict[str, Any]] = []
+        # The scene id each item was resolved to — given, or inferred from its media path. Kept
+        # beside the list (not written into the items panda_render receives) so the timeline
+        # records an inferred scene with its screenshots instead of as an anonymous one.
+        scene_ids: list[str] = []
         rendered: list[dict[str, Any]] = []
         path_to_scene = self._path_scene_index(project)
 
@@ -389,6 +393,7 @@ class ScreenOverlay(BaseTool):
             media = Path(str(sc.get("media_path") or ""))
             if not scene_id:
                 scene_id = path_to_scene.get(str(media.resolve()), "")
+            scene_ids.append(scene_id)
             group = grouped.get(scene_id)
             if not group:
                 scenes_out.append(item)
@@ -418,7 +423,7 @@ class ScreenOverlay(BaseTool):
             rendered.append({"scene_id": scene_id, "path": str(composite),
                              "layout_hash": sl.layout_hash(group, recs.values())})
         timeline = self._write_timeline(project, scenes_out, grouped, recs,
-                                        inputs.get("transition"))
+                                        inputs.get("transition"), scene_ids)
         return ToolResult(success=True,
                           data={"scenes": scenes_out, "rendered": rendered, "timeline": timeline},
                           artifacts=[r["path"] for r in rendered],
@@ -427,7 +432,8 @@ class ScreenOverlay(BaseTool):
     def _write_timeline(self, project: Path, scenes: list[dict[str, Any]],
                         grouped: dict[str, list[dict[str, Any]]],
                         recs: dict[str, dict[str, Any]],
-                        transition: Any) -> dict[str, Any]:
+                        transition: Any,
+                        scene_ids: Optional[list[str]] = None) -> dict[str, Any]:
         """Record where each scene — and each screenshot — lands in the assembled video.
 
         Without this the launcher can only look for a screenshot somewhere in the final video,
@@ -444,7 +450,8 @@ class ScreenOverlay(BaseTool):
         t = 0.0
         for i, sc in enumerate(scenes):
             dur = float(sc.get("duration_s") or 0.0)
-            scene_id = str(sc.get("scene_id") or "")
+            scene_id = (scene_ids[i] if scene_ids and i < len(scene_ids) and scene_ids[i]
+                        else str(sc.get("scene_id") or ""))
             shots = []
             for it in grouped.get(scene_id, []):
                 rec = recs.get(it["input_id"]) or {}

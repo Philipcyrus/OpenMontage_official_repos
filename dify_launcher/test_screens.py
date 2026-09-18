@@ -591,7 +591,8 @@ if shutil.which("ffmpeg"):
         (fp / sub).mkdir(parents=True, exist_ok=True)
     frecs = [dict(INPUTS[0], sha256="x"), dict(INPUTS[1], sha256="y")]
     L1 = dict(GOOD_PHONE, steps=[])
-    L2 = dict(GOOD_WEB, zone={"x": 0.06, "y": 0.72, "w": 0.40, "h": 0.20})
+    # clear of the caption strip (y 0.76+): a screenshot hidden under it cannot be verified
+    L2 = dict(GOOD_WEB, zone={"x": 0.06, "y": 0.50, "w": 0.40, "h": 0.20})
     nat1 = {"width": 1170, "height": 2532}
     nat2 = {"width": 1440, "height": 900}
 
@@ -623,6 +624,8 @@ if shutil.which("ffmpeg"):
     assert any(n.startswith("scene 1 (screenshot 1): it is not in the final video at 0.0–5.0 s")
                for n in _sw), _sw
     assert not any("could not be checked" in n for n in _sw), _sw
+    # ... and screenshot 2 is really compared too (scene 2's slot shows scene 1's overlay)
+    assert any(n.startswith("scene 2 (screenshot 2): it is not in the final video") for n in _sw), _sw
 
     # --- two screenshots one after the other in ONE scene --------------------
     A = dict(GOOD_PHONE, steps=[], show={"from_s": 0.0, "to_s": 2.4})
@@ -674,6 +677,31 @@ if shutil.which("ffmpeg"):
     assert any("could not be checked" in n and "asset manifest" in n for n in _miss), _miss
     _manifest(fp, [("s01", "assets/video/s01.mp4"), ("s02", "assets/video/s02.mp4")])
 
+    # a timeline that lost a scene's id (what compose wrote for an inferred scene id before the
+    # fix): its screenshot is reported as unchecked, not silently skipped
+    _timeline(fp, [("", 0.0, 5.0, []), ("s02", 5.0, 5.0, [("in_02", 2, 0.0, 5.0)])])
+    _lost = screens.final_notes(fp, plan2, frecs, right)
+    assert [n for n in _lost if n.startswith("scene 1 (screenshot 1): could not be checked")
+            and "timeline does not say where it is" in n], _lost
+    assert not [n for n in _lost if n.startswith("scene 2")], _lost
+    _timeline(fp, [("s01", 0.0, 5.0, [("in_01", 1, 0.0, 5.0)]),
+                   ("s02", 5.0, 5.0, [("in_02", 2, 0.0, 5.0)])])
+
+    # a screenshot indistinguishable from the clip behind it cannot be proven either way: say so
+    ip = PROJECTS / "job_final_same"
+    for sub in ("inputs", "overlay", "assets/video", "artifacts"):
+        (ip / sub).mkdir(parents=True, exist_ok=True)
+    same_plan = plan_with((1, "in_01", L1), n_scenes=1)
+    _blank(ip / "assets/video/s01.mp4")
+    shutil.copyfile(ip / "assets/video/s01.mp4", ip / "overlay/s01.mp4")   # white on white
+    _manifest(ip, [("s01", "assets/video/s01.mp4")])
+    (ip / "overlay/s01.json").write_text(json.dumps({
+        "layout_hash": sl.layout_hash(sl.screenshot_items(same_plan), frecs),
+        "duration_s": 5.0}), encoding="utf-8")
+    _timeline(ip, [("s01", 0.0, 5.0, [("in_01", 1, 0.0, 5.0)])])
+    _same = screens.final_notes(ip, same_plan, frecs, ip / "overlay/s01.mp4")
+    assert _same and all("could not be verified" in n and "by eye" in n for n in _same), _same
+
     # layout edited after the overlay was rendered -> flagged; compose never ran -> flagged
     edited = plan_with((1, "in_01", dict(L1, frame="card")), (2, "in_02", L2), n_scenes=2)
     assert any("layout changed" in n for n in screens.final_notes(fp, edited, frecs, right))
@@ -681,7 +709,8 @@ if shutil.which("ffmpeg"):
     assert any("were not rendered" in n for n in screens.final_notes(fp, plan2, frecs, right))
     print("[ok] final check: each screenshot verified in its own scene and window (sequential ones "
           "independently); a wrong-scene screenshot flagged; no timeline / changed cut / unreadable "
-          "frames / missing reference reported as 'could not be checked', never as a pass")
+          "frames / missing reference / a screenshot the timeline does not place / an "
+          "indistinguishable one reported as 'could not be checked', never as a pass")
 else:
     print("[skip] final check (ffmpeg not on PATH)")
 

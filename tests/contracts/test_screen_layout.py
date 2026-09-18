@@ -365,6 +365,28 @@ def test_compose_records_the_timeline_panda_render_will_assemble(tmp_path, monke
     assert tl2["transition_assumed"] is True and tl2["total_s"] == tl["total_s"]
 
 
+def test_compose_timeline_keeps_an_inferred_scene_id(tmp_path, monkeypatch):
+    """A scene sent without scene_id is matched through the manifest and rendered — and the
+    timeline must record it under that id WITH its screenshot, or the final check never sees it."""
+    import tools.video.screen_overlay as so
+
+    layout = {"zone": {"x": 0.4, "y": 0.1, "w": 0.5, "h": 0.5}, "frame": "phone"}
+    proj = _compose_project(tmp_path, ("in_01",), [layout])
+    monkeypatch.setattr(so, "remotion_ready", lambda: (True, "ok"))
+    monkeypatch.setattr(so.ScreenOverlay, "_render_scene",
+                        lambda self, project, scene_id, *a: project / "overlay" / f"{scene_id}.mp4")
+    scenes = [{"media_path": str(proj / "assets" / "video" / "s01.mp4"), "duration_s": 5.0},
+              {"media_path": str(proj / "assets" / "video" / "s02.mp4"), "duration_s": 4.0}]
+    res = so.ScreenOverlay().execute({"mode": "compose", "project_dir": str(proj),
+                                      "scenes": scenes, "transition": {"type": "cut"}})
+    assert res.success, res.error
+    tl = json.loads((proj / "overlay" / "timeline.json").read_text(encoding="utf-8"))
+    assert [r["scene_id"] for r in tl["scenes"]] == ["s01", "s02"]
+    assert [s["input_id"] for s in tl["scenes"][0]["screenshots"]] == ["in_01"]
+    # the list handed to panda_render is not given ids it was not sent with
+    assert "scene_id" not in res.data["scenes"][0] and "scene_id" not in res.data["scenes"][1]
+
+
 def test_compose_refuses_a_cut_that_hides_a_placement(tmp_path, monkeypatch):
     """Shortening the scene must not silently drop or move what the user asked for."""
     import tools.video.screen_overlay as so
