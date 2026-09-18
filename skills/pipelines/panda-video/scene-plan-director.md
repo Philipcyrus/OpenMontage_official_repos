@@ -38,6 +38,9 @@ per long section). Set `id`, `type` (one of the 9 canonical types: `talking_head
 `screen_recording`), `description`, `start_seconds`/`end_seconds`, and primary
 `script_section_id`.
 
+Record the job's canvas on `scene_plan.metadata.aspect_ratio` from `options.aspect_ratio`
+(default `9:16`). Do **not** rewrite a caller-set ratio.
+
 **Multi-voice shots:** several script sections (different `speaker`s) may share one scene's time
 window. Keep one visual scene; list a separate narration `required_assets` entry per speaking
 beat (see §7). Map `character_actions.dialogue` to the matching brand speaker
@@ -154,6 +157,7 @@ plan here means better generation prompts and fewer regenerations at the (expens
 
 ## Success criteria
 - Schema-valid `scene_plan` (text only) — no media files produced by this stage
+- `metadata.aspect_ratio` matches the job option (default `9:16`)
 - Full duration covered with realistic timings and no gaps; VO budget fits the runtime
 - Every scene carries the 5 aspects, a `narrative_role`, and feasible `required_assets`
 - Exactly one `hero_moment`; panda/customer consistency captured as plan requirements

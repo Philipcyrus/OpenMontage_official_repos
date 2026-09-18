@@ -50,8 +50,11 @@ From `asset_manifest.metadata.edit_decisions_for_compose` (or equivalent notes):
 
 - **Mute/discard** the native AAC track baked into Higgsfield / Kling i2v clips before
   mixing narration + music.
-- **All-top crop** off-spec deliveries (e.g. 1076×1928 → 1080×1920), not a centred
-  cover-crop (preserves caption-band clearance).
+- **All-top crop** off-spec deliveries to the job master canvas from
+  `scene_plan.metadata.aspect_ratio` / `options.aspect_ratio` (default `9:16` → `1080x1920`;
+  e.g. `16:9` → `1920x1080`). Example: a slightly off 1076×1928 vertical delivery → `1080x1920`.
+  Do **not** use a centred cover-crop (preserves caption-band clearance). Record the target
+  resolution for compose (`panda_render` `resolution`).
 
 ### 2b. Multi-voice narration bed
 

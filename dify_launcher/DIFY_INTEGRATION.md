@@ -43,7 +43,9 @@ Liveness + mode.
 {"status":"ok","runner":"claude","async":true,"montage_door":true,
  "process_started_at":"2026-09-16T21:00:00+00:00",
  "build_revision":"b693aa196d25b66851c58d8a1106c1736e584f0f",
- "launcher_code_fingerprint":"4f2c91b3a708fcde"}
+ "launcher_code_fingerprint":"4f2c91b3a708fcde",
+ "launcher_code_fingerprint_on_disk":"4f2c91b3a708fcde",
+ "code_stale":false}
 ```
 `runner:"claude"` = real AI. `runner:"mock"` = placeholder mode (no AI, for wiring tests). `async:true` = poll model (see §4). `montage_door:true` = the direct render door (§15) is mounted.
 
@@ -51,8 +53,11 @@ The deployment fields prove which code the running process actually loaded:
 - `process_started_at` must move forward after a launcher restart.
 - `build_revision` is `OPENMONTAGE_BUILD_REVISION` when supplied, otherwise the Git HEAD
   observed at process start.
-- `launcher_code_fingerprint` hashes the loaded launcher source files. If files change without
-  a restart, `/health` continues reporting the old fingerprint. Treat that as a stale deployment.
+- `launcher_code_fingerprint` hashes the loaded launcher source files at process start.
+- `launcher_code_fingerprint_on_disk` is recomputed on every `/health` call.
+- `code_stale: true` means files on disk changed without a restart. **New `POST /jobs` is
+  refused with `503`** until uvicorn is restarted. In-flight jobs may continue; treat
+  `code_stale` as a deployment alarm.
 
 ### `POST /jobs` — start a job
 Body:
@@ -71,6 +76,7 @@ Returns **immediately**:
 {"job_id":"job_xxxx","status":"running","stage":null,"gate":null,"question":"starting…","artifacts":{}}
 ```
 → **Save `job_id`.** Then poll (§4).
+If `/health` reports `code_stale: true`, this endpoint returns **`503`** until the launcher process is restarted.
 
 ### `GET /jobs/{job_id}` — current state (poll this)
 ```json
@@ -158,12 +164,18 @@ endpoint, or download the `cost_report.md` / `cost_report.json` artifact by name
 
 Because a stage can take minutes, **`POST` returns instantly with `status:"running"`.** You must **poll `GET /jobs/{job_id}`** until the status changes.
 
+The async `POST /jobs/{id}/respond` body is never empty: it includes `status:"running"`,
+`worker_active:true`, a gate-specific `question` (e.g. `processing — generating clips; poll
+GET /jobs/{id}`), and the current `artifacts` so the Agent Door has something to render.
+Treat `running` + a non-empty `question` as success and **poll** — do **not** surface
+“The Agent Door sent no reply.”
+
 ```
 POST /jobs                    → status: running        (instant)
 loop: GET /jobs/{id} every ~20s
         status == running     → keep polling
         status == awaiting_human → STOP polling, show the gate to the user
-POST /jobs/{id}/respond       → status: running        (instant)
+POST /jobs/{id}/respond       → status: running        (instant; non-empty question)
 loop: GET again … repeat for each gate
         status == done        → video: fetch final.mp4 (+ branded_final if approved at approve_brand); carousel: fetch stills (+ branded_stills if approved)
         status == failed      → show `question` (the error)
@@ -290,7 +302,7 @@ after the last content gate — a post-cut overlay, never in generation. `skip` 
 | `audio_lipsync` | `true` (default) \| `false` | video only — Seedance `audio_references` so on-screen customer/panda mouths follow ElevenLabs VO (`generate_audio:false`; compose still lays the same VO). Pass `false` for HOLD + duration-only |
 | `hero_still` | `true` (default) \| `false` | insert `approve_hero_still` look-lock (video + carousel; default on). Never for panda-image |
 | `max_higgsfield_credits` | integer, or unset | **hard credit ceiling** for the run |
-| `aspect_ratio` | string | stills canvas, passed through to `generate_image`. Carousel default `"4:5"`; **panda-image** default `"1:1"`. Also `9:16`, `WIDTHxHEIGHT`, … |
+| `aspect_ratio` | string | Master canvas for stills / i2v / compose. **Pass-through** — never rewrite a caller-set value. Defaults: **panda-video** `"9:16"`, **panda-carousel** `"4:5"`, **panda-image** `"1:1"`. Also `16:9`, `1:1`, `4:5`, `3:4`, `4:3`, or `WIDTHxHEIGHT`. |
 | `gates` | e.g. `["scene_plan", "stills"]` | carousel only — omit `script` to auto-approve GATE 1 |
 
 If `voice_id` is omitted, the launcher builds a **VOICE CAST** map from

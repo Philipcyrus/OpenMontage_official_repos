@@ -35,7 +35,10 @@ Rules (upstream governance — do NOT break):
 ## Process
 
 1. **Route** on `edit_decisions.render_runtime` (table above). For `ffmpeg`, call `panda_render`
-   with the approved clips (+ VO/music) at the `ugc` profile (CLEAN, no branding). Set each
+   with the approved clips (+ VO/music) at the `ugc` profile (CLEAN, no branding). Pass
+   `resolution` from the job canvas (`scene_plan.metadata.aspect_ratio` /
+   `options.aspect_ratio`: default `9:16` → `1080x1920`, `16:9` → `1920x1080`, etc.) — do not
+   hardcode vertical. Set each
    `scenes[].duration_s` from its cut's `effective_duration_seconds` (not the downloaded clip
    length), and pass `target_duration_s` plus `duration_tolerance_fraction=0.05` from
    `asset_manifest.metadata.timeline_contract`. Also pass each scene's measured
@@ -53,7 +56,7 @@ Rules (upstream governance — do NOT break):
    `video_compose` with the matching runtime; pass `proposal_packet` if present so the tool's
    swap-detection runs.
 2. **Verify** the output exists and passes ffprobe (duration within the requested ±5% band,
-   resolution, has audio). A target-duration validation failure is not a warning: correct the
+   resolution matching the job canvas, has audio). A target-duration validation failure is not a warning: correct the
    scene/transition math and render again before writing the final checkpoint.
 3. **Write `render_report` and `final_review`.** Copy the asset manifest QA summary into optional
    `final_review.checks.lip_sync_check`, including reviewed scenes, applied offsets, affected scene
@@ -66,7 +69,7 @@ Rules (upstream governance — do NOT break):
 
 ## Success criteria
 - Output matches `edit_decisions.render_runtime` (no silent swap)
-- CLEAN/unbranded master; `final.mp4` exists and passes ffprobe
+- CLEAN/unbranded master; `final.mp4` exists and passes ffprobe at the job canvas resolution
 - Final duration is within `timeline_contract`'s requested ±5% band
 - Scene durations are unequal when audio pacing calls for it; no active lip-synced speech is
   padded, trimmed, or retimed

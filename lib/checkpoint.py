@@ -590,39 +590,128 @@ def write_checkpoint(
     return path
 
 
-def read_checkpoint(
-    pipeline_dir: Path, project_id: str, stage: str
+def _eligible_for_soft_load(
+    checkpoint: dict[str, Any], exc: CheckpointValidationError
+) -> bool:
+    """True when a phase-gated assets/compose pause is missing only its canonical artifact.
+
+    Validate-on-write stays strict; soft-load is a read-side safety net so a thin
+    hero/stills/motion pause is never treated as absent (which used to reopen an
+    earlier text gate via recovery).
+    """
+    if checkpoint.get("status") != "awaiting_human":
+        return False
+    stage = checkpoint.get("stage")
+    if stage not in {"assets", "compose"}:
+        return False
+    partial = checkpoint.get("partial_progress")
+    if not (isinstance(partial, dict) and partial.get("phase")):
+        return False
+    msg = str(exc)
+    return "must include canonical artifact" in msg
+
+
+def _load_checkpoint_dict(
+    checkpoint: dict[str, Any], *, soft: bool = False
 ) -> Optional[dict[str, Any]]:
-    """Read a checkpoint file. Returns None if not found."""
+    """Validate a checkpoint dict; optionally soft-load phase-gated thin pauses."""
+    try:
+        validate_checkpoint(checkpoint)
+        return checkpoint
+    except CheckpointValidationError as exc:
+        if soft and _eligible_for_soft_load(checkpoint, exc):
+            return checkpoint
+        if soft:
+            return None
+        raise
+
+
+def _stage_sort_index(stage: Optional[str], pipeline_type: Optional[str]) -> int:
+    stages = get_pipeline_stages(pipeline_type)
+    if not stage:
+        return -1
+    try:
+        return stages.index(stage)
+    except ValueError:
+        # Unknown stage: keep after known ones but before nonsense.
+        return len(stages)
+
+
+def _checkpoint_recency_key(
+    checkpoint: dict[str, Any], mtime: float
+) -> tuple[int, int, float]:
+    """Rank checkpoints for get_latest: human/in-flight later stages beat mtime alone.
+
+    A rewritten completed earlier stage (e.g. scene_plan on every approve) must not
+    hide an awaiting assets/compose pause that is earlier on disk by mtime.
+    """
+    status = checkpoint.get("status") or ""
+    status_rank = {
+        "awaiting_human": 3,
+        "in_progress": 2,
+        "failed": 1,
+        "completed": 0,
+    }.get(status, 0)
+    stage_idx = _stage_sort_index(
+        checkpoint.get("stage") if isinstance(checkpoint.get("stage"), str) else None,
+        checkpoint.get("pipeline_type")
+        if isinstance(checkpoint.get("pipeline_type"), str)
+        else None,
+    )
+    return (status_rank, stage_idx, mtime)
+
+
+def read_checkpoint(
+    pipeline_dir: Path, project_id: str, stage: str, *, soft: bool = False
+) -> Optional[dict[str, Any]]:
+    """Read a checkpoint file. Returns None if not found.
+
+    When ``soft=True``, phase-gated thin assets/compose pauses that fail only for a
+    missing canonical artifact are still returned (read-side safety net).
+    """
     path = _checkpoint_path(pipeline_dir, project_id, stage)
     if not path.exists():
         return None
     with open(path, encoding="utf-8") as f:
         checkpoint = json.load(f)
-    validate_checkpoint(checkpoint)
-    return checkpoint
+    return _load_checkpoint_dict(checkpoint, soft=soft)
 
 
 def get_latest_checkpoint(
     pipeline_dir: Path, project_id: str
 ) -> Optional[dict[str, Any]]:
-    """Find the most recent checkpoint for a project (by file mtime)."""
+    """Find the best checkpoint for a project.
+
+    Prefers ``awaiting_human`` / ``in_progress`` on a later pipeline stage over a
+    newer ``completed`` earlier stage (mtime alone is not enough). Soft-loads
+    phase-gated thin assets/compose pauses.
+    """
     project_dir = pipeline_dir / project_id
     if not project_dir.exists():
         return None
 
-    checkpoints = sorted(
-        project_dir.glob("checkpoint_*.json"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
-    if not checkpoints:
-        return None
+    ranked: list[tuple[tuple[int, int, float], dict[str, Any]]] = []
+    for path in project_dir.glob("checkpoint_*.json"):
+        try:
+            with open(path, encoding="utf-8") as f:
+                raw = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(raw, dict):
+            continue
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        loaded = _load_checkpoint_dict(raw, soft=True)
+        if loaded is None:
+            continue
+        ranked.append((_checkpoint_recency_key(loaded, mtime), loaded))
 
-    with open(checkpoints[0], encoding="utf-8") as f:
-        checkpoint = json.load(f)
-    validate_checkpoint(checkpoint)
-    return checkpoint
+    if not ranked:
+        return None
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    return ranked[0][1]
 
 
 def get_completed_stages(
