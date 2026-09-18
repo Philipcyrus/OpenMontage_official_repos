@@ -292,6 +292,7 @@ after the last content gate — a post-cut overlay, never in generation. `skip` 
 | `max_higgsfield_credits` | integer, or unset | **hard credit ceiling** for the run |
 | `aspect_ratio` | string | stills canvas, passed through to `generate_image`. Carousel default `"4:5"`; **panda-image** default `"1:1"`. Also `9:16`, `WIDTHxHEIGHT`, … |
 | `gates` | e.g. `["scene_plan", "stills"]` | carousel only — omit `script` to auto-approve GATE 1 |
+| `media` | `[{"url": "<Dify file link>", "name": "checkout.png"}, …]` | **panda-video, panda-carousel, panda-image** — the user's screenshots, in attachment order. See **User screenshots** below |
 
 If `voice_id` is omitted, the launcher builds a **VOICE CAST** map from
 `config/panda-elements.json` → `voices[speaker][language]` for all three brand speakers
@@ -321,6 +322,49 @@ unavailable — an infrastructure failure, never a missing id.
 - `"remotion"` — React motion-graphics (kinetic stat/text cards, charts, caption burn). Needs Node ≥ 22 + the remotion-composer project on the box.
 - `"hyperframes"` — HTML/CSS/GSAP (kinetic typography, product-promo title cards). Needs Node ≥ 22 + headless Chrome on the box.
 - If a requested runtime isn't available on the box, the job **fails with a clear error** rather than silently downgrading. Leave it `"auto"` unless you specifically want motion-graphics output.
+
+### User screenshots (`options.media` — panda-video, panda-carousel, panda-image)
+The user attaches screenshots to the brief message and says, in the same message, which one goes
+where and how to use it — e.g. *"Screenshot 1 in scene 1, zoom on Pay now and blur the card
+number. 3 and 4 in scene 2. Screenshot 5 when we explain activation."* For a carousel the user
+names slides (*"screenshot 2 on slide 3"*); for a single image they just say which screenshots to
+use. English or Chinese. Screenshots are numbered **in attachment order**; a file name or a
+description also works.
+
+- **What happens:** Claude records the user's guidance (binding), then at the scene plan decides for
+  each placement where the screenshot sits, where the Panda stands, and the highlight / cursor / blur /
+  card (plus zoom and timing for video). Stills and clips are generated with that area left empty.
+  **Screenshots are never sent to Higgsfield** (0 credits for placement). A screenshot the user gave
+  no scene / slide for is **not used**.
+  - **Video:** at compose the screenshots are laid over their clips with Remotion.
+  - **Carousel / image:** the launcher places the screenshots onto each generated still as soon as it
+    exists, so the hero, the stills, the storyboard and the branded copies (`branded_stills`) all
+    show them — what the reviewer approves is what they get. The clean still is kept and revisions
+    (`fresh` / `edit`) work from it. Slide copy is part of the generated still, so it is kept out of
+    the screenshot area.
+- **Dify side:** enable image upload on the chat (local files), pass `sys.files` into the node that
+  builds the `POST /jobs` body, and send `options.media = [{"url": file.url, "name": file.filename}]`
+  in the same order. Show the `inputs` list from the response if you want to echo the numbering.
+- **What the reviewer sees:** `artifacts.screens_board` — one picture per gate (numbered uploads at
+  `approve_script`, layouts with the Panda area marked at `approve_scene_plan`; for video also
+  screenshots over the stills at `approve_hero_still` / `approve_stills` and over the clips at
+  `approve_motion_sample` / `approve_assets`). A scene that shows one screenshot and then another
+  gets one cell per moment, each labelled with its seconds, so both can be reviewed. Show it full
+  width. Carousel / image jobs get no board at their stills gates — the `stills` themselves carry
+  the screenshots. Problems the launcher's checks find (a scene or slide missing a screenshot the
+  user put there, a still with the character or slide text in the screenshot area, a caption long
+  enough to cover a screenshot, a screenshot that could not be placed, a screenshot not in the
+  final video where the plan puts it, …) are appended to `question` under *"Your screenshots —
+  please check"*. A note may also say a check **could not be run** (frames that will not decode, a
+  cut changed after compose) and ask the reviewer to look at the preview — that is never a failure
+  and never blocks the approval. The user fixes real problems with a normal revise — including
+  re-assigning ("move 4 to scene 6") at the scene plan gate.
+- **Server requirements:** `DIFY_FILES_HOSTS` must name Dify's file host (empty = media refused);
+  `DIFY_FILES_BASE` is needed only if Dify returns relative `/files/...` links (its `FILES_URL` unset).
+  Node ≥ 22 + `remotion-composer` must be installed (`deploy/README.md`). Links are downloaded when the
+  job is created (Dify's signed links expire after a few minutes), redirects are never followed, and
+  each file must be a real PNG / JPEG / WebP ≤ `SCREENSHOT_MAX_MB` (default 10 MB), at most
+  `SCREENSHOT_MAX_FILES` (default 20) per job. Rotation from EXIF is applied and all metadata is stripped.
 
 ---
 
@@ -368,6 +412,7 @@ Returned under `artifacts` in every state; grouped by kind:
 | `final` | single MP4 path | after compose (video pipeline) — UGC master, kept after branding |
 | `branded_final` | single MP4 path | after `approve_brand` approve or later `/brand` on a video job (`final.bgc.mp4`) |
 | `branded` | bool | `false` until branding is applied; then `true` |
+| `screens_board` | single PNG path | **jobs with user screenshots only** — the screenshot board for the current gate (uploads / layouts; video also over the stills / over the clips). Show it full width |
 | `_checkpoint_artifacts` | raw structured data (render report, decision log) | context/debug |
 
 Structured artifacts (`script`, `scene_plan`, `asset_manifest`) come as **inline JSON objects** — display them directly for review, no fetch needed. **You MUST show `script` at the `approve_script` gate** so the reviewer reads the actual dialogue before approving — do not just show the gate label. (If a pipeline ever emits the script only as a markdown file instead of structured JSON, `script` falls back to a **relative URL** to fetch — but the panda-video script-director emits structured JSON.)
@@ -410,9 +455,9 @@ curl -s -H "X-Dify-Token: $T" $BASE/jobs/job_xxxx/artifacts/final.mp4 -o final.m
 
 Build a **chatflow** (mirrors the existing Mochi v6e pattern with conversation variables):
 
-1. **Start** — HTTP `POST /jobs` with the user's brief + options → store `job_id`, `status` in conversation variables.
+1. **Start** — HTTP `POST /jobs` with the user's brief + options → store `job_id`, `status` in conversation variables. If the user attached screenshots, add them as `options.media` (§6 "User screenshots").
 2. **Poll loop** — HTTP `GET /jobs/{job_id}`; if `status == running`, wait ~20s and loop; if `awaiting_human`, exit loop.
-3. **Present gate** — show `question` and render `artifacts` (inline `script` / `scene_plan` JSON, or `artifacts.preview` `.md` files at those gates; stills / clips / final at later gates).
+3. **Present gate** — show `question` and render `artifacts` (inline `script` / `scene_plan` JSON, or `artifacts.preview` `.md` files at those gates; stills / clips / final at later gates; `screens_board` full width whenever it is present).
 4. **Collect reply** — user says approve or describes an edit.
 5. **Respond** — HTTP `POST /respond` with `{"decision":"approve"}` or `{"decision":"revise","answer":"<user text>"}`.
 6. **Repeat** 2–5 until `gate == approve_brand`, then collect approve / skip / revise. Do **not** treat the job as finished until after that choice. Then present `final.mp4` (and `branded_final` if approved).
@@ -442,6 +487,7 @@ Long `running` stretches are **normal** — that's why it's async.
 | `401` | bad/missing `X-Dify-Token` | fix the header |
 | `404` | unknown `job_id` | check the id |
 | `400` | `skip` at a gate other than `approve_brand` | only send `skip` at the brand gate |
+| `400` on `POST /jobs` | a problem with `options.media` (not an image, too big, link expired or redirected, host not allowed, pipeline not panda-video / panda-carousel / panda-image, Remotion missing) — **no job is created** | show `detail` to the user; re-attach and send again |
 | `409` | responded while still `running`, not at a gate, `/brand` at `approve_brand` or before `done` / with nothing to brand | keep polling until `awaiting_human` before `respond`; brand via `/respond` at the brand gate, or `/brand` only after `done` |
 
 ---

@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openmontage.dev/schemas/artifacts/screen_requests.schema.json",
+  "title": "Screenshot requests",
+  "description": "projects/<job>/inputs/requests.json — the user's guidance for each uploaded screenshot, written by the panda-video, panda-carousel or panda-image idea director from the brief (and updated on a scene-plan or stills revise). One entry per upload. Scene numbers are 1-based positions in the scene plan and are binding (carousel: slide numbers; panda-image: 1 = the image). No scenes and no moment = not placed (not used).",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": ["input_id", "scenes"],
+    "additionalProperties": false,
+    "properties": {
+      "n": {"type": "integer", "minimum": 1, "description": "Attachment number the user sees."},
+      "input_id": {"type": "string", "pattern": "^in_[0-9]{2,3}$"},
+      "scenes": {"type": "array", "items": {"type": "integer", "minimum": 1}, "uniqueItems": true},
+      "moment": {"type": "string", "description": "The user's words when they named a moment instead of a scene number."},
+      "instruction": {"type": "string", "description": "How to use it, in the user's words."},
+      "shows": {"type": "string", "description": "One line: what the screenshot shows."}
+    }
+  }
+}

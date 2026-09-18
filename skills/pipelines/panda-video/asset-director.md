@@ -42,6 +42,18 @@ Walk every scene in `scene_plan`. For each `required_assets` entry create an ass
 Expect **one image** `required_asset` per scene that needs a still — no base-plate + restack
 chain as separate generates.
 
+### 1b. User screenshots (only when the prompt has a USER SCREENSHOTS block)
+- `source: "provided"` items are the user's screenshots. They are **not** asset tasks: never
+  generate, edit, animate or upload them, never copy them into `assets/`, never add them to
+  `asset_manifest`. `screen_overlay` places them at compose.
+- Their scenes still get the normal generated still (hero included) and clip. The prompt facts list,
+  per scene, the area to keep plain and where the character stands. Put both into the still prompt
+  ("panda on the left third; the right 60% of the frame is plain white background — empty, no
+  character, props, text or scenery") and into the clip prompt (locked camera, the character stays
+  in its area, no pan or zoom).
+- The launcher checks those areas on every still and clip and flags any that are not empty;
+  regenerate only the flagged one, with the area empty.
+
 ### 2. PHASE 0 — generate ONE HERO STILL, then STOP (GATE 2.5, approve_hero_still)
 **Only when the `hero_still` job option is on (default on; pass `false` to opt out).**
 Generate ONE still for the `hero_moment` scene (else scene 1). CHARACTER LOCK + 2D MEDIUM +

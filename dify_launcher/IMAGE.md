@@ -67,6 +67,17 @@ Same dual-mode as carousel, on the single still (`shots:[1]`):
 
 ---
 
+## User screenshots (`options.media`)
+
+Attach screenshots to the brief and say which to use on the image and how (*"use screenshot 2,
+highlight Activate"*); about two fit one image readably. The still is generated with that area left
+empty and the launcher places the screenshots onto it as soon as it exists, so `approve_stills` and
+`branded_stills` show them. Revisions (`edit` / `fresh`) work from the clean still. Screenshots never
+go to Higgsfield. Setup, limits and checks: [`DIFY_INTEGRATION.md`](DIFY_INTEGRATION.md) §6
+"User screenshots".
+
+---
+
 ## Isolated test launcher (:8600)
 
 Production Dify stays on **:8501**. For local walks:

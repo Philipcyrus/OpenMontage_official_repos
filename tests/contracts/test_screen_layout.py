@@ -1,0 +1,476 @@
+"""Contracts for user screenshots laid over Panda shots (lib/screen_layout.py,
+tools/video/screen_overlay.py, schemas, directors). No Node needed."""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import sys
+from pathlib import Path
+
+import jsonschema
+import pytest
+import yaml
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from lib import screen_layout as sl  # noqa: E402
+
+
+def _contains(outer: dict, inner: tuple[float, float, float, float], tol: float = 0.01) -> bool:
+    x0, y0, x1, y1 = inner
+    return (outer["x"] <= x0 + tol and outer["y"] <= y0 + tol
+            and outer["x"] + outer["w"] >= x1 - tol and outer["y"] + outer["h"] >= y1 - tol)
+
+
+@pytest.mark.parametrize("canvas", sorted(sl.KEEP_OUT))
+def test_keep_out_areas_cover_what_panda_render_draws(canvas):
+    vendor = ROOT / "vendor"
+    os.environ.setdefault("MONTAGE_BRAND_DIR", str(vendor / "brand"))
+    os.environ.setdefault("MONTAGE_DATA_DIR", str(vendor / "data"))
+    if str(vendor) not in sys.path:
+        sys.path.insert(0, str(vendor))
+    try:
+        from PIL import Image
+        from montage_svc import storage as st
+        from montage_svc.render import overlays as ov
+
+        st.ensure_profiles()
+        ugc, bgc = st.load_profile("ugc"), st.load_profile("bgc")
+        W, H = canvas
+        cap = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        ov.draw_caption(cap, ugc, "一行中文字幕", "One English line")
+        logo = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        ov.draw_logo(logo, bgc)
+    except Exception as e:  # noqa: BLE001 — needs the CJK font the render uses
+        pytest.skip(f"vendored overlays unavailable here: {e}")
+    frac = lambda b: (b[0] / W, b[1] / H, b[2] / W, b[3] / H)  # noqa: E731
+    cb, lb = cap.getbbox(), logo.getbbox()
+    assert cb is not None
+    assert _contains(sl.KEEP_OUT[canvas]["captions"], frac(cb)), (canvas, frac(cb))
+    if lb is not None:
+        assert _contains(sl.KEEP_OUT[canvas]["logo"], frac(lb)), (canvas, frac(lb))
+
+
+# Sizes image models really return for a carousel / single image (dify_launcher/CAROUSEL.md
+# records 1024x1024 and 2048x2048 runs), plus the mock canvases.
+STILL_SIZES = [(1024, 1024), (2048, 2048), (1024, 1280), (896, 1152), (1080, 1350), (768, 1344),
+               (1440, 1080)]
+
+
+@pytest.mark.parametrize("size", STILL_SIZES)
+def test_still_logo_keep_out_covers_the_brand_stamp_at_real_still_sizes(size):
+    """The bgc stamp is a fixed pixel size, so it reaches further in on a smaller still.
+
+    A carousel / image still is whatever the image model returned, and the keep-out shown to the
+    agent (and checked at the gates) is one box for the job — so it has to cover the stamp on the
+    smallest still a model returns as well as on the big ones.
+    """
+    vendor = ROOT / "vendor"
+    os.environ.setdefault("MONTAGE_BRAND_DIR", str(vendor / "brand"))
+    os.environ.setdefault("MONTAGE_DATA_DIR", str(vendor / "data"))
+    if str(vendor) not in sys.path:
+        sys.path.insert(0, str(vendor))
+    try:
+        from PIL import Image
+        from montage_svc import storage as st
+        from montage_svc.render import overlays as ov
+
+        st.ensure_profiles()
+        bgc = st.load_profile("bgc")
+        W, H = size
+        logo = Image.new("RGBA", (W, H), (0, 0, 0, 0))
+        ov.draw_logo(logo, bgc)
+    except Exception as e:  # noqa: BLE001 — needs the vendored brand assets
+        pytest.skip(f"vendored overlays unavailable here: {e}")
+    box = logo.getbbox()
+    assert box is not None
+    stamp = (box[0] / W, box[1] / H, box[2] / W, box[3] / H)
+    for pipeline in ("panda-carousel", "panda-image"):
+        ko = sl.keep_out_for(W, H, pipeline)
+        assert "captions" not in ko, "a still draws its own copy — there is no caption strip"
+        assert _contains(ko["logo"], stamp), (size, pipeline, stamp, ko["logo"])
+    # the pixel constants the keep-out is built from must match what draw_logo actually stamps
+    assert W - box[0] <= sl.LOGO_STAMP_PX[0] + 1, (size, box)
+    assert box[3] <= sl.LOGO_STAMP_PX[1] + 1, (size, box)
+
+
+def test_chrome_geometry_matches_remotion_component():
+    ts = (ROOT / "remotion-composer" / "src" / "panda" / "screenGeometry.ts").read_text(encoding="utf-8")
+    for frame, vals in sl.CHROME.items():
+        m = re.search(rf"{frame}:\s*\{{\s*side:\s*([\d.]+),\s*top:\s*([\d.]+),\s*bottom:\s*([\d.]+)", ts)
+        assert m, frame
+        assert tuple(float(v) for v in m.groups()) == (vals["side"], vals["top"], vals["bottom"])
+
+
+@pytest.mark.parametrize("name", ["screen_layout", "screen_requests"])
+def test_schemas_are_valid(name):
+    schema = json.loads((ROOT / "schemas" / "artifacts" / f"{name}.schema.json").read_text(encoding="utf-8"))
+    jsonschema.Draft202012Validator.check_schema(schema)
+
+
+def test_plan_doc_example_is_a_clean_layout():
+    doc = (ROOT / "docs" / "user-screenshots-plan.md").read_text(encoding="utf-8")
+    block = re.search(r"```json\n(.*?)\n```", doc, re.S)
+    assert block, "docs/user-screenshots-plan.md §4 example missing"
+    item = json.loads(block.group(1))
+    assert not sl.schema_errors(item["layout"], "screen_layout")
+    plan = {"version": "1.0", "metadata": {"aspect_ratio": "9:16"}, "scenes": [
+        {"id": "s01", "type": "character_scene", "description": "x", "start_seconds": 0, "end_seconds": 6,
+         "required_assets": [{"type": "image", "description": "still", "source": "generate"}, item]}]}
+    inputs = [{"n": 1, "input_id": "in_01", "name": "checkout.png", "width": 1170, "height": 2532}]
+    requests = [{"input_id": "in_01", "scenes": [1]}]
+    assert sl.validate_requests(inputs, requests) == []
+    assert sl.validate_layouts(plan, inputs, requests) == []
+
+
+def test_geometry_fits_screen_inside_zone_and_keeps_aspect():
+    layout = {"zone": {"x": 0.4, "y": 0.1, "w": 0.56, "h": 0.6}, "frame": "phone"}
+    natural = {"width": 1170, "height": 2532}
+    g = sl.device_geometry(layout, 1080, 1920, natural)
+    d, s = g["device"], g["screen"]
+    assert d["x"] >= 0.4 * 1080 - 0.5 and d["x"] + d["w"] <= 0.96 * 1080 + 0.5
+    assert d["y"] >= 0.1 * 1920 - 0.5 and d["y"] + d["h"] <= 0.7 * 1920 + 0.5
+    assert abs(s["w"] / s["h"] - 1170 / 2532) < 1e-6
+    r = sl.fit_region({"x": 0.2, "y": 0.55, "w": 0.6, "h": 0.35}, g["aspect"], natural)
+    assert abs(r["w"] / r["h"] - g["aspect"]) < 1e-6 and r["x"] >= 0 and r["y"] + r["h"] <= 2532 + 1e-6
+
+
+def test_launcher_owned_paths(tmp_path):
+    proj = tmp_path / "job_x"
+    for sub in ("inputs", "overlay/boards", "assets/images"):
+        (proj / sub).mkdir(parents=True)
+    assert sl.is_launcher_owned(proj / "inputs" / "in_01.png", proj)
+    assert sl.is_launcher_owned(proj / "overlay" / "boards" / "a.png", proj)
+    assert not sl.is_launcher_owned(proj / "assets" / "images" / "s01.png", proj)
+    assert not sl.is_launcher_owned(tmp_path / "elsewhere.png", proj)
+
+
+def test_tool_discovered_without_node(monkeypatch):
+    from tools.tool_registry import ToolRegistry
+
+    reg = ToolRegistry()
+    reg.discover()
+    tool = reg.get("screen_overlay")
+    assert tool is not None
+    assert "screen_overlay" in tool.capabilities
+
+
+def test_compose_swaps_only_screenshot_scenes(tmp_path, monkeypatch):
+    import tools.video.screen_overlay as so
+
+    proj = tmp_path / "job_c"
+    (proj / "inputs").mkdir(parents=True)
+    (proj / "assets" / "video").mkdir(parents=True)
+    (proj / "inputs" / "inputs.json").write_text(json.dumps(
+        [{"n": 1, "input_id": "in_01", "name": "a.png", "file": "in_01.png", "width": 100, "height": 200}]),
+        encoding="utf-8")
+    layout = {"zone": {"x": 0.4, "y": 0.1, "w": 0.5, "h": 0.5}, "frame": "phone"}
+    plan = {"version": "1.0", "scenes": [
+        {"id": "s01", "type": "character_scene", "description": "x", "start_seconds": 0, "end_seconds": 5,
+         "required_assets": [{"type": "image", "source": "provided", "input_id": "in_01",
+                              "description": "d", "layout": layout}]},
+        {"id": "s02", "type": "character_scene", "description": "y", "start_seconds": 5, "end_seconds": 9,
+         "required_assets": []}]}
+    (proj / "checkpoint_scene_plan.json").write_text(json.dumps({"artifacts": {"scene_plan": plan}}),
+                                                     encoding="utf-8")
+    for sid in ("s01", "s02"):
+        (proj / "assets" / "video" / f"{sid}.mp4").write_bytes(b"x")
+    (proj / "artifacts").mkdir()
+    (proj / "artifacts" / "asset_manifest.json").write_text(json.dumps({"version": "1.0", "assets": [
+        {"id": "c1", "type": "video", "path": "assets/video/s01.mp4", "source_tool": "t", "scene_id": "s01"},
+        {"id": "c2", "type": "video", "path": "assets/video/s02.mp4", "source_tool": "t", "scene_id": "s02"}]}),
+        encoding="utf-8")
+    monkeypatch.setattr(so, "remotion_ready", lambda: (True, "ok"))
+    calls = []
+
+    def fake_render(self, project, scene_id, group, recs, media, duration, W, H, language):
+        calls.append((scene_id, duration, W, H))
+        out = project / "overlay" / f"{scene_id}.mp4"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(b"y")
+        return out
+
+    monkeypatch.setattr(so.ScreenOverlay, "_render_scene", fake_render)
+    scenes = [  # s01 without scene_id → inferred from the manifest path
+        {"media_path": str(proj / "assets" / "video" / "s01.mp4"), "duration_s": 4.2, "captions": {"en": "a"}},
+        {"scene_id": "s02", "media_path": str(proj / "assets" / "video" / "s02.mp4"), "duration_s": 3.0},
+    ]
+    res = so.ScreenOverlay().execute({"mode": "compose", "project_dir": str(proj), "scenes": scenes})
+    assert res.success, res.error
+    out = res.data["scenes"]
+    assert out[0]["media_path"].endswith("s01.mp4") and "overlay" in out[0]["media_path"]
+    assert out[0]["duration_s"] == 4.2 and out[0]["captions"] == {"en": "a"}
+    assert out[1] == scenes[1]
+    assert calls == [("s01", 4.2, 1080, 1920)]
+
+
+def test_board_requires_uploads(tmp_path, monkeypatch):
+    import tools.video.screen_overlay as so
+
+    monkeypatch.setattr(so, "remotion_ready", lambda: (True, "ok"))
+    res = so.ScreenOverlay().execute({"mode": "board", "project_dir": str(tmp_path), "kind": "uploads"})
+    assert not res.success and "no user screenshots" in res.error
+
+
+def test_pipeline_and_directors_wire_screenshots():
+    pv = yaml.safe_load((ROOT / "pipeline_defs" / "panda-video.yaml").read_text(encoding="utf-8"))
+    compose = next(s for s in pv["stages"] if s["name"] == "compose")
+    assert "screen_overlay" in compose["tools_available"]
+    skills = ROOT / "skills" / "pipelines" / "panda-video"
+    for name, must in (("idea-director.md", "requests.json"), ("scene-plan-director.md", "screen_layout.schema.json"),
+                       ("asset-director.md", "USER SCREENSHOTS"), ("compose-director.md", "screen_overlay")):
+        text = (skills / name).read_text(encoding="utf-8")
+        assert "USER SCREENSHOTS" in text and must in text, name
+
+
+@pytest.mark.parametrize("pipeline, directors", [
+    ("panda-carousel", (("idea-director.md", "requests.json"), ("script-director.md", "requests.json"),
+                        ("scene-plan-director.md", "screen_layout.schema.json"),
+                        ("asset-director.md", "assets/images"))),
+    ("panda-image", (("idea-director.md", "requests.json"),
+                     ("scene-plan-director.md", "screen_layout.schema.json"),
+                     ("asset-director.md", "assets/images"))),
+])
+def test_still_pipeline_directors_wire_screenshots(pipeline, directors):
+    skills = ROOT / "skills" / "pipelines" / pipeline
+    for name, must in directors:
+        text = (skills / name).read_text(encoding="utf-8")
+        assert "USER SCREENSHOTS" in text and must in text, (pipeline, name)
+    # the launcher places the screenshots on stills; the agent never calls the render tool for them
+    asset = (skills / "asset-director.md").read_text(encoding="utf-8")
+    assert "never call `screen_overlay`" in asset
+    assert pipeline in sl.STILL_PIPELINES and pipeline in sl.PIPELINES
+
+
+def test_still_mode_places_screenshots_on_the_still(tmp_path, monkeypatch):
+    """mode=still renders at the still's own size and writes the composite; the still is untouched."""
+    import hashlib
+
+    from PIL import Image
+
+    import tools.video.screen_overlay as so
+
+    proj = tmp_path / "job_s"
+    (proj / "inputs").mkdir(parents=True)
+    (proj / "assets" / "images").mkdir(parents=True)
+    Image.new("RGB", (100, 200), "#1a73e8").save(proj / "inputs" / "in_01.png")
+    (proj / "inputs" / "job.json").write_text(json.dumps({"pipeline": "panda-carousel"}), encoding="utf-8")
+    (proj / "inputs" / "inputs.json").write_text(json.dumps(
+        [{"n": 1, "input_id": "in_01", "name": "a.png", "file": "in_01.png", "width": 100, "height": 200}]),
+        encoding="utf-8")
+    layout = {"zone": {"x": 0.5, "y": 0.2, "w": 0.45, "h": 0.6}, "frame": "phone"}
+    plan = {"version": "1.0", "metadata": {"aspect_ratio": "4:5"}, "scenes": [
+        {"id": "slide-1", "type": "generated", "description": "x", "start_seconds": 0, "end_seconds": 1,
+         "required_assets": [{"type": "image", "source": "provided", "input_id": "in_01",
+                              "description": "d", "layout": layout}]}]}
+    (proj / "checkpoint_scene_plan.json").write_text(json.dumps({"artifacts": {"scene_plan": plan}}),
+                                                     encoding="utf-8")
+    still = proj / "assets" / "images" / "slide-1.png"
+    Image.new("RGB", (1080, 1350), "#ffffff").save(still)
+    before = hashlib.sha256(still.read_bytes()).hexdigest()
+    monkeypatch.setattr(so, "remotion_ready", lambda: (True, "ok"))
+    seen = {}
+
+    def fake_run(self, cmd, timeout, cwd=None):
+        props = json.loads(Path(next(a for a in cmd if a.startswith("--props="))[8:]).read_text(encoding="utf-8"))
+        seen.update(props)
+        out = Path(cmd[5])
+        layer = Image.new("RGBA", (props["width"], props["height"]), (0, 0, 0, 0))
+        layer.paste((17, 17, 17, 255), (600, 300, 900, 1000))
+        layer.save(out)
+
+    monkeypatch.setattr(so.ScreenOverlay, "_run", fake_run)
+    out = proj / "overlay" / "stills" / "slide-1.png"
+    res = so.ScreenOverlay().execute({"mode": "still", "project_dir": str(proj), "scene_id": "slide-1",
+                                      "still_path": str(still), "output_path": str(out)})
+    assert res.success, res.error
+    assert seen["still"] is True and (seen["width"], seen["height"]) == (1080, 1350)
+    assert seen["background"] == {"type": "none"} and seen["durationInFrames"] == 1
+    img = Image.open(out).convert("RGB")
+    assert img.size == (1080, 1350) and img.getpixel((700, 500)) == (17, 17, 17) and img.getpixel((50, 50)) == (255, 255, 255)
+    assert hashlib.sha256(still.read_bytes()).hexdigest() == before
+    bad = so.ScreenOverlay().execute({"mode": "still", "project_dir": str(proj), "scene_id": "slide-9",
+                                      "still_path": str(still), "output_path": str(out)})
+    assert not bad.success and "places no screenshots" in bad.error
+
+
+def _compose_project(tmp_path, ids=("in_01",), layouts=None, durations=(5, 4)):
+    """A 2-scene project: scene 1 carries the screenshots, scene 2 carries none."""
+    proj = tmp_path / "job_t"
+    (proj / "inputs").mkdir(parents=True)
+    (proj / "assets" / "video").mkdir(parents=True)
+    (proj / "artifacts").mkdir()
+    (proj / "inputs" / "inputs.json").write_text(json.dumps(
+        [{"n": i + 1, "input_id": iid, "name": f"{iid}.png", "file": f"{iid}.png",
+          "width": 100, "height": 200} for i, iid in enumerate(ids)]), encoding="utf-8")
+    ras = [{"type": "image", "source": "provided", "input_id": iid, "description": "d",
+            "layout": lay} for iid, lay in zip(ids, layouts or [])]
+    plan = {"version": "1.0", "scenes": [
+        {"id": "s01", "type": "character_scene", "description": "x", "start_seconds": 0,
+         "end_seconds": durations[0], "required_assets": ras},
+        {"id": "s02", "type": "character_scene", "description": "y", "start_seconds": durations[0],
+         "end_seconds": durations[0] + durations[1], "required_assets": []}]}
+    (proj / "checkpoint_scene_plan.json").write_text(
+        json.dumps({"artifacts": {"scene_plan": plan}}), encoding="utf-8")
+    for sid in ("s01", "s02"):
+        (proj / "assets" / "video" / f"{sid}.mp4").write_bytes(b"x")
+    (proj / "artifacts" / "asset_manifest.json").write_text(json.dumps({"version": "1.0", "assets": [
+        {"id": f"c{i}", "type": "video", "path": f"assets/video/{sid}.mp4", "source_tool": "t",
+         "scene_id": sid} for i, sid in enumerate(("s01", "s02"))]}), encoding="utf-8")
+    return proj
+
+
+def test_compose_records_the_timeline_panda_render_will_assemble(tmp_path, monkeypatch):
+    """The launcher can only check a screenshot in ITS scene if it knows where that scene lands.
+
+    The offsets compose records must be panda_render's own xfade math, or the frames the launcher
+    samples come from the wrong part of the video.
+    """
+    import tools.video.screen_overlay as so
+    from tools.video.panda_render import expected_timeline_duration
+
+    layout = {"zone": {"x": 0.4, "y": 0.1, "w": 0.5, "h": 0.5}, "frame": "phone",
+              "show": {"from_s": 1.0, "to_s": 4.0}, "enter": {"type": "fade", "duration_s": 0.4}}
+    proj = _compose_project(tmp_path, ("in_01",), [layout])
+    monkeypatch.setattr(so, "remotion_ready", lambda: (True, "ok"))
+    monkeypatch.setattr(so.ScreenOverlay, "_render_scene",
+                        lambda self, project, scene_id, *a: project / "overlay" / f"{scene_id}.mp4")
+    (proj / "overlay").mkdir(parents=True, exist_ok=True)
+    (proj / "overlay" / "s01.mp4").write_bytes(b"y")
+    scenes = [{"scene_id": "s01", "media_path": str(proj / "assets" / "video" / "s01.mp4"),
+               "duration_s": 5.0},
+              {"scene_id": "s02", "media_path": str(proj / "assets" / "video" / "s02.mp4"),
+               "duration_s": 4.0}]
+    transition = {"type": "xfade", "duration_s": 0.5}
+    res = so.ScreenOverlay().execute({"mode": "compose", "project_dir": str(proj),
+                                      "scenes": scenes, "transition": transition})
+    assert res.success, res.error
+    tl = json.loads((proj / "overlay" / "timeline.json").read_text(encoding="utf-8"))
+    assert tl["transition_assumed"] is False
+    assert [r["start_s"] for r in tl["scenes"]] == [0.0, 4.5]      # 5 - 0.5 overlap
+    assert tl["total_s"] == pytest.approx(expected_timeline_duration(scenes, transition))
+    shot = tl["scenes"][0]["screenshots"][0]
+    assert (shot["input_id"], shot["n"]) == ("in_01", 1)
+    assert (shot["from_s"], shot["to_s"]) == (1.0, 4.0)
+    assert 1.0 < shot["settled_from_s"] <= shot["settled_to_s"] <= 4.0  # the entrance is excluded
+    # no transition passed: panda_render's default is recorded AND flagged as an assumption
+    res2 = so.ScreenOverlay().execute({"mode": "compose", "project_dir": str(proj),
+                                       "scenes": scenes})
+    assert res2.success, res2.error
+    tl2 = json.loads((proj / "overlay" / "timeline.json").read_text(encoding="utf-8"))
+    assert tl2["transition_assumed"] is True and tl2["total_s"] == tl["total_s"]
+
+
+def test_compose_timeline_keeps_an_inferred_scene_id(tmp_path, monkeypatch):
+    """A scene sent without scene_id is matched through the manifest and rendered — and the
+    timeline must record it under that id WITH its screenshot, or the final check never sees it."""
+    import tools.video.screen_overlay as so
+
+    layout = {"zone": {"x": 0.4, "y": 0.1, "w": 0.5, "h": 0.5}, "frame": "phone"}
+    proj = _compose_project(tmp_path, ("in_01",), [layout])
+    monkeypatch.setattr(so, "remotion_ready", lambda: (True, "ok"))
+    monkeypatch.setattr(so.ScreenOverlay, "_render_scene",
+                        lambda self, project, scene_id, *a: project / "overlay" / f"{scene_id}.mp4")
+    scenes = [{"media_path": str(proj / "assets" / "video" / "s01.mp4"), "duration_s": 5.0},
+              {"media_path": str(proj / "assets" / "video" / "s02.mp4"), "duration_s": 4.0}]
+    res = so.ScreenOverlay().execute({"mode": "compose", "project_dir": str(proj),
+                                      "scenes": scenes, "transition": {"type": "cut"}})
+    assert res.success, res.error
+    tl = json.loads((proj / "overlay" / "timeline.json").read_text(encoding="utf-8"))
+    assert [r["scene_id"] for r in tl["scenes"]] == ["s01", "s02"]
+    assert [s["input_id"] for s in tl["scenes"][0]["screenshots"]] == ["in_01"]
+    # the list handed to panda_render is not given ids it was not sent with
+    assert "scene_id" not in res.data["scenes"][0] and "scene_id" not in res.data["scenes"][1]
+
+
+def test_compose_refuses_a_cut_that_hides_a_placement(tmp_path, monkeypatch):
+    """Shortening the scene must not silently drop or move what the user asked for."""
+    import tools.video.screen_overlay as so
+
+    layout = {"zone": {"x": 0.4, "y": 0.1, "w": 0.5, "h": 0.5}, "frame": "phone",
+              "show": {"from_s": 4.0, "to_s": 5.0}}
+    proj = _compose_project(tmp_path, ("in_01",), [layout])
+    monkeypatch.setattr(so, "remotion_ready", lambda: (True, "ok"))
+    rendered = []
+    monkeypatch.setattr(so.ScreenOverlay, "_render_scene",
+                        lambda self, project, scene_id, *a: rendered.append(scene_id))
+    res = so.ScreenOverlay().execute({"mode": "compose", "project_dir": str(proj), "scenes": [
+        {"scene_id": "s01", "media_path": str(proj / "assets" / "video" / "s01.mp4"),
+         "duration_s": 3.0}]})
+    assert not res.success and "screenshot 1" in res.error and "never appear" in res.error
+    assert rendered == [] and not (proj / "overlay" / "timeline.json").exists()
+
+
+@pytest.mark.parametrize("canvas", list(sl.KEEP_OUT))
+def test_a_wrapped_caption_reaches_above_the_one_line_strip(canvas):
+    """The table row is one zh + one en line — the measured box is what the render really draws."""
+    W, H = canvas
+    long_caption = {"zh": "在设置里点开移动服务然后添加 eSIM 并扫描二维码，等待运营商确认后重启手机",
+                    "en": "Open Settings, tap Mobile Service, then Add eSIM and scan the QR code, "
+                          "then wait for the carrier to confirm and restart the phone"}
+    table = sl.KEEP_OUT[canvas]["captions"]
+    measured = sl.measure_caption(W, H, long_caption)
+    if measured is None:
+        pytest.skip("the vendored caption renderer is unavailable here")
+    assert measured["y"] < table["y"], (canvas, measured, table)     # it grows upward
+    box, was_measured = sl.caption_keep_out(W, H, long_caption)
+    assert was_measured and box["y"] <= measured["y"] + 1e-9
+    assert box["y"] + box["h"] >= measured["y"] + measured["h"] - 1e-9
+    # the documented fallback covers at least as much as the real caption does
+    fallback_y = max(0.0, table["y"] + table["h"] - table["h"] * sl.CAPTION_FALLBACK_LINES)
+    assert fallback_y <= measured["y"] + 1e-9, (canvas, fallback_y, measured)
+    for pipeline in ("panda-carousel", "panda-image"):
+        assert sl.caption_keep_out(W, H, long_caption, pipeline) == (None, True)
+
+
+def test_board_previews_each_display_window_separately(tmp_path, monkeypatch):
+    """A screenshot shown after another must be reviewable, not hidden under the later one."""
+    import tools.video.screen_overlay as so
+
+    a = {"zone": {"x": 0.2, "y": 0.2, "w": 0.6, "h": 0.4}, "frame": "phone",
+         "show": {"from_s": 0.0, "to_s": 2.4}}
+    b = {"zone": {"x": 0.2, "y": 0.2, "w": 0.6, "h": 0.4}, "frame": "browser",
+         "show": {"from_s": 2.6, "to_s": 5.0}}
+    proj = _compose_project(tmp_path, ("in_01", "in_02"), [a, b])
+    for iid in ("in_01", "in_02"):
+        (proj / "inputs" / f"{iid}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    monkeypatch.setattr(so, "remotion_ready", lambda: (True, "ok"))
+    seen = {}
+
+    def fake_run(self, cmd, timeout, cwd=None):
+        props_arg = next(x for x in cmd if x.startswith("--props="))
+        seen.update(json.loads(Path(props_arg[8:]).read_text(encoding="utf-8")))
+        Path(cmd[5]).parent.mkdir(parents=True, exist_ok=True)
+        Path(cmd[5]).write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    monkeypatch.setattr(so.ScreenOverlay, "_run", fake_run)
+    out = proj / "overlay" / "boards" / "layouts.png"
+    res = so.ScreenOverlay().execute({"mode": "board", "project_dir": str(proj), "kind": "layouts",
+                                      "output_path": str(out)})
+    assert res.success, res.error
+    cells = seen["cells"]
+    assert len(cells) == 2, [c["label"] for c in cells]
+    assert [len(c["layers"]) for c in cells] == [1, 1]
+    assert cells[0]["layers"][0]["layout"]["frame"] == "phone"
+    assert cells[1]["layers"][0]["layout"]["frame"] == "browser"
+    for cell, (lo, hi) in zip(cells, [(0.0, 2.4), (2.6, 5.0)]):
+        assert lo <= cell["atSeconds"] <= hi, cell
+        assert "s" in cell["label"] and "screenshot" in cell["label"]
+
+    # shown together: ONE preview, drawn settled (no timestamp)
+    both = _compose_project(tmp_path / "two", ("in_01", "in_02"),
+                            [dict(a, show={"from_s": 0.0, "to_s": 5.0}),
+                             dict(b, zone={"x": 0.2, "y": 0.62, "w": 0.6, "h": 0.3},
+                                  show={"from_s": 0.0, "to_s": 5.0})])
+    for iid in ("in_01", "in_02"):
+        (both / "inputs" / f"{iid}.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    seen.clear()
+    res2 = so.ScreenOverlay().execute({"mode": "board", "project_dir": str(both), "kind": "layouts",
+                                       "output_path": str(both / "b.png")})
+    assert res2.success, res2.error
+    assert len(seen["cells"]) == 1 and "atSeconds" not in seen["cells"][0]
+    assert len(seen["cells"][0]["layers"]) == 2

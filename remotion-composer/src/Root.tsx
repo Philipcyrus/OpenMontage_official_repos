@@ -16,6 +16,7 @@ import { ProductReveal, ProductRevealProps } from "./components/ProductReveal";
 import { CaptionOverlay, WordCaption } from "./components/CaptionOverlay";
 import { CollageBurst, CollageBurstProps } from "./CollageBurst";
 import { LyricOverlay, LyricOverlayProps } from "./LyricOverlay";
+import { PandaCompositions } from "./panda/PandaCompositions";
 
 // ---------------------------------------------------------------------------
 // Theme System — prevents every video from looking like dark fintech
@@ -330,6 +331,8 @@ export const Root: React.FC = () => {
           overlay: true,
         } as EndTagProps}
       />
+      {/* Panda: user screenshots laid over a generated shot (tools/video/screen_overlay.py) */}
+      <PandaCompositions />
     </>
   );
 };
