@@ -60,6 +60,26 @@ Recommended keys: `concept`, `deliverable_mix` (slide_count, aspect_ratio, langu
 `slide_hierarchy` (hook / content / CTA), `character_lock`, `visual_medium` (default `2d_flat`),
 `missing_capabilities`, `fallback_policy`.
 
+### 4b. User screenshots (only when the prompt has a USER SCREENSHOTS block)
+The user attached screenshots and usually said which one goes on which slide and how to use it.
+Their guidance is binding — you record it, you do not re-decide it.
+1. Look at every screenshot (read them all in one turn) so you know what each one shows.
+2. Write `projects/<job>/inputs/requests.json` — one entry per upload
+   (`schemas/artifacts/screen_requests.schema.json`):
+   `{"n": 1, "input_id": "in_01", "scenes": [2], "moment": "", "instruction": "highlight the Activate button", "shows": "activation page with the Activate button"}`
+   - `n` is the attachment number the user sees; they may also name a screenshot by file name or
+     by what it shows.
+   - `scenes`: the slide numbers the user gave (1 = first slide). Several screenshots may share a
+     slide; one screenshot may be on several slides.
+   - `moment`: when the user named a topic instead of a number ("on the pricing slide"), copy
+     their words and leave `scenes` empty.
+   - No guidance for a screenshot → `"scenes": []` and `"moment": ""`. It is **not used**; never
+     place it on your own.
+   - `instruction`: how to use it, in the user's words (highlight, blur, frame, text).
+3. Make the slide count at least the highest slide number given, and note in the brief which
+   slides carry screenshots.
+4. Never copy screenshots into `assets/`, never edit them, never send them to Higgsfield.
+
 ### 5. Quality check (self, no human pause)
 - [ ] The concept is a carousel of readable slides, not a video
 - [ ] Slide count + aspect ratio (from `options.aspect_ratio`, default `4:5`) + language are explicit

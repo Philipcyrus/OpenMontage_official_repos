@@ -90,6 +90,7 @@ DIFY_RUNNER=mock uvicorn dify_launcher.app:app --host 0.0.0.0 --port 8600
 - `DIFY_DATA_DIR` — job storage root (default `./data`; `data/jobs/` is gitignored)
 - `DIFY_TOKEN` — optional shared secret; **empty = no auth**, set = callers must send `X-Dify-Token`
 - `PANDA_TOKEN` — optional secret for the `/montage/*` raw-render door (`X-Panda-Token`), independent of `DIFY_TOKEN`
+- `DIFY_FILES_HOSTS` — comma-separated hosts the launcher may download user screenshots from (empty = `options.media` refused); `DIFY_FILES_BASE` prefixes relative `/files/...` links; limits `SCREENSHOT_MAX_FILES` (20), `SCREENSHOT_MAX_MB` (10), `SCREENSHOT_TOTAL_MB` (150)
 
 ## Job options (`POST /jobs` `options`)
 - `language`, `narrator`, `voice_id`, `music`. The launcher resolves `voices[narrator][language]`
@@ -111,6 +112,14 @@ DIFY_RUNNER=mock uvicorn dify_launcher.app:app --host 0.0.0.0 --port 8600
   [`CAROUSEL.md`](CAROUSEL.md) / [`IMAGE.md`](IMAGE.md).
 - `gates` — carousel only: list of gates to surface. Default `["script", "scene_plan", "stills"]`.
   Omit `script` to auto-approve GATE 1.
+- `media` — panda-video, panda-carousel and panda-image: the user's screenshots as
+  `[{"url": "<Dify file link>", "name": "..."}]` in attachment order. The user says in the brief which
+  one goes in which scene / slide and how to use it; Claude lays each screenshot out around the
+  generated shot and Remotion places it — over the clips at compose for video, onto the stills as
+  soon as they exist for carousel / image (never Higgsfield). Off until `DIFY_FILES_HOSTS` is set;
+  needs Node 22 + remotion-composer. See
+  [`DIFY_INTEGRATION.md`](DIFY_INTEGRATION.md) §6 "User screenshots" and
+  [`../docs/user-screenshots-plan.md`](../docs/user-screenshots-plan.md).
 
 `POST /jobs` also accepts top-level `pipeline`: `"panda-video"` (default), `"panda-carousel"`,
 or `"panda-image"`.

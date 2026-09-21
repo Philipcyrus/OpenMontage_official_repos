@@ -328,7 +328,7 @@ def _public(state: dict[str, Any]) -> dict[str, Any]:
             links[key] = [f"/jobs/{job_id}/artifacts/{v}" for v in items]
         else:
             links[key] = val
-    return {
+    view = {
         "job_id": job_id,
         "pipeline": state.get("pipeline"),
         "status": state.get("status"),
@@ -341,6 +341,9 @@ def _public(state: dict[str, Any]) -> dict[str, Any]:
         "updated_at": state.get("updated_at"),
         "artifacts": links,
     }
+    if state.get("inputs"):
+        view["inputs"] = state["inputs"]   # user screenshots, numbered as the user attached them
+    return view
 
 
 def _bg(job_id: str, fn: Callable[..., dict[str, Any]], state: dict[str, Any],
@@ -421,6 +424,40 @@ def health() -> dict[str, Any]:
             "code_stale": code_stale}
 
 
+def _prepare_media(options: dict[str, Any], pipeline: str) -> Optional[Any]:
+    """User screenshots (options.media): check, download and normalise BEFORE the job exists.
+
+    Any problem is a 400 and no job is created. Returns None when the job has no media.
+    """
+    if not (options or {}).get("media"):
+        return None
+    from dify_launcher import screens
+
+    from lib.screen_layout import PIPELINES
+
+    if pipeline not in PIPELINES:
+        raise HTTPException(status_code=400,
+                            detail="images (options.media) are supported for "
+                                   f"{', '.join(PIPELINES)} jobs only")
+    from tools.video.screen_overlay import remotion_ready
+
+    ok, why = remotion_ready()
+    if not ok:
+        raise HTTPException(status_code=400, detail=f"images need Remotion on this server: {why}")
+    try:
+        return screens.prepare(options)
+    except screens.IntakeError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+
+def _projects_dir() -> Any:
+    pd = getattr(_RUNNER, "_projects_dir", None)
+    if pd is None:
+        from lib.paths import PROJECTS_DIR
+        pd = PROJECTS_DIR
+    return pd
+
+
 @app.post("/jobs")
 def create_job(body: StartJob, x_dify_token: Optional[str] = Header(None)) -> dict[str, Any]:
     _auth(x_dify_token)
@@ -432,14 +469,38 @@ def create_job(body: StartJob, x_dify_token: Optional[str] = Header(None)) -> di
                 "restart uvicorn before starting new jobs"
             ),
         )
+    options = dict(body.options or {})
+    prepared = None
+    if options.get("media"):
+        pipeline = _resolve_pipeline(body.pipeline)
+        prepared = _prepare_media(options, pipeline)
     job_id = store.new_job_id()
     store.ensure_job(job_id)          # create the job + artifacts dir before the runner writes
     pipeline = _resolve_pipeline(body.pipeline)
+    inputs: list[dict[str, Any]] = []
+    if prepared is not None:
+        from dify_launcher import screens
+
+        options.pop("media", None)    # the signed links expire; the files now live in the job
+        # The language the JOB will run in, not the raw option: the runner switches a Mandarin
+        # brief sent with a stale language:en to zh, and the agent writes the slides in that
+        # language. job.json drives the placed screenshot cards, so it has to match — and the
+        # default is the prompts' default ("en"), not zh.
+        effective, _coerced = _runner._coerce_language_from_brief(options, body.brief or "")
+        try:
+            records = screens.commit(
+                prepared, _projects_dir() / job_id, pipeline=pipeline,
+                language=str(effective.get("language") or "en").strip().lower())
+        except OSError as e:
+            raise HTTPException(status_code=500, detail=f"could not store the images: {e}") from e
+        inputs = [{"n": r["n"], "name": r["name"]} for r in records]
     state = {
         "job_id": job_id, "brief": body.brief, "pipeline": pipeline,
-        "profile": body.profile, "options": body.options, "status": "running",
+        "profile": body.profile, "options": options, "status": "running",
         "stage": None, "gate": None, "artifacts": {},
     }
+    if inputs:
+        state["inputs"] = inputs
     if _ASYNC:
         state["_processing_operation"] = "start"
         state["processing_started_at"] = _utc_now()

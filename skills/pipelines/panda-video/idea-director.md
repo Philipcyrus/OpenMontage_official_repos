@@ -56,6 +56,26 @@ Recommended keys: `concept`, `deliverable_mix`, `language`, `narrator`, `support
 (narration, music, captions, brand cards), `character_lock` (customer/panda Element ids),
 `visual_medium` (default `2d_flat`), `missing_capabilities`, `fallback_policy`.
 
+### 4b. User screenshots (only when the prompt has a USER SCREENSHOTS block)
+The user attached screenshots and usually said which one goes in which scene and how to use it.
+Their guidance is binding — you record it, you do not re-decide it.
+1. Look at every screenshot (read them all in one turn) so you know what each one shows.
+2. Write `projects/<job>/inputs/requests.json` — one entry per upload
+   (`schemas/artifacts/screen_requests.schema.json`):
+   `{"n": 1, "input_id": "in_01", "scenes": [1], "moment": "", "instruction": "zoom on the Pay button", "shows": "checkout page with the total and Pay now"}`
+   - `n` is the attachment number the user sees; they may also name a screenshot by file name or
+     by what it shows.
+   - `scenes`: the scene numbers the user gave (1 = first scene). Several screenshots may share a
+     scene; one screenshot may be in several scenes.
+   - `moment`: when the user named a moment instead of a number ("when we explain activation"),
+     copy their words and leave `scenes` empty.
+   - No guidance for a screenshot → `"scenes": []` and `"moment": ""`. It is **not used**; never
+     place it on your own.
+   - `instruction`: how to use it, in the user's words (zoom, highlight, blur, frame, text).
+3. Write the screenshot order into the brief so the script narrates what is on screen in that
+   order and the plan can have at least as many scenes as the highest scene number given.
+4. Never copy screenshots into `assets/`, never edit them, never send them to Higgsfield.
+
 ### 5. Quality check (self, no human pause)
 - [ ] The concept is stated concretely and traceable to the brief
 - [ ] Deliverable format + duration + language are explicit

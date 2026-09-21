@@ -31,8 +31,24 @@ Rules (upstream governance — do NOT break):
 | Schema | `schemas/artifacts/render_report.schema.json` | Artifact validation |
 | Prior artifacts | `edit_decisions` (incl. `render_runtime`), `asset_manifest` | Cut logic + media |
 | Tools | `panda_render` (ffmpeg lane), `video_compose` (remotion/hyperframes lanes) | Assembly |
+| Tools | `screen_overlay` | User screenshots laid over their scenes (only when the job has them) |
 
 ## Process
+
+0. **User screenshots** (only when the prompt has a USER SCREENSHOTS block listing screenshot
+   scenes): build the exact `panda_render` scene list first, with `scene_id` on every item. Call
+   `screen_overlay` with `{"mode": "compose", "project_id": "<job>", "scenes": <that list>,
+   "resolution": <same as panda_render>, "language": "<zh|en>", "transition": <the same transition
+   object you pass panda_render>}` and pass `panda_render` the `scenes` it returns — screenshot
+   scenes now point at `overlay/<scene_id>.mp4`. Passing the same `transition` matters: the tool
+   writes `overlay/timeline.json` (where every scene and screenshot lands in the assembled video)
+   and the launcher checks each screenshot there; with the wrong transition it can only report the
+   check as unavailable. Never skip the call, never place the screenshots any other way, and if it
+   fails stop and escalate (no render without the screenshots).
+
+   If it refuses with a timing error, a cut is shorter than the placement the user asked for. Do not
+   lengthen, move or drop the placement to get past it: fix the scene plan's `show` / `at_s` (or the
+   cut) so the screenshot fits, then compose again.
 
 1. **Route** on `edit_decisions.render_runtime` (table above). For `ffmpeg`, call `panda_render`
    with the approved clips (+ VO/music) at the `ugc` profile (CLEAN, no branding). Pass
