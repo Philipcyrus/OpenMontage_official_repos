@@ -262,7 +262,9 @@ duration-only and log it.
    - `output_path`: the project asset path, e.g.
      `projects/<name>/assets/video/<scene-id>.mp4`.
    The tool downloads, runs ffprobe, and returns a standard `ToolResult` with
-   width/height/duration/codec for the `asset_manifest`.
+   width/height/duration/codec for the `asset_manifest`. Record its `original_url` (the CDN
+   URL) on the clip's asset row — the opt-in Kling customer lip-sync pass sends Kling that link,
+   because Kling cannot read a local file.
 6. **Handle partial failure without replaying the wave** — keep and ingest every
    success. Record failed scene ids and provider states in the checkpoint / gate
    question; never silently skip them and never resubmit successful jobs. Regenerate

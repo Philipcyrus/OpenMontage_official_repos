@@ -394,6 +394,62 @@ def _audio_lipsync_line(options: Optional[dict[str, Any]]) -> str:
     )
 
 
+def _customer_lipsync_provider(options: Optional[dict[str, Any]]) -> str:
+    """'kling' only when a job explicitly asks for it and audio lip-sync is on; else 'seedance'."""
+    if not _audio_lipsync_enabled(options):
+        return "seedance"
+    raw = str((options or {}).get("customer_lipsync_provider") or "").strip().lower()
+    return "kling" if raw in ("kling", "kling_official") else "seedance"
+
+
+def _kling_max_usd(options: Optional[dict[str, Any]]) -> float:
+    """Estimated-dollar cap on a job's Kling lip-sync spend (default 5, never above 100)."""
+    try:
+        cap = float((options or {}).get("kling_lipsync_max_usd", 5.0))
+    except (TypeError, ValueError):
+        cap = 5.0
+    return max(0.0, min(cap, 100.0))
+
+
+def _kling_lipsync_line(options: Optional[dict[str, Any]], project_dir: Any) -> str:
+    """KLING CUSTOMER LIP-SYNC for jobs that opted in; "" otherwise, so prompts stay unchanged."""
+    if _customer_lipsync_provider(options) != "kling":
+        return ""
+    speaker = str((options or {}).get("narrator") or "panda").strip().lower()
+    proj = str(project_dir)
+    return (
+        "KLING CUSTOMER LIP-SYNC — ON for this job (customer_lipsync_provider=kling). It only "
+        "re-drives the CUSTOMER's mouth in scenes where the customer is the only on-screen "
+        "speaker; the panda always stays on Seedance (Kling does not support animal characters) "
+        "and narrator lines never drive a mouth. Generate every clip exactly as the AUDIO LIPSYNC "
+        "line says. (1) For EVERY clip, set its asset row's original_url to the Higgsfield CDN "
+        "url you downloaded it from. (2) After all clips are ingested and BEFORE lipsync_qa, "
+        f"write {proj}/assets/video/kling/request.json as "
+        '{"scenes":[{"scene_id":"<id>","clip_path":"assets/video/<file>.mp4",'
+        '"video_url":"<that clip\'s own CDN url>","audio":{"<section_id>":"<the exact VO file '
+        'compose uses for that customer line>"}}]} listing every scene where the customer '
+        "speaks on screen; for one whose customer face is in profile, turned away, covered or "
+        'tiny, add "skip":"<reason>" (Kling needs the full face). (3) Run exactly, with a Bash '
+        f"timeout of 600000 ms: python -m lib.kling_lipsync run {proj} --default-speaker "
+        f"{speaker} --max-usd {_kling_max_usd(options):g} — while its JSON summary says "
+        '"run_again": true, run the same command again (at most 5 more times); a re-run only '
+        "collects what was already sent and never pays for a task twice. It keeps the original "
+        "clip as assets/video/kling/<clip>.original.mp4 and puts Kling's version at the clip's "
+        "own path only when it passes its checks. Never call kling_lip_sync or the Kling API "
+        "yourself and never resend; pass --retry-failed only when a revise asks to retry Kling, "
+        "and --resend-unknown <scene_id> only when the user explicitly asks to resend that "
+        "scene. (4) For each scene the summary marks done, run lipsync_qa on the clip with that "
+        "scene's qa_audio_path at offset qa_offset_s (0: that bed is clip-local); if it fails "
+        "and the scene's .original.mp4 does better on the same check (free), run: "
+        f"python -m lib.kling_lipsync select {proj} <scene_id> original. Record the QA result "
+        "of the version that stays selected as that scene's asset_manifest.metadata.lip_sync_qa "
+        "entry, replacing any earlier result for it. No paid retry (Seedance or Kling) for a "
+        "scene Kling processed — carry a failure as an unresolved warning. Every other scene, "
+        "and any scene Kling could not do, keeps its Seedance clip and the normal LIP-SYNC QA "
+        "policy. (5) Copy the summary into asset_manifest.metadata.kling_lipsync.\n"
+    )
+
+
 def _lip_sync_qa_line(options: Optional[dict[str, Any]]) -> str:
     """Bounded local QA/retry instruction for audio-driven Panda clips."""
     if not _audio_lipsync_enabled(options):
@@ -1538,13 +1594,14 @@ class ClaudeCodeRunner(Runner):
                              question="Job cancelled at the budget gate — no further Higgsfield credits spent.")
                 return state
             if decision == "approve":
-                self._run_agent(self._budget_raised_prompt(job_id, new_cap), job_id, "assets_media")
+                self._run_agent(self._budget_raised_prompt(job_id, new_cap, state.get("options")),
+                                job_id, "assets_media")
                 return self._run_until_assets_gate(state, label="assets_media")
             # revise — reduce/cheapen the requested generation to fit the cap
             self._run_agent(self._revise_prompt(
                 job_id, "assets (BUDGET HOLD — reduce or cheapen the requested Higgsfield generation "
                         "to fit the approved max_higgsfield_credits cap, re-check the budget hard-rule, "
-                        "then continue)", response or {}),
+                        "then continue)", response or {}, state=state),
                 job_id, "assets_revise")
             return self._run_until_assets_gate(state, label="assets_revise")
 
@@ -1623,7 +1680,7 @@ class ClaudeCodeRunner(Runner):
             prompt = self._continue_prompt(job_id, _pipeline_of(state))
             label = nxt
         else:
-            prompt = self._revise_prompt(job_id, stage, response or {})
+            prompt = self._revise_prompt(job_id, stage, response or {}, state=state)
             label = f"{stage}_revise"
         self._run_agent(prompt, job_id, label)
         return self._sync(state)
@@ -1721,6 +1778,26 @@ class ClaudeCodeRunner(Runner):
                                        language=lang)
             return screens.question_with_notes(question, notes) if notes else question
         except Exception:  # noqa: BLE001 — a check must never break the gate
+            return question
+
+    def _kling_question(self, state: dict[str, Any], gate: Optional[str], question: str) -> str:
+        """`question` plus the Kling customer lip-sync outcome at approve_assets (opt-in jobs).
+
+        Never raises: this runs inside _sync, between the state mutation and its save.
+        """
+        try:
+            opts = state.get("options") or {}
+            if gate != "approve_assets" or _customer_lipsync_provider(opts) != "kling":
+                return question
+            from lib import kling_lipsync
+            notes = kling_lipsync.gate_notes(
+                self._projects_dir / state["job_id"],
+                default_speaker=str(opts.get("narrator") or "panda").strip().lower())
+            if not notes:
+                return question
+            return (question + "\n\nKling lip-sync (customer scenes):\n"
+                    + "\n".join(f"- {n}" for n in notes))
+        except Exception:  # noqa: BLE001 — a note must never break the gate
             return question
 
     def _write_agent_log(self, job_id: str, label: str, attempt: int, proc: Any) -> None:
@@ -1936,6 +2013,7 @@ class ClaudeCodeRunner(Runner):
             "exit the turn early.\n\n"
             + _voice_line(options or {}) + "\n" + _audio_lipsync_line(options)
             + _lip_sync_qa_line(options)
+            + _kling_lipsync_line(options, self._projects_dir / job_id)
         )
 
     def _sync(self, state: dict[str, Any]) -> dict[str, Any]:
@@ -1977,6 +2055,7 @@ class ClaudeCodeRunner(Runner):
                 gate, stage=stage, artifacts=arts)
             question = self._screenshot_question(
                 state, gate, arts, _safe_checkpoint_question(latest, fallback_question))
+            question = self._kling_question(state, gate, question)
             state.update(status="awaiting_human", stage=stage, gate=gate,
                          question=question, artifacts=arts)
         elif status == "in_progress" or status not in ("completed",):
@@ -2118,9 +2197,18 @@ class ClaudeCodeRunner(Runner):
                 except (ValueError, OSError):
                     return False
                 return bool(rel.parts) and rel.parts[0] in ("inputs", "overlay")
+        def is_kling_workfile(path: Path) -> bool:
+            try:
+                rel = Path(path).resolve().relative_to(proj.resolve())
+            except (ValueError, OSError):
+                return False
+            return rel.parts[:3] == ("assets", "video", "kling")
+
         for p in _paths_in(artifacts):
             if is_launcher_owned(p, proj):
                 continue        # user screenshots / overlay renders are never stills or clips
+            if is_kling_workfile(p):
+                continue        # Kling backups / results / history: the live clip is listed already
             ext = p.suffix.lower()
             if (ext in (".png", ".jpg", ".jpeg") and p not in imgs and not is_superseded_still(p)
                     and not is_storyboard_name(p.name)):
@@ -2694,16 +2782,20 @@ class ClaudeCodeRunner(Runner):
             + _pair_scale_lock_line() + "\n"
             + _voice_line(options or {}) + "\n" + _audio_lipsync_line(options)
             + _lip_sync_qa_line(options)
+            + _kling_lipsync_line(options, self._projects_dir / job_id)
         )
 
-    def _budget_raised_prompt(self, job_id: str, new_cap: Any) -> str:
+    def _budget_raised_prompt(self, job_id: str, new_cap: Any,
+                              options: Optional[dict[str, Any]] = None) -> str:
         cap_txt = f" The approved cap is now {new_cap} Higgsfield credits." if new_cap is not None else ""
+        kling = _kling_lipsync_line(options, self._projects_dir / job_id)
         return (
             f"For project_id: {job_id}, the BUDGET HOLD is cleared — the human authorized continuing."
             f"{cap_txt} Resume the Higgsfield generation that was blocked, RE-CHECKING the budget "
             "hard-rule (spent + get_cost vs the cap) before generating. If it now fits, generate the "
             "batch, record each asset's credits in asset_manifest, and stop at the next assets gate. "
             "If it STILL exceeds the cap, do NOT generate — write the budget_hold checkpoint again."
+            + (f"\n\n{kling}" if kling else "")
         )
 
     def _motion_sample_prompt(self, job_id: str,
@@ -2741,6 +2833,7 @@ class ClaudeCodeRunner(Runner):
             + _pair_scale_lock_line() + "\n"
             + _voice_line(options or {}) + "\n" + _audio_lipsync_line(options)
             + _lip_sync_qa_line(options)
+            + _kling_lipsync_line(options, self._projects_dir / job_id)
         )
 
     def _revise_prompt(self, job_id: str, stage: Optional[str], response: dict[str, Any],
@@ -2821,6 +2914,13 @@ class ClaudeCodeRunner(Runner):
             )
         if is_hero or is_stills:
             extra += " " + _pair_scale_lock_line()
+        if gate in ("approve_assets", "budget_exceeded"):
+            # A regenerated customer clip goes back through the Kling pass (a new take is a
+            # new record there; nothing already paid is resent).
+            kling = _kling_lipsync_line((state or {}).get("options"),
+                                        Path(getattr(self, "_projects_dir", "projects")) / job_id)
+            if kling:
+                extra += " " + kling.strip()
         return (
             f"Revise stage '{stage}' for project_id: {job_id} per this feedback: {note}.{shot_txt}"
             f"{extra} "

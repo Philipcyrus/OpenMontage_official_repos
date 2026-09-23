@@ -199,7 +199,9 @@ generate motion clips before the VO that drives their length (and mouths) exists
    - Manifest row: `model: seedance_2_0`, `duration_seconds` = allocated i2v duration; put VO
      path / media ids and `[audio_lipsync:true]` in `generation_summary`. Do **not** add an
      `audio_lipsync` property on the asset row. After QA, eligibility lives under
-     `metadata.lip_sync_qa.scenes.<scene_id>`.
+     `metadata.lip_sync_qa.scenes.<scene_id>`. On **every** video row (lip-sync or not) set
+     `original_url` to the Higgsfield CDN url the clip was downloaded from
+     (`higgsfield_mcp_video` returns it as `original_url`).
    - On failure: HOLD LOCK fallback (next bullet), log in `decision_log`.
 
    **HOLD / ineligible** (`narrator`-only, `text_card`, non-speaking, or `audio_lipsync:false`):
@@ -267,6 +269,61 @@ silently pass.
 
 Static images cannot prove phoneme-perfect visemes. This QA is deliberately conservative: it
 catches severe timing/closed-mouth failures and sends uncertain results to the human.
+
+#### Kling customer lip-sync — only when the prompt has a KLING CUSTOMER LIP-SYNC line
+
+Off by default (`customer_lipsync_provider` job option). When it is on, Seedance still makes every
+clip; Kling then re-drives the **customer's** mouth in scenes where the customer is the only
+character speaking on screen, using the exact ElevenLabs line at its original offset.
+
+| Scene | Treatment |
+|---|---|
+| Panda speaks (alone or with the customer) | Seedance only — Kling does not support animal characters |
+| Customer speaks, face toward camera | Seedance clip, then the Kling pass |
+| Customer speaks, face in profile / turned away / covered / tiny | list it with `"skip": "<reason>"` — Kling needs the full face |
+| Narrator only, or nobody speaks | unchanged; narrator lines never drive a mouth |
+| Several faces in the clip | Kling must be told which face (`"face_id"`); it is never guessed |
+
+1. After all clips are ingested and **before** `lipsync_qa`, write
+   `assets/video/kling/request.json`:
+   `{"scenes": [{"scene_id": "...", "clip_path": "assets/video/<file>.mp4", "video_url": "<that clip's own original_url>", "audio": {"<section_id>": "<the VO file compose uses for that customer line>"}}]}`.
+   List each scene once. `video_url` must be the link of the take now at `clip_path` — the pass
+   downloads it (free) and refuses the scene if its bytes differ from the clip, so a link to an
+   older take is never lip-synced over a new one. `audio` names the exact file (for example the
+   faster TTS retake); without it the pass uses the asset manifest's narration row for that
+   section, then `vo-<section>-customer.*`, and refuses rather than guess between two files.
+2. Run the command from the prompt, with a Bash timeout of 600000 ms:
+   `python -m lib.kling_lipsync run <project_dir> --default-speaker <voice> --max-usd <cap>`.
+   It reads the script and scene plan itself (which lines, whose, where), refuses anything the
+   table above excludes, sends only the customer's line(s), writes each Kling task id to
+   `assets/video/kling/ledger.json` before waiting on it, never resends a paid task after a
+   restart, keeps the untouched clip as `assets/video/kling/<clip>.original.mp4`, and puts Kling's
+   version at the clip's own path only when it has a video stream that decodes end to end and its
+   length, picture length and frame shape match.
+   One run waits about 6 minutes at most: while its JSON summary says `"run_again": true`, run the
+   same command again (at most 5 more times) — a re-run only collects what was already sent.
+3. For each scene the summary marks `done`, run `lipsync_qa` on the clip with that scene's
+   `qa_audio_path` at offset `qa_offset_s` (0 — that bed is the customer's line(s) at their clip
+   times). If it fails and the `.original.mp4` does better on the same check (free), run
+   `python -m lib.kling_lipsync select <project_dir> <scene_id> original`. Record the QA result of
+   the version that stays selected as that scene's `asset_manifest.metadata.lip_sync_qa` entry,
+   replacing any earlier result for it (edit reads the validated offset from there).
+   No paid retry (Seedance or Kling) for a scene Kling processed — carry a failure as an
+   unresolved warning. Scenes Kling did not do keep their Seedance clip and the normal policy
+   above.
+4. Never call `kling_lip_sync` or the Kling API directly and never resend. Pass
+   `--retry-failed` only when a revise asks to retry Kling. A scene marked
+   `unknown_submission` (the request may have reached Kling) is resent only when the user
+   explicitly asks for that scene: `--resend-unknown <scene_id>`. If the customer's line is
+   re-voiced after Kling ran, the next run puts the original clip back and re-syncs it to the
+   new words (a new paid take within the cap). The same holds while Kling is still working: a
+   result collected for the old words is set aside, never applied, and the summary says
+   `"run_again": true`. Copy the summary into
+   `asset_manifest.metadata.kling_lipsync`. The launcher adds the per-scene outcome to the
+   approve_assets question from the ledger.
+
+Compose is unchanged: it strips every clip's audio and lays the ElevenLabs files once, so the
+soundtrack never comes from Kling.
 
 #### Pair scale + posture QA — mandatory for two-character scenes
 

@@ -233,6 +233,30 @@ arts_r = run._mirror_artifacts(JOBR, {
 assert arts_r.get("stills") == ["sc-01.png", "sc-02.png"], arts_r.get("stills")
 print("[ok] rejected takes stay out of artifacts.stills")
 
+# 2e') Kling's backup / result / history files, named in the manifest's kling_lipsync summary,
+# must NOT surface as extra clips (the live clip already carries the selected version).
+JOBK = "job_kling_files_not_clips"
+projk = run._projects_dir / JOBK
+(projk / "assets" / "video" / "kling" / "history").mkdir(parents=True, exist_ok=True)
+for _n in ("scene-01.mp4", "scene-02.mp4"):
+    (projk / "assets" / "video" / _n).write_bytes(b"LIVE")
+for _n in ("scene-02.original.mp4", "scene-02.kling-lipsync.mp4",
+           "history/01-abc.scene-02.original.mp4"):
+    (projk / "assets" / "video" / "kling" / _n).write_bytes(b"KLING")
+arts_k = run._mirror_artifacts(JOBK, {
+    "asset_manifest": {
+        "version": "1.0",
+        "assets": [{"id": "c2", "type": "video", "path": "assets/video/scene-02.mp4"}],
+        "metadata": {"kling_lipsync": {"scenes": {"scene-02": {
+            "status": "done", "clip_path": "assets/video/scene-02.mp4",
+            "original_backup": "assets/video/kling/scene-02.original.mp4",
+            "kling_path": "assets/video/kling/scene-02.kling-lipsync.mp4"}},
+            "archived": ["assets/video/kling/history/01-abc.scene-02.original.mp4"]}},
+    },
+})
+assert arts_k.get("clips") == ["scene-01.mp4", "scene-02.mp4"], arts_k.get("clips")
+print("[ok] Kling backups and results stay out of artifacts.clips")
+
 # 2f) storyboard builder drops rejected takes; two scenes zip to two live cards
 from dify_launcher.storyboard_preview import cards_from_arts, is_superseded_still, still_basenames
 arts_sb = {
@@ -1063,5 +1087,108 @@ fail_txt = _stdin_run._agent_failure_text(_SimpleNamespace(
 assert "OAuth session expired" in fail_txt
 assert "no stdin data received" not in fail_txt.lower()
 print("[ok] Claude stdin=DEVNULL; auth errors not masked by stdin warning")
+
+# Kling customer lip-sync is opt-in: every other job's prompts stay byte-identical.
+import json as _json
+
+_kr = R.ClaudeCodeRunner()
+with tempfile.TemporaryDirectory() as _ktmp:
+    _kr._projects_dir = Path(_ktmp)
+    _builders = (_kr._stills_approved_prompt, _kr._motion_approved_prompt,
+                 _kr._assets_in_progress_prompt)
+    for _b in _builders:
+        _plain = _b("job_k", {})
+        assert "KLING" not in _plain, _b.__name__
+        for _o in ({"customer_lipsync_provider": "seedance"}, {"customer_lipsync_provider": "nope"},
+                   {"customer_lipsync_provider": "kling", "audio_lipsync": False}):
+            _same = _b("job_k", _o) if _o.get("audio_lipsync") is not False else None
+            if _same is not None:
+                assert _same == _plain, (_b.__name__, _o)
+            else:
+                assert "KLING" not in _b("job_k", _o), (_b.__name__, _o)
+        _on = _b("job_k", {"customer_lipsync_provider": "kling", "narrator": "customer"})
+        _proj = str(Path(_ktmp) / "job_k")
+        assert "KLING CUSTOMER LIP-SYNC — ON" in _on, _b.__name__
+        assert (f"python -m lib.kling_lipsync run {_proj} --default-speaker customer "
+                "--max-usd 5") in _on, _b.__name__
+        assert f"python -m lib.kling_lipsync select {_proj} <scene_id> original" in _on
+        assert "Kling does not support animal characters" in _on
+        assert '"audio":{"<section_id>"' in _on                 # the VO file is named, not guessed
+        assert "Bash timeout of 600000 ms" in _on and '"run_again": true' in _on
+        assert "--resend-unknown <scene_id> only when the user explicitly asks" in _on
+        assert "asset_manifest.metadata.lip_sync_qa" in _on
+    assert R._kling_max_usd({"kling_lipsync_max_usd": 250}) == 100.0
+    assert R._kling_max_usd({"kling_lipsync_max_usd": "abc"}) == 5.0
+    assert R._kling_max_usd({"kling_lipsync_max_usd": -3}) == 0.0
+    assert R._customer_lipsync_provider({"customer_lipsync_provider": "KLING"}) == "kling"
+
+    _rev_on = _kr._revise_prompt("job_k", "assets", {"answer": "redo 2", "shots": [2]},
+                                 state={"gate": "approve_assets",
+                                        "options": {"customer_lipsync_provider": "kling"}})
+    assert "KLING CUSTOMER LIP-SYNC" in _rev_on
+    assert "KLING" not in _kr._revise_prompt("job_k", "assets", {"answer": "redo 2"},
+                                             state={"gate": "approve_assets", "options": {}})
+    assert _kr._budget_raised_prompt("job_k", 500, {}) == _kr._budget_raised_prompt("job_k", 500)
+    assert "KLING CUSTOMER LIP-SYNC" in _kr._budget_raised_prompt(
+        "job_k", 500, {"customer_lipsync_provider": "kling"})
+
+    # A revise at approve_assets (and a budget-hold revise) goes through resume() with the job
+    # state, so an opted-in job's revise carries the KLING line; a default job's revise prompt is
+    # unchanged.
+    _sent: list = []
+    _kr._run_agent = lambda prompt, job_id, label: _sent.append((label, prompt))
+    _kr._sync = lambda st: st
+    _kr._run_until_assets_gate = lambda st, label=None: st
+    for _gate in ("approve_assets", "budget_exceeded"):
+        _sent.clear()
+        _kr.resume({"job_id": "job_k", "gate": _gate, "status": "awaiting_human",
+                    "options": {"customer_lipsync_provider": "kling"}},
+                   {"decision": "revise", "answer": "redo 3", "shots": [3]})
+        assert _sent and "KLING CUSTOMER LIP-SYNC" in _sent[-1][1], (_gate, _sent)
+        _sent.clear()
+        _kr.resume({"job_id": "job_k", "gate": _gate, "status": "awaiting_human", "options": {}},
+                   {"decision": "revise", "answer": "redo 3", "shots": [3]})
+        assert _sent and "KLING" not in _sent[-1][1], (_gate, _sent)
+    _sent.clear()
+    _kr.resume({"job_id": "job_k", "gate": "approve_assets", "status": "awaiting_human",
+                "options": {}}, {"decision": "revise", "answer": "redo 3", "shots": [3]})
+    assert _sent[-1][1] == _kr._revise_prompt("job_k", "assets",
+                                              {"decision": "revise", "answer": "redo 3",
+                                               "shots": [3]}), "default revise changed"
+    del _kr._run_agent, _kr._sync, _kr._run_until_assets_gate
+
+    # Gate notes come from the ledger, only at approve_assets, only for opted-in jobs, and say
+    # what the clip file holds now.
+    import hashlib as _hl
+    _kdir = Path(_ktmp) / "job_k" / "assets" / "video" / "kling"
+    _kdir.mkdir(parents=True)
+    (_kdir.parent / "scene-04.mp4").write_bytes(b"KLING-VERSION")
+    (_kdir / "ledger.json").write_text(_json.dumps({"version": 1, "scenes": {
+        "scene-04": {"status": "done", "selected": "kling",
+                     "clip_path": "assets/video/scene-04.mp4",
+                     "kling_sha256": _hl.sha256(b"KLING-VERSION").hexdigest(),
+                     "original_sha256": _hl.sha256(b"SEEDANCE").hexdigest()},
+        "scene-07": {"status": "skipped", "reason": "not sent to Kling: profile view"}}}))
+    _st = {"job_id": "job_k", "options": {"customer_lipsync_provider": "kling"}}
+    _q = _kr._kling_question(_st, "approve_assets", "Approve the media.")
+    assert _q.startswith("Approve the media.\n\nKling lip-sync (customer scenes):\n"), _q
+    assert "- scene-04: the customer's lip-sync was redone by Kling" in _q
+    assert "- scene-07: original clip kept — not sent to Kling: profile view." in _q
+    assert _kr._kling_question(_st, "approve_final", "Q") == "Q"
+    assert _kr._kling_question({"job_id": "job_k", "options": {}}, "approve_assets", "Q") == "Q"
+    # ...and the real _sync puts them on the approve_assets question.
+    _fake_latest.cp = {"stage": "assets", "status": "awaiting_human", "artifacts": {}}
+    _synced = _kr._sync({"job_id": "job_k", "options": {"customer_lipsync_provider": "kling"}})
+    assert _synced["gate"] == "approve_assets", _synced
+    assert "\n\nKling lip-sync (customer scenes):\n- scene-04:" in _synced["question"]
+    _plain_sync = _kr._sync({"job_id": "job_k", "options": {}})
+    assert _plain_sync["gate"] == "approve_assets" and "Kling" not in _plain_sync["question"]
+    (_kdir / "ledger.json").write_text("{not json")                      # never raises, and says so
+    assert _kr._kling_question(_st, "approve_assets", "Q").startswith(
+        "Q\n\nKling lip-sync (customer scenes):\n- Kling's record (assets/video/kling/ledger.json) "
+        "could not be read")
+    assert _kr._kling_question({"options": {"customer_lipsync_provider": "kling"}},
+                               "approve_assets", "Q") == "Q"
+print("[ok] Kling customer lip-sync: opt-in prompt line, exact command, revise, gate notes")
 
 print("\n[PASS] ClaudeCodeRunner adapter: mapping, mirroring, sync, approval, migration")

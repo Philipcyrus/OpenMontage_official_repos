@@ -104,6 +104,15 @@ DIFY_RUNNER=mock uvicorn dify_launcher.app:app --host 0.0.0.0 --port 8600
 - `audio_lipsync` — `true` (default) | `false`. Video only. On by default: Seedance
   `audio_references` so on-screen customer/panda mouths follow the ElevenLabs VO
   (`generate_audio:false`; compose still lays that VO). Pass `false` for HOLD + duration-only.
+- `customer_lipsync_provider` — `"seedance"` (default) | `"kling"`. Video only, with
+  `audio_lipsync` on. `"kling"` sends each clip where the **customer** is the only on-screen
+  speaker through Kling's lip-sync after Seedance makes it; the panda always stays on Seedance
+  (Kling does not support animal characters). Runs through `python -m lib.kling_lipsync`, which
+  records every Kling task id before waiting on it (a restart never pays twice) and keeps the
+  original clip under `assets/video/kling/`. The approve_assets question lists the outcome per
+  scene. Needs `KLING_API_KEY` on the server; without it nothing is sent.
+- `kling_lipsync_max_usd` — estimated-dollar cap on a job's Kling spend (default `5`, max `100`).
+  A batch that would pass it is not sent; those clips keep their Seedance lip-sync.
 - `max_higgsfield_credits` — integer credit ceiling (unset = no cap). Before any Higgsfield
   generation, if cumulative spend would exceed it the agent blocks and pauses at `budget_exceeded`
   (raise the cap / revise / cancel). Hard pre-generation block — never overspends silently.
