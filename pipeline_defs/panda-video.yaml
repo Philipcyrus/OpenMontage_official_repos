@@ -124,6 +124,9 @@ stages:
       - audio_probe              # PHASE 2/3: probe all VO before full-timeline duration allocation
       - higgsfield_mcp_video     # PHASE 2/3: OUR MCP bridge (image_to_video); duration from audio-driven allocation
       - lipsync_qa               # PHASE 3: local timing analysis + mouth-frame evidence before approve_assets
+      # Opt-in Kling customer lip-sync (options.customer_lipsync_provider=kling) runs through
+      # `python -m lib.kling_lipsync`, NOT the kling_lip_sync tool: the lib keeps the task-id
+      # ledger that stops a restart from paying twice, so the tool is deliberately not listed.
       - seedance_video
       - music_gen                # PHASE 3: background music (ElevenLabs Music)
     checkpoint_required: true

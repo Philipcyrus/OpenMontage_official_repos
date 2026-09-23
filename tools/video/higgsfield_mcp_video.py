@@ -271,6 +271,9 @@ class HiggsFieldMCPVideo(BaseTool):
                 "aspect_ratio": inputs.get("aspect_ratio", "16:9"),
                 "job_id": inputs.get("job_id"),
                 "source": "video_url" if video_url else "source_path",
+                # The Higgsfield CDN link, for the asset row's original_url: the Kling customer
+                # lip-sync pass hands Kling this link (Kling cannot read a local file).
+                "original_url": video_url or None,
                 "output": str(output_path),
                 "output_path": str(output_path),
                 "format": "mp4",

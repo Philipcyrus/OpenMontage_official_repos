@@ -177,3 +177,15 @@ def test_asset_director_avoids_illegal_per_row_manifest_fields():
     assert "Manifest: `audio_lipsync: true`" not in text
     assert "clip metadata `audio_lipsync: true`" not in text
     assert "also record `speaker` and the script `section` id in metadata" not in text
+
+
+def test_kling_customer_lipsync_is_opt_in_customer_only_and_goes_through_the_ledger():
+    text = (ROOT / "skills/pipelines/panda-video/asset-director.md").read_text(encoding="utf-8")
+    section = text.split("#### Kling customer lip-sync", 1)[1].split("#### ", 1)[0]
+    assert "only when the prompt has a KLING CUSTOMER LIP-SYNC line" in text
+    assert "Kling does not support animal characters" in section
+    assert "python -m lib.kling_lipsync run" in section
+    assert "Never call `kling_lip_sync` or the Kling API directly" in section
+    assert "`original_url`" in text
+    tools = {s["name"]: s for s in _panda_video()["stages"]}["assets"]["tools_available"]
+    assert "kling_lip_sync" not in tools        # the ledger-keeping lib is the only way in

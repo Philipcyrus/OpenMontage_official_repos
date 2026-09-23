@@ -288,6 +288,8 @@ after the last content gate — a post-cut overlay, never in generation. `skip` 
 | `render_runtime` | `"auto"` \| `"ffmpeg"` \| `"remotion"` \| `"hyperframes"` | which render engine composes the video. Default `"auto"` |
 | `motion_sample` | `false` (default) \| `true` | insert the `approve_motion_sample` gate (video only; default off) |
 | `audio_lipsync` | `true` (default) \| `false` | video only — Seedance `audio_references` so on-screen customer/panda mouths follow ElevenLabs VO (`generate_audio:false`; compose still lays the same VO). Pass `false` for HOLD + duration-only |
+| `customer_lipsync_provider` | `"seedance"` (default) \| `"kling"` | video only, with `audio_lipsync` on — `"kling"` sends each clip where the **customer** is the only on-screen speaker through Kling's lip-sync after Seedance makes it (the panda always stays on Seedance: Kling does not support animal characters). The original clip is kept; the approve_assets question lists the outcome per scene. Needs `KLING_API_KEY` on the server — without it nothing is sent and the Seedance clips are used |
+| `kling_lipsync_max_usd` | number, default `5` (max `100`) | estimated-dollar cap on a job's Kling spend; a batch that would pass it is not sent (the clips keep their Seedance lip-sync) |
 | `hero_still` | `true` (default) \| `false` | insert `approve_hero_still` look-lock (video + carousel; default on). Never for panda-image |
 | `max_higgsfield_credits` | integer, or unset | **hard credit ceiling** for the run |
 | `aspect_ratio` | string | stills canvas, passed through to `generate_image`. Carousel default `"4:5"`; **panda-image** default `"1:1"`. Also `9:16`, `WIDTHxHEIGHT`, … |

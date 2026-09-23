@@ -19,6 +19,7 @@ bash deploy/install.sh
 
 # 3) configure env
 nano .env          # DIFY_RUNNER=mock|claude, DIFY_DATA_DIR=..., ELEVENLABS_API_KEY=...
+                   # optional: KLING_API_KEY=... for jobs with customer_lipsync_provider=kling
                    # DIFY_TOKEN is OPTIONAL — leave EMPTY for no auth (see "Auth" below)
 
 # 4) free port 8501 — retire the old montage-svc (replaced by this engine)
