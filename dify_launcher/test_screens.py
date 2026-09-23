@@ -310,6 +310,57 @@ assert "runs outside the scene" in notes_for(plan_with((1, "in_01", late), (2, "
 bad_frame = dict(GOOD_PHONE, frame="tablet")
 assert "frame must be one of" in notes_for(plan_with((1, "in_01", bad_frame), (2, "in_02", GOOD_WEB)))
 
+# held-phone: zone inside subject_zone; beside overlap rule inverted; locked camera; no slide enter
+# Use in_03 (800×600) so a phone-screen-sized zone stays above LEGIBLE_MIN_SCALE.
+GOOD_HELD = {"zone": {"x": 0.34, "y": 0.24, "w": 0.32, "h": 0.42},
+             "subject_zone": {"x": 0.18, "y": 0.12, "w": 0.64, "h": 0.78},
+             "frame": "held", "camera": "locked"}
+held_reqs = [{"input_id": "in_03", "scenes": [1], "placement": "held"},
+             {"input_id": "in_02", "scenes": [2]}]
+assert notes_for(plan_with((1, "in_03", GOOD_HELD), (2, "in_02", GOOD_WEB)), held_reqs) == "", \
+    notes_for(plan_with((1, "in_03", GOOD_HELD), (2, "in_02", GOOD_WEB)), held_reqs)
+# zone not contained in subject → flag
+held_out = dict(GOOD_HELD, zone={"x": 0.05, "y": 0.20, "w": 0.30, "h": 0.40})
+assert "must sit inside subject_zone" in notes_for(
+    plan_with((1, "in_03", held_out), (2, "in_02", GOOD_WEB)), held_reqs)
+# overlapping but not contained must not be accepted as beside-style "covers character"
+held_overlap_ok = dict(GOOD_HELD)  # zone overlaps subject by design — must NOT say covers character
+assert "covers the character area" not in notes_for(
+    plan_with((1, "in_03", held_overlap_ok), (2, "in_02", GOOD_WEB)), held_reqs)
+# missing subject_zone
+held_nosub = {"zone": GOOD_HELD["zone"], "frame": "held", "camera": "locked"}
+assert "needs a subject_zone" in notes_for(
+    plan_with((1, "in_03", held_nosub), (2, "in_02", GOOD_WEB)), held_reqs)
+# unlocked camera on video
+held_unlocked = dict(GOOD_HELD)
+held_unlocked.pop("camera")
+assert "camera" in notes_for(
+    plan_with((1, "in_03", held_unlocked), (2, "in_02", GOOD_WEB)), held_reqs).lower()
+# slide enter forbidden
+held_slide = dict(GOOD_HELD, enter={"type": "slide_left", "at_s": 0.2, "duration_s": 0.4})
+assert "fixed screen rect" in notes_for(
+    plan_with((1, "in_03", held_slide), (2, "in_02", GOOD_WEB)), held_reqs)
+# keep-clear wording for held
+held_plan = plan_with((1, "in_03", GOOD_HELD), (2, "in_02", GOOD_WEB))
+kc = " | ".join(sl.keep_clear_lines(held_plan, pipeline="panda-video"))
+assert "blank phone screen" in kc and "composited" in kc, kc
+# image pipeline: held without camera is fine (still)
+img_held_layout = {
+    "zone": {"x": 0.30, "y": 0.30, "w": 0.36, "h": 0.40},
+    "subject_zone": {"x": 0.12, "y": 0.18, "w": 0.70, "h": 0.72},
+    "frame": "held",
+}
+img_held_plan = {"version": "1.0", "metadata": {"aspect_ratio": "1:1"}, "scenes": [
+    {"id": "slide-1", "type": "generated", "description": "x", "start_seconds": 0, "end_seconds": 1,
+     "required_assets": [
+         {"type": "image", "source": "generate", "description": "still"},
+         {"type": "image", "source": "provided", "input_id": "in_03", "description": "shot",
+          "layout": img_held_layout}]}]}
+img_inputs = [INPUTS[2]]
+img_reqs = [{"input_id": "in_03", "scenes": [1], "placement": "held"}]
+assert sl.validate_layouts(img_held_plan, img_inputs, img_reqs, pipeline="panda-image") == [], \
+    sl.validate_layouts(img_held_plan, img_inputs, img_reqs, pipeline="panda-image")
+
 assert "missing" in " ".join(sl.validate_requests(INPUTS, None))
 dup = REQS + [{"input_id": "in_01", "scenes": [2]}]
 assert "listed 2 times" in " ".join(sl.validate_requests(INPUTS, dup))
@@ -317,6 +368,7 @@ assert "unknown screenshot id" in " ".join(sl.validate_requests(INPUTS, REQS + [
 assert "missing from requests.json" in " ".join(sl.validate_requests(INPUTS, REQS[:2]))
 print("[ok] assignments binding (missing / extra / unplaced / moment / beyond plan / two scenes / two in one scene)")
 print("[ok] layout checks: captions, logo corner, character area, legibility, zoom, timing, schema")
+print("[ok] held-phone: containment, locked camera, no slide enter, blank-screen keep-clear")
 
 # carousel / image: slide wording, no caption strip, no timing, logo corner out to the edge
 SLIDE_PHONE = {"zone": {"x": 0.42, "y": 0.25, "w": 0.54, "h": 0.69},

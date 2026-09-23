@@ -14,7 +14,12 @@
       "scenes": {"type": "array", "items": {"type": "integer", "minimum": 1}, "uniqueItems": true},
       "moment": {"type": "string", "description": "The user's words when they named a moment instead of a scene number."},
       "instruction": {"type": "string", "description": "How to use it, in the user's words."},
-      "shows": {"type": "string", "description": "One line: what the screenshot shows."}
+      "shows": {"type": "string", "description": "One line: what the screenshot shows."},
+      "placement": {
+        "type": "string",
+        "enum": ["beside", "held"],
+        "description": "beside = screenshot next to the character with Remotion chrome (default). held = screenshot composited onto a blank phone screen the character holds (frame:held in the layout)."
+      }
     }
   }
 }

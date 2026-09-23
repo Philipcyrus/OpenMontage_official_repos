@@ -76,16 +76,26 @@ For each placement add a **second** item to the scene's `required_assets` — th
 `layout` follows `schemas/artifacts/screen_layout.schema.json`. Open the screenshot and place things
 by looking — never guess coordinates. This is a still: the launcher shows every part of the layout
 at once, so leave out `show`, `enter`, `exit`, `at_s` and `duration_s`.
+
+**Beside** (`requests.json` `placement` omitted or `"beside"` — Remotion chrome next to the character):
 - `zone` (fractions of the image): where the screenshot sits. Keep it off the logo corner listed in
   the prompt facts and big enough to read (the launcher warns below 0.35×). App screenshots: a tall
   zone beside the character. Web pages: a wide zone above or below it.
-- `subject_zone`: where the panda / customer stands — never overlapping the screenshot.
-- **On-image copy** is baked into the still, so it must sit outside every screenshot zone. Say where
-  in the still's description ("headline top-left, clear of the logo corner; panda bottom-left; the
-  right half below the logo box plain white, empty"). The logo box in the facts is the whole
-  top-right corner, so nothing — screenshot, card or headline — may reach into it. Crop a tall app
-  screenshot to the part that matters, or one image cannot show it readably.
+- `subject_zone`: where the panda / customer stands — **never overlapping** the screenshot.
 - `frame`: `phone` for app screens, `browser` for web pages, `card` otherwise, `none` only if asked.
+
+**Held** (`placement: "held"` — screenshot on a blank phone the character holds):
+- `frame`: **`"held"`** (no Remotion chrome — the generated phone is part of the still).
+- `zone`: the **blank phone screen** rect (fractions of the image). Must sit **inside** `subject_zone`.
+- `subject_zone`: panda/customer **plus the phone body** in their hands.
+- Still description: character holds a phone toward the camera, **screen facing the viewer, solid
+  plain white blank screen** (no UI glyphs) in `zone`. Axis-aligned only — do not tilt the screen.
+- Do **not** ask Higgsfield to draw the real screenshot content; the launcher composites it after.
+
+Shared for both:
+- **On-image copy** is baked into the still, so it must sit outside every screenshot zone. Say where
+  in the still's description. The logo box in the facts is the whole top-right corner — nothing may
+  reach into it. Crop a tall app screenshot to the part that matters.
 - `crop`: to show only the part of the screenshot that matters, larger.
 - `steps` — regions and points are fractions of the WHOLE screenshot:
   - `highlight_box` on the thing the copy names; `cursor_move` (its `to` point) + `click_pulse` to
@@ -95,8 +105,9 @@ at once, so leave out `show`, `enter`, `exit`, `at_s` and `duration_s`.
   - `card`: one short key message (≤ 12 CJK characters or 5 English words), `text` with zh and en,
     zone clear of the character and the copy.
 
-Two screenshots sit side by side — their zones must not overlap. On a revise that changes which
-screenshots are used, update `inputs/requests.json` **and** the layouts.
+Two beside screenshots sit side by side — their zones must not overlap. Held is normally one
+screenshot. On a revise that changes which screenshots are used, update `inputs/requests.json`
+**and** the layouts.
 
 ### 8. Coverage checks (before submitting)
 - [ ] `scenes.length == 1`

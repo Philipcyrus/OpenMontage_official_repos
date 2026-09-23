@@ -48,11 +48,11 @@ chain as separate generates.
   `asset_manifest`. `screen_overlay` places them at compose.
 - Their scenes still get the normal generated still (hero included) and clip. The prompt facts list,
   per scene, the area to keep plain and where the character stands. Put both into the still prompt
-  ("panda on the left third; the right 60% of the frame is plain white background — empty, no
-  character, props, text or scenery") and into the clip prompt (locked camera, the character stays
-  in its area, no pan or zoom).
-- The launcher checks those areas on every still and clip and flags any that are not empty;
-  regenerate only the flagged one, with the area empty.
+  and the clip prompt (locked camera). **Beside:** leave the screenshot area plain white empty.
+  **Held:** leave the phone screen rect solid plain white blank; keep character + phone in the
+  subject area; no pan/zoom that moves the blank screen.
+- The launcher checks those areas on every still and clip and flags any that are not empty / not
+  white enough; regenerate only the flagged one with the area empty (beside) or blank white (held).
 
 ### 2. PHASE 0 — generate ONE HERO STILL, then STOP (GATE 2.5, approve_hero_still)
 **Only when the `hero_still` job option is on (default on; pass `false` to opt out).**

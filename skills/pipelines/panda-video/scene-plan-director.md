@@ -128,26 +128,23 @@ For each placement add a **second** item to that scene's `required_assets` — t
 
 `layout` follows `schemas/artifacts/screen_layout.schema.json` (worked example:
 `docs/user-screenshots-plan.md` §4). Open the screenshot and place things by looking — never guess
-coordinates. You decide the layout, following the user's `instruction`:
-- `zone` (fractions of the frame): where the screenshot sits. Keep it off the caption strip and the
-  logo corner listed in the prompt facts, and big enough to read (the launcher warns below 0.35×).
-  App screenshots: a tall zone beside the character. Web pages: a wide zone above or below it.
-- `subject_zone`: where the Panda / customer stands — never overlapping the screenshot. Write the
-  generated still's description to match ("panda on the left third; right side plain white, empty").
-- `frame`: `phone` for app screens, `browser` for web pages, `card` otherwise, `none` only if asked.
-- `crop`: only to start on part of a large screenshot.
-- `enter` / `exit` / `show`: when it appears. Several screenshots in one scene sit side by side
-  (zones don't overlap) or replace each other in the same zone (`show` windows don't overlap).
-- `steps` — regions and points are fractions of the WHOLE screenshot; `at_s` is seconds into the
-  scene, timed to when the narrator says it:
-  - `highlight_box` on the thing the narrator names; `cursor_move` + `click_pulse` for a tap/click.
-  - `zoom_to` a region to enlarge it. The region grows to the screen's shape, so pick one about as
-    narrow as the screen (a tall phone screen needs a narrow region) or it barely zooms.
-  - `blur_region` over personal data — card numbers, ICCID / IMEI, phone numbers, emails, names,
-    addresses, account QR codes — even when the user did not ask.
-  - `card`: one short key message (≤ 12 CJK characters or 5 English words), `text` with zh and en,
-    zone clear of the character and the captions.
-- `camera`: `"locked"`.
+coordinates. You decide the layout, following the user's `instruction` and `placement`:
+
+**Beside** (`placement` omitted or `"beside"`):
+- `zone`: where the screenshot sits (off caption strip + logo corner; tall for apps, wide for web).
+- `subject_zone`: character — **never overlapping** the screenshot. Match the still description.
+- `frame`: `phone` | `browser` | `card` | `none`.
+- `enter` / `exit` / `show`: when it appears. Side-by-side (zones don't overlap) or sequential
+  (`show` windows don't overlap).
+
+**Held** (`placement: "held"`):
+- `frame`: **`"held"`**; `zone` = blank phone screen **inside** `subject_zone` (character + phone).
+- Still/clip: phone held toward camera, screen flat and **solid plain white**; `camera: "locked"`.
+- Do **not** use slide enter/exit (overlay stays on a fixed screen-space rect).
+
+Shared: `crop`; `steps` with `at_s` timed to narration (`blur_region` on PII even when not asked);
+`camera: "locked"`; write `captions` so the launcher can measure keep-out. Timing is re-checked at
+compose against the cut duration — keep placements inside the shortest the scene could become.
 
 Also write the scene's `captions` (`{"zh": ..., "en": ...}`) for every scene that carries a
 screenshot. The launcher measures the caption with the real renderer to work out how far up the

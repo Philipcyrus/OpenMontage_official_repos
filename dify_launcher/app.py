@@ -27,6 +27,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import threading
 from datetime import datetime, timezone
@@ -221,6 +222,37 @@ def _running_ack_question(gate: Optional[str], decision: str) -> str:
     )
 
 
+def _raw_checkpoint_status(job_id: str, stage: str) -> Optional[str]:
+    """Peek checkpoint status from disk without soft-load validation.
+
+    Soft-load can drop completed/thin checkpoints that lack a canonical artifact; recovery
+    only needs the status field to decide mid-render vs invent-start-gate.
+    """
+    try:
+        from lib.paths import PROJECTS_DIR
+    except ImportError:
+        return None
+    path = PROJECTS_DIR / job_id / f"checkpoint_{stage}.json"
+    if not path.is_file():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    status = data.get("status")
+    return status if isinstance(status, str) else None
+
+
+def _mid_render_stage(job_id: str) -> Optional[str]:
+    """Stage name when assets/compose is legitimately mid-render (do not invent a gate)."""
+    for stage in ("assets", "compose"):
+        if _raw_checkpoint_status(job_id, stage) == "in_progress":
+            return stage
+    return None
+
+
 def _disk_recovery_pause(job_id: str) -> Optional[tuple[str, str]]:
     """Prefer an on-disk later human pause over an earlier text gate / stale recovery.
 
@@ -252,20 +284,81 @@ def _disk_recovery_pause(job_id: str) -> Optional[tuple[str, str]]:
     return None
 
 
+def _infer_assets_start_gate(
+    job_id: str, state: dict[str, Any]
+) -> Optional[tuple[str, str]]:
+    """When scene_plan is done but assets never started, reopen the first assets pause.
+
+    Covers the production failure where the assets agent no-ops (no checkpoint) and the
+    worker exits as gate-less ``running``.
+    """
+    pipeline = state.get("pipeline") or "panda-video"
+    if pipeline not in ("panda-video", "panda-carousel", "panda-image"):
+        return None
+
+    if _raw_checkpoint_status(job_id, "scene_plan") != "completed":
+        return None
+
+    assets_status = _raw_checkpoint_status(job_id, "assets")
+    if assets_status in {"awaiting_human", "in_progress", "completed"}:
+        # Assets already started or finished — do not invent a start gate.
+        return None
+
+    options = state.get("options") if isinstance(state.get("options"), dict) else {}
+    if pipeline == "panda-image" or not _truthy_option(options, "hero_still", True):
+        return "approve_stills", "assets"
+    return "approve_hero_still", "assets"
+
+
+def _recovery_original(
+    job_id: str, state: dict[str, Any], persisted: Optional[dict[str, Any]] = None
+) -> dict[str, Any]:
+    """Build a recover context that survives in-place mutation of the worker state dict.
+
+    ``resume`` clears ``gate`` on the same object passed to ``_bg``. Recovery markers live
+    on the processing snapshot and/or were stamped onto the worker copy at spawn time.
+    """
+    snap = dict(persisted or {})
+    original = dict(state)
+    for key in ("_recovery_gate", "_recovery_stage"):
+        if not original.get(key) and snap.get(key):
+            original[key] = snap[key]
+    # Prefer the pre-mutation leaving gate only as last resort; next-target markers win.
+    if not original.get("gate") and snap.get("gate"):
+        # processing_state intentionally has gate=None while running — ignore that.
+        pass
+    return original
+
+
 def _recover_worker_result(
     result: dict[str, Any],
     original: dict[str, Any],
     reason: str,
 ) -> dict[str, Any]:
-    """Never let an exiting async worker strand a job in `running`."""
+    """Never let an exiting async worker strand a job in `running` — except mid-render.
+
+    ``_run_until_assets_gate`` intentionally returns ``running`` / ``gate=None`` while
+    assets (or compose) is ``in_progress``. Do not reopen a stamped human gate over that.
+    """
     recovered = dict(result)
     job_id = recovered.get("job_id") or original.get("job_id")
+    if job_id:
+        mid = _mid_render_stage(str(job_id))
+        if mid:
+            q = recovered.get("question") or (
+                f"{mid} generation in progress — poll GET /jobs/{{id}} until "
+                "status is awaiting_human"
+            )
+            recovered.update(status="running", stage=mid, gate=None, question=q)
+            return _clear_processing_markers(recovered)
+
     disk_pause = _disk_recovery_pause(str(job_id)) if job_id else None
 
     gate = (
         (disk_pause[0] if disk_pause else None)
         or recovered.get("gate")
         or recovered.get("_recovery_gate")
+        or original.get("_recovery_gate")
         or original.get("gate")
     )
     # Backward-compatible repair for jobs written before recovery metadata existed.
@@ -278,10 +371,16 @@ def _recover_worker_result(
         and recovered.get("artifacts", {}).get("clips")
     ):
         gate = "approve_assets"
+    if not gate and job_id:
+        inferred = _infer_assets_start_gate(str(job_id), {**original, **recovered})
+        if inferred:
+            gate, inferred_stage = inferred
+            recovered.setdefault("stage", inferred_stage)
     stage = (
         (disk_pause[1] if disk_pause else None)
         or recovered.get("stage")
         or recovered.get("_recovery_stage")
+        or original.get("_recovery_stage")
         or original.get("stage")
     )
     if gate:
@@ -349,19 +448,33 @@ def _public(state: dict[str, Any]) -> dict[str, Any]:
 def _bg(job_id: str, fn: Callable[..., dict[str, Any]], state: dict[str, Any],
         arg: Optional[dict[str, Any]] = None) -> None:
     """Run one agent leg; an exiting worker must persist a terminal or human-gated state."""
+    # Snapshot recovery identity before resume mutates ``state`` in place (clears gate).
+    recovery_snapshot = {
+        "gate": state.get("gate"),
+        "stage": state.get("stage"),
+        "_recovery_gate": state.get("_recovery_gate"),
+        "_recovery_stage": state.get("_recovery_stage"),
+        "pipeline": state.get("pipeline"),
+        "options": state.get("options"),
+        "job_id": state.get("job_id") or job_id,
+    }
     try:
         result = fn(state) if arg is None else fn(state, arg)
         persisted = store.load_state(job_id) or {}
         if persisted.get("processing_started_at") and not result.get("processing_started_at"):
             result["processing_started_at"] = persisted["processing_started_at"]
+        original = _recovery_original(job_id, recovery_snapshot, persisted)
         if result.get("status") == "running":
-            result = _recover_worker_result(result, state, "worker returned status=running")
+            result = _recover_worker_result(
+                result, original, "worker returned status=running")
         else:
             result = _clear_processing_markers(result)
         store.save_state(result)
     except Exception as e:  # noqa: BLE001 — surface any leg failure to the poller
-        st = store.load_state(job_id) or state
-        st = _recover_worker_result(st, state, f"error: {e}")
+        persisted = store.load_state(job_id) or {}
+        st = persisted or state
+        original = _recovery_original(job_id, recovery_snapshot, persisted)
+        st = _recover_worker_result(st, original, f"error: {e}")
         store.save_state(st)
     finally:
         with _LOCK:
@@ -458,6 +571,26 @@ def _projects_dir() -> Any:
     return pd
 
 
+_STATUS_CHECK_BRIEF_RE = re.compile(
+    r"^\s*(checking on the job( again)?|check(ing)? (the )?status|"
+    r"any update(\?)?|what('?s| is) the status|poll(ing)?( the)? job|"
+    r"extend(ing)? the wait( automatically)?|"
+    r"still (waiting|running)|"
+    r"done\.?\s*that run stopped( before it finished)?|"
+    r"send the brief again( to retry)?|"
+    r"anything above was produced before it stopped)\s*[.!]?\s*$",
+    re.I,
+)
+
+
+def _is_status_check_brief(brief: str) -> bool:
+    """True when Dify/Mochi misfires a poll message into POST /jobs as a new brief."""
+    text = (brief or "").strip()
+    if not text or len(text) > 120:
+        return False
+    return bool(_STATUS_CHECK_BRIEF_RE.match(text))
+
+
 @app.post("/jobs")
 def create_job(body: StartJob, x_dify_token: Optional[str] = Header(None)) -> dict[str, Any]:
     _auth(x_dify_token)
@@ -467,6 +600,14 @@ def create_job(body: StartJob, x_dify_token: Optional[str] = Header(None)) -> di
             detail=(
                 "launcher code changed on disk since process start (code_stale); "
                 "restart uvicorn before starting new jobs"
+            ),
+        )
+    if _is_status_check_brief(body.brief):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "brief looks like a status check, not a production brief — "
+                "poll GET /jobs/{id} on the existing job instead of POST /jobs"
             ),
         )
     options = dict(body.options or {})
@@ -486,7 +627,11 @@ def create_job(body: StartJob, x_dify_token: Optional[str] = Header(None)) -> di
         # brief sent with a stale language:en to zh, and the agent writes the slides in that
         # language. job.json drives the placed screenshot cards, so it has to match — and the
         # default is the prompts' default ("en"), not zh.
-        effective, _coerced = _runner._coerce_language_from_brief(options, body.brief or "")
+        # Module function (not a Runner method) — calling via _runner AttributeError'd → HTTP 500
+        # after a successful media download, which Dify surfaces as "couldn't reach the render service".
+        from dify_launcher.runner import _coerce_language_from_brief
+
+        effective, _coerced = _coerce_language_from_brief(options, body.brief or "")
         try:
             records = screens.commit(
                 prepared, _projects_dir() / job_id, pipeline=pipeline,
@@ -557,28 +702,45 @@ def respond(job_id: str, body: Respond, x_dify_token: Optional[str] = Header(Non
         raise HTTPException(status_code=409, detail=f"job is {state.get('status')}, not awaiting_human")
     if body.decision == "skip" and state.get("gate") != "approve_brand":
         raise HTTPException(status_code=400, detail="skip is only valid at the approve_brand gate")
+    # Dify/OUI often POSTs decision=revise with answer="approved…" at stills; coerce
+    # before recovery targets / ack / spawn so the job advances to animation (i2v).
+    response = _runner.coerce_gate_response(state.get("gate"), body.model_dump())
+    decision = str(response.get("decision") or body.decision)
+    if response.get("_coerced_from_revise_approval"):
+        print(
+            f"[respond] {job_id} coerced revise→approve at gate={state.get('gate')!r} "
+            f"note={response.get('_original_revise_answer')!r}",
+            flush=True,
+        )
     if _ASYNC:
-        recovery_gate, recovery_stage = _next_recovery_target(state, body.decision)
+        recovery_gate, recovery_stage = _next_recovery_target(state, decision)
         running = {
             **state,
             "status": "running",
             "gate": None,
-            "question": _running_ack_question(state.get("gate"), body.decision),
+            "question": _running_ack_question(state.get("gate"), decision),
             "_recovery_gate": recovery_gate,
             "_recovery_stage": recovery_stage,
             "_processing_operation": f"resume:{state.get('gate') or 'unknown'}",
             "processing_started_at": _utc_now(),
         }
+        # Shallow copy + stamp recovery so resume in-place mutation cannot wipe markers
+        # used by _recover_worker_result when the agent exits as gate-less running.
+        worker_state = {
+            **state,
+            "_recovery_gate": recovery_gate,
+            "_recovery_stage": recovery_stage,
+        }
         _spawn(
             job_id,
             _RUNNER.resume,
-            state,
-            body.model_dump(),
+            worker_state,
+            response,
             processing_state=running,
         )
         return _public(running)
     try:
-        state = _RUNNER.resume(state, body.model_dump())
+        state = _RUNNER.resume(state, response)
     except _runner.BrandError as e:
         raise HTTPException(status_code=e.status_code, detail=str(e)) from e
     store.save_state(state)

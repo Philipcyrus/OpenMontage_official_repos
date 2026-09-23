@@ -77,26 +77,20 @@ For each placement add a **second** item to that slide's `required_assets` — t
 `layout` follows `schemas/artifacts/screen_layout.schema.json`. Open the screenshot and place things
 by looking — never guess coordinates. A slide is a still: the launcher shows every part of the
 layout at once, so leave out `show`, `enter`, `exit`, `at_s` and `duration_s`.
-- `zone` (fractions of the slide): where the screenshot sits. Keep it off the logo corner listed in
-  the prompt facts and big enough to read (the launcher warns below 0.35×). App screenshots: a tall
-  zone beside the character. Web pages: a wide zone above or below it.
-- `subject_zone`: where the panda / customer stands — never overlapping the screenshot.
-- **Slide copy** is baked into the still, so it must sit outside every screenshot zone. Say where in
-  the still's description ("headline top-left, clear of the logo corner; panda bottom-left; the
-  right half below the logo box plain white, empty"). The logo box in the facts is the whole
-  top-right corner, so nothing — screenshot, card or headline — may reach into it.
-- `frame`: `phone` for app screens, `browser` for web pages, `card` otherwise, `none` only if asked.
-- `crop`: to show only the part of the screenshot that matters, larger.
-- `steps` — regions and points are fractions of the WHOLE screenshot:
-  - `highlight_box` on the thing the copy names; `cursor_move` (its `to` point) + `click_pulse` to
-    show a tap.
-  - `blur_region` over personal data — card numbers, ICCID / IMEI, phone numbers, emails, names,
-    addresses, account QR codes — even when the user did not ask.
-  - `card`: one short key message (≤ 12 CJK characters or 5 English words), `text` with zh and en,
-    zone clear of the character and the slide copy.
 
-Several screenshots on one slide sit side by side — their zones must not overlap. On a revise that
-moves a screenshot ("put 3 on slide 5"), update `inputs/requests.json` **and** the layouts.
+**Beside** (`placement` omitted or `"beside"`):
+- `zone`: where the screenshot sits (off the logo corner; tall for apps, wide for web).
+- `subject_zone`: character — **never overlapping** the screenshot.
+- `frame`: `phone` | `browser` | `card` | `none`.
+
+**Held** (`placement: "held"`):
+- `frame`: **`"held"`**; `zone` = blank phone screen **inside** `subject_zone` (character + phone body).
+- Still description: phone held toward camera, screen flat and **solid plain white** (no UI glyphs).
+
+Shared: slide copy outside every screenshot zone; logo corner keep-out; `crop` / `steps` as usual
+(`blur_region` on PII even when not asked; `card` clear of character and copy). Beside screenshots
+on one slide sit side by side without zone overlap. On a revise that moves a screenshot, update
+`inputs/requests.json` **and** the layouts.
 
 ### 8. Coverage checks (before submitting)
 - [ ] Scene count == script section count; order matches the carousel

@@ -33,17 +33,16 @@ Walk every scene. Each `required_assets` entry of type `image` is one still task
 - `source: "provided"` items are the user's screenshots. They are **not** still tasks: never
   generate, edit or upload them, never copy them into `assets/`, never add them to
   `asset_manifest`, never call `screen_overlay`.
-- Their slides still get the normal generated still (hero included), composed so the screenshot area
-  stays empty. The prompt facts list, per slide, the area to keep plain and where the character
-  stands. Put both into the still prompt ("panda bottom-left; headline top-left, clear of the
-  top-right logo corner; the area the facts list is plain white background — empty, no character,
-  props, text or scenery").
-  Keep the baked slide copy out of that area too.
+- Their slides still get the normal generated still (hero included), composed for overlay. The prompt
+  facts list, per slide, the area to keep plain and where the character stands. Put both into the
+  still prompt. **Beside:** leave the screenshot area plain white empty. **Held:** leave the phone
+  screen rect solid plain white blank (no UI glyphs); character + phone body in the subject area.
+  Keep baked slide copy out of the screenshot zone.
 - After every stills pass the launcher places the screenshots onto the stills the user reviews and
   the brand pass stamps. The files under `assets/images` stay clean: always revise from them (edit
   mode imports the clean still), and never paint a screenshot into a prompt or an edit.
-- The launcher checks those areas on every still and flags any that are not empty; regenerate only
-  the flagged slide, with the area empty.
+- The launcher checks those areas on every still and flags any that are not empty / not white enough;
+  regenerate only the flagged slide with the area empty (beside) or blank white (held).
 - If feedback in a stills pass moves a screenshot to another slide (or changes how it is used),
   update `inputs/requests.json` **and** the layout in `artifacts/scene_plan.json` (rewrite the
   whole plan file) — the launcher places from the newest plan, and a mismatch is flagged at the

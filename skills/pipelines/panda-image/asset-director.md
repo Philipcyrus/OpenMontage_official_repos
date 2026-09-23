@@ -32,15 +32,18 @@ There is one scene. Its `required_assets` entry of type `image` is the still tas
 - `source: "provided"` items are the user's screenshots. They are **not** still tasks: never
   generate, edit or upload them, never copy them into `assets/`, never add them to
   `asset_manifest`, never call `screen_overlay`.
-- The still is composed so every screenshot area stays empty. The prompt facts list the area to keep
-  plain and where the character stands. Put both into the still prompt ("panda bottom-left;
-  headline top-left, clear of the top-right logo corner; the area the facts list is plain white
-  background — empty, no character, props, text or scenery"). Keep the baked copy out of that area too.
+- The still is composed so every screenshot area stays ready for overlay. The prompt facts list the
+  area to keep plain and where the character stands. Put both into the still prompt.
+  - **Beside:** "panda bottom-left; headline top-left, clear of the top-right logo corner; the area
+    the facts list is plain white background — empty, no character, props, text or scenery".
+  - **Held** (`frame: held`): "panda holds a phone toward the camera; the screen rect the facts list
+    is solid plain white blank (no UI glyphs); character + phone body stay in the subject area".
+  Keep any baked copy out of the screenshot zone too.
 - After every stills pass the launcher places the screenshots onto the still the user reviews and
   the brand pass stamps. The file under `assets/images` stays clean: always revise from it (edit
   mode imports the clean still), and never paint a screenshot into a prompt or an edit.
-- The launcher checks those areas and flags them if they are not empty; then regenerate with the
-  area empty.
+- The launcher checks those areas and flags them if they are not empty / not white enough; then
+  regenerate with the area empty (beside) or blank white (held).
 - If feedback in a stills pass moves a screenshot to another slide (or changes how it is used),
   update `inputs/requests.json` **and** the layout in `artifacts/scene_plan.json` (rewrite the
   whole plan file) — the launcher places from the newest plan, and a mismatch is flagged at the

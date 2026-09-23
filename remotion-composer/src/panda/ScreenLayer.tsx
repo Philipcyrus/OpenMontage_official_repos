@@ -109,10 +109,11 @@ export const ScreenLayer: React.FC<LayerProps> = ({
   const cursorSize = clamp(0.07 * g.screen.w, 22, 72);
 
   const device = g.device;
+  const chromeLess = g.frame === "none" || g.frame === "held";
   const deviceStyle: React.CSSProperties = {
     ...abs(device),
-    background: g.frame === "none" ? "transparent" : "#ffffff",
-    border: g.frame === "none" ? "none" : `${kl}px solid ${PANDA_BLACK}`,
+    background: chromeLess ? "transparent" : "#ffffff",
+    border: chromeLess ? "none" : `${kl}px solid ${PANDA_BLACK}`,
     borderRadius: g.radiusBody,
     boxSizing: "border-box",
   };
@@ -199,7 +200,7 @@ export const ScreenLayer: React.FC<LayerProps> = ({
         <div
           style={{
             ...abs(
-              g.frame === "none"
+              chromeLess
                 ? screenBox
                 : {
                     x: screenBox.x - kl,
@@ -211,7 +212,7 @@ export const ScreenLayer: React.FC<LayerProps> = ({
             overflow: "hidden",
             borderRadius: g.radiusScreen,
             background: "#ffffff",
-            boxShadow: g.frame === "none" ? "none" : `0 0 0 ${thin}px ${PANDA_BLACK}`,
+            boxShadow: chromeLess ? "none" : `0 0 0 ${thin}px ${PANDA_BLACK}`,
           }}
         >
           <div style={plane}>
