@@ -50,6 +50,23 @@ def _tone(path: Path, seconds: float, freq: int) -> Path:
     return path
 
 
+def _audio_only(path: Path, seconds: float) -> Path:
+    """An .mp4 with a sound track and no picture at all."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _run(["ffmpeg", "-y", "-f", "lavfi", "-i", f"sine=frequency=250:sample_rate=16000:d={seconds}",
+          "-c:a", "aac", str(path)])
+    return path
+
+
+def _truncated(path: Path, seconds: float) -> Path:
+    """An .mp4 whose header still says `seconds` of 64x64 video but whose frames are cut off."""
+    full = _clip(path.with_name("_full_" + path.name), seconds, "red")
+    _run(["ffmpeg", "-y", "-i", str(full), "-c", "copy", "-movflags", "+faststart", str(path)])
+    data = path.read_bytes()
+    path.write_bytes(data[: int(len(data) * 0.55)])
+    return path
+
+
 def _sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -852,6 +869,118 @@ def test_a_result_whose_picture_stops_before_the_line_ends_is_rejected(
     out = _go(project, world, _request("scene-04"))
     assert _scene(out, "scene-04")["status"] == kl.REJECTED_OUTPUT
     assert "before the customer finishes" in _scene(out, "scene-04")["reason"]
+
+
+def test_a_result_without_a_video_stream_never_replaces_the_clip(
+        project: Path, world: World, tmp_path: Path) -> None:
+    # 5 s of sound and no picture: the right length, but nothing to show.
+    world.output = _audio_only(tmp_path / "sound_only.mp4", 5)
+    clip = project / "assets/video/scene-04.mp4"
+    before = _sha(clip)
+    out = _go(project, world, _request("scene-04"))
+    rec = _scene(out, "scene-04")
+    assert rec["status"] == kl.REJECTED_OUTPUT
+    assert rec["reason"] == "Kling's file has no playable video stream"
+    assert _sha(clip) == before and not (project / kl.KLING_DIR / "scene-04.original.mp4").exists()
+    assert "scene-04: original clip kept — Kling's file has no playable video stream." in \
+        kl.gate_notes(project)
+
+
+def test_a_result_that_does_not_decode_never_replaces_the_clip(
+        project: Path, world: World, tmp_path: Path) -> None:
+    # The header still says 5 s of 64x64 video (so length and shape checks alone would pass),
+    # but the frames are cut off.
+    world.output = _truncated(tmp_path / "cut_off.mp4", 5)
+    probed = kl._probe(world.output)
+    assert probed["has_video"] and probed["video_s"] == pytest.approx(5.0, abs=0.1)
+    clip = project / "assets/video/scene-04.mp4"
+    before = _sha(clip)
+    out = _go(project, world, _request("scene-04"))
+    assert _scene(out, "scene-04")["status"] == kl.REJECTED_OUTPUT
+    assert _scene(out, "scene-04")["reason"] == "Kling's file has no playable video stream"
+    assert _sha(clip) == before
+
+
+def test_a_clip_without_a_video_stream_is_never_sent(project: Path, world: World) -> None:
+    clip = _audio_only(project / "assets/video/scene-04.mp4", 5)
+    world.publish("scene-04", clip)
+    out = _go(project, world, _request("scene-04"))
+    assert _scene(out, "scene-04")["status"] == kl.INELIGIBLE
+    assert _scene(out, "scene-04")["reason"] == "the clip has no video stream"
+    assert world.calls == []
+
+
+def test_a_result_for_words_the_customer_no_longer_says_is_set_aside(
+        project: Path, world: World) -> None:
+    clip = project / "assets/video/scene-04.mp4"
+    original = _sha(clip)
+    world.poll_status = "processing"
+    _go(project, world, _request("scene-04"), timeout_s=0.5)              # sent; Kling still working
+    new_line = _tone(project / "assets/audio/vo-sec-04-customer.wav", 2.6, 450)   # re-voiced meanwhile
+    world.poll_status = "succeed"
+    out = _go(project, world, _request("scene-04"))                        # collects the old-words take
+    rec = _scene(out, "scene-04")
+    assert rec["status"] == kl.QUEUED and "line changed while Kling was working" in rec["waiting"]
+    assert out["run_again"] is True and _sha(clip) == original             # never applied to the clip
+    old = _ledger(project)["scenes"]["scene-04"]["history"][0]
+    assert old["superseded_because"] == "the customer's line changed while Kling was working"
+    assert any(p.endswith("scene-04.kling-lipsync.mp4") for p in old["archived"])  # paid result kept
+    assert world.count("submit") == 1
+    out = _go(project, world, _request("scene-04"))                        # next run: the new words
+    assert _scene(out, "scene-04")["status"] == kl.DONE and world.count("submit") == 2
+    assert base64.b64decode(_submits(world)[1]["face_choose"][0]["sound_file"]) == \
+        new_line.read_bytes()
+    assert out["estimated_usd_spent"] == pytest.approx(
+        2 * (kl.ESTIMATE_IDENTIFY_USD + kl.ESTIMATE_LIPSYNC_USD))
+
+
+def test_a_stale_result_after_an_interrupted_apply_puts_the_original_back(
+        project: Path, world: World, monkeypatch: pytest.MonkeyPatch) -> None:
+    clip = project / "assets/video/scene-04.mp4"
+    original = _sha(clip)
+    real_update = kl.Ledger.update
+    crashed: list[int] = []
+
+    def crash_before_done(self: kl.Ledger, scene_id: str, **fields: object) -> dict:
+        if fields.get("status") == kl.DONE and not crashed:
+            crashed.append(1)
+            raise OSError("killed right after the clip was replaced")
+        return real_update(self, scene_id, **fields)
+
+    monkeypatch.setattr(kl.Ledger, "update", crash_before_done)
+    out = _go(project, world, _request("scene-04"))
+    assert _scene(out, "scene-04")["status"] == kl.SUBMITTED
+    assert _sha(clip) == _sha(world.output)                     # Kling's version, not yet recorded
+    _tone(project / "assets/audio/vo-sec-04-customer.wav", 2.6, 450)      # then the line changes
+    out = _go(project, world, _request("scene-04"))
+    assert _scene(out, "scene-04")["status"] == kl.QUEUED
+    assert _sha(clip) == original                               # the verified original is back
+
+
+def test_a_stale_task_the_request_no_longer_lists_is_still_checked(
+        project: Path, world: World) -> None:
+    clip = project / "assets/video/scene-04.mp4"
+    original = _sha(clip)
+    world.poll_status = "processing"
+    _go(project, world, _request("scene-04"), timeout_s=0.5)
+    _tone(project / "assets/audio/vo-sec-04-customer.wav", 2.6, 450)
+    world.poll_status = "succeed"
+    out = _go(project, world, _request("scene-07"))              # scene-04 collected on its own
+    assert _scene(out, "scene-04")["status"] == kl.QUEUED and _sha(clip) == original
+    assert _scene(out, "scene-07")["status"] == kl.DONE
+
+
+def test_a_collected_result_whose_line_cannot_be_confirmed_is_flagged(
+        project: Path, world: World) -> None:
+    world.poll_status = "processing"
+    _go(project, world, _request("scene-04"), timeout_s=0.5)
+    _tone(project / "assets/audio/vo-sec-04-customer.mp3", 2.4, 440)     # a second take appears
+    world.poll_status = "succeed"
+    out = _go(project, world, _request("scene-04"))
+    rec = _scene(out, "scene-04")
+    assert rec["status"] == kl.DONE and "could not be confirmed" in rec["check_error"]
+    note = next(n for n in kl.gate_notes(project) if n.startswith("scene-04"))
+    assert note.startswith("scene-04: Kling's version is in use, but it could not be confirmed")
 
 
 def test_a_regenerated_clip_starts_a_fresh_record_under_a_new_id(

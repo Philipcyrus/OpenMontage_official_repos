@@ -298,7 +298,8 @@ character speaking on screen, using the exact ElevenLabs line at its original of
    table above excludes, sends only the customer's line(s), writes each Kling task id to
    `assets/video/kling/ledger.json` before waiting on it, never resends a paid task after a
    restart, keeps the untouched clip as `assets/video/kling/<clip>.original.mp4`, and puts Kling's
-   version at the clip's own path only when its length, picture length and frame shape match.
+   version at the clip's own path only when it has a video stream that decodes end to end and its
+   length, picture length and frame shape match.
    One run waits about 6 minutes at most: while its JSON summary says `"run_again": true`, run the
    same command again (at most 5 more times) — a re-run only collects what was already sent.
 3. For each scene the summary marks `done`, run `lipsync_qa` on the clip with that scene's
@@ -315,7 +316,9 @@ character speaking on screen, using the exact ElevenLabs line at its original of
    `unknown_submission` (the request may have reached Kling) is resent only when the user
    explicitly asks for that scene: `--resend-unknown <scene_id>`. If the customer's line is
    re-voiced after Kling ran, the next run puts the original clip back and re-syncs it to the
-   new words (a new paid take within the cap). Copy the summary into
+   new words (a new paid take within the cap). The same holds while Kling is still working: a
+   result collected for the old words is set aside, never applied, and the summary says
+   `"run_again": true`. Copy the summary into
    `asset_manifest.metadata.kling_lipsync`. The launcher adds the per-scene outcome to the
    approve_assets question from the ledger.
 

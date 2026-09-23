@@ -140,24 +140,49 @@ def _inside(project_dir: Path, rel: str) -> Path:
     return p
 
 
-def _probe(path: Path) -> dict[str, float]:
-    """Container length, VIDEO stream length (what the viewer sees) and frame size."""
+def _probe(path: Path) -> dict[str, Any]:
+    """Container length and the VIDEO stream: whether there is one, its length and frame size.
+
+    ``video_s`` is 0 when there is no video stream; it never falls back to the container length
+    (an audio-only file would otherwise look like a video of the right length).
+    """
     r = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries",
          "format=duration:stream=codec_type,width,height,duration", "-of", "json", str(path)],
         capture_output=True, text=True, timeout=30)
-    data = json.loads(r.stdout or "{}")
-    out: dict[str, float] = {"duration_s": float((data.get("format") or {}).get("duration") or 0.0)}
+    try:
+        data = json.loads(r.stdout or "{}")
+    except ValueError:
+        data = {}
+    try:
+        container = float((data.get("format") or {}).get("duration") or 0.0)
+    except (TypeError, ValueError):
+        container = 0.0
+    out: dict[str, Any] = {"duration_s": container, "has_video": False, "video_s": 0.0}
     for s in data.get("streams") or []:
-        if s.get("codec_type") == "video" and s.get("width"):
-            out["width"], out["height"] = float(s["width"]), float(s["height"])
+        try:
+            w, h = float(s.get("width") or 0), float(s.get("height") or 0)
+        except (TypeError, ValueError):
+            continue
+        if s.get("codec_type") == "video" and w > 0 and h > 0:
+            out.update(has_video=True, width=w, height=h)
             try:
                 out["video_s"] = float(s.get("duration"))
             except (TypeError, ValueError):
-                pass
+                out["video_s"] = container      # some containers carry no per-stream length
             break
-    out.setdefault("video_s", out["duration_s"])
     return out
+
+
+def _video_decodes(path: Path) -> bool:
+    """The whole video stream decodes. A truncated file still reports its full length and frame
+    size from its header, so only decoding it proves it plays."""
+    try:
+        r = subprocess.run(["ffmpeg", "-v", "error", "-xerror", "-i", str(path), "-map", "0:v:0",
+                            "-f", "null", "-"], capture_output=True, text=True, timeout=300)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return r.returncode == 0
 
 
 # ---------------------------------------------------------------------------
@@ -548,7 +573,7 @@ class _Pass:
         try:
             rec = self.ledger.get(scene_id)
             if rec.get("status") == SUBMITTED and rec.get("task_id"):
-                self._poll_and_apply(scene_id)
+                self._poll_and_apply(scene_id, job)
                 return
             if _STOP.is_set() or self.time_left() < self.margin:
                 self._not_now(scene_id)
@@ -727,7 +752,7 @@ class _Pass:
                            submitted_epoch=time.time())
         self._poll_and_apply(scene_id)
 
-    def _poll_and_apply(self, scene_id: str) -> None:
+    def _poll_and_apply(self, scene_id: str, job: Optional[dict[str, Any]] = None) -> None:
         from tools._kling.schemas import (CLASSIC_FAILURE_STATUS, CLASSIC_PENDING_STATUSES,
                                           CLASSIC_SUCCESS_STATUS)
         from tools.avatar.kling_lip_sync import KlingLipSync
@@ -767,9 +792,10 @@ class _Pass:
             latency = round(time.time() - float(rec["submitted_epoch"]), 1)
         self.ledger.update(scene_id, kling_path=out.relative_to(self.project_dir).as_posix(),
                            kling_sha256=_sha256(out), finished_at=_now(), latency_s=latency)
-        self._check_and_select(scene_id)
+        self._check_and_select(scene_id, job or {})
 
-    def _check_and_select(self, scene_id: str) -> None:
+    def _check_and_select(self, scene_id: str, job: Optional[dict[str, Any]] = None) -> None:
+        job = job or {}
         rec = self.ledger.get(scene_id)
         clip = _inside(self.project_dir, rec["clip_path"])
         kling = _inside(self.project_dir, rec["kling_path"])
@@ -780,11 +806,23 @@ class _Pass:
             self.ledger.update(scene_id, status=REJECTED_OUTPUT, reason=(
                 "the clip changed or was removed while Kling was working"))
             return
-        got, want = _probe(kling), rec.get("clip_probe") or _probe(clip)
-        got_s = got.get("video_s") or got["duration_s"]
+        # A task collected on a later run must still match the customer's line: a line re-voiced
+        # or re-timed while Kling was working would put a mouth for the old words on the clip.
+        now = job.get("audio_now")
+        if now is not None and rec.get("audio_sig") and not _same_audio(now, rec["audio_sig"]):
+            self._set_aside_stale(scene_id, rec)
+            return
+        got = _probe(kling)
+        self.ledger.update(scene_id, output={k: got.get(k) for k in (
+            "has_video", "video_s", "duration_s", "width", "height")})
+        # A file with no video stream, or one that does not decode, never replaces the clip.
+        if not got["has_video"] or got["video_s"] <= 0 or not _video_decodes(kling):
+            self.ledger.update(scene_id, status=REJECTED_OUTPUT, reason=(
+                "Kling's file has no playable video stream"))
+            return
+        want = rec.get("clip_probe") or _probe(clip)
+        got_s = got["video_s"]
         want_s = want.get("video_s") or want["duration_s"]
-        self.ledger.update(scene_id, output={k: got.get(k)
-                                             for k in ("video_s", "duration_s", "width", "height")})
         if abs(got_s - want_s) > DURATION_TOLERANCE_S:
             self.ledger.update(scene_id, status=REJECTED_OUTPUT, reason=(
                 f"Kling returned {got_s:.2f} s of video for a {want_s:.2f} s clip"))
@@ -811,8 +849,25 @@ class _Pass:
                                reason="the saved original does not match the clip Kling was given")
             return
         _replace(kling, clip)
+        unconfirmed = job.get("audio_error")
         self.ledger.update(scene_id, status=DONE, selected="kling", reason=None,
-                           original_backup=backup.relative_to(self.project_dir).as_posix())
+                           original_backup=backup.relative_to(self.project_dir).as_posix(),
+                           check_error=(f"it could not be confirmed that the customer's line is "
+                                        f"unchanged: {unconfirmed}"[:300] if unconfirmed else None))
+
+    def _set_aside_stale(self, scene_id: str, rec: dict[str, Any]) -> None:
+        """Kling finished a take for words the customer no longer says: keep that result in
+        history, keep (or put back) the original clip, and sync the new words on the next run."""
+        if not _put_original_back(self.project_dir, rec):
+            self.ledger.update(scene_id, status=DONE, selected="kling", check_error=(
+                "the customer's line changed while Kling was working, and the saved original "
+                "does not match, so nothing was changed"))
+            return
+        _supersede(self.project_dir, self.ledger, scene_id, rec,
+                   "the customer's line changed while Kling was working")
+        why = ("the customer's line changed while Kling was working, so that result was set "
+               "aside; the new words are sent on the next run")
+        self.ledger.update(scene_id, status=QUEUED, reason=why, waiting=why)
 
 
 def _definitely_not_created(exc: Any) -> bool:
@@ -870,6 +925,20 @@ def _clip_state(project_dir: Path, rec: dict[str, Any]) -> Optional[str]:
     return "replaced"
 
 
+def _put_original_back(project_dir: Path, rec: dict[str, Any]) -> bool:
+    """If the clip holds Kling's version, copy the verified original back over it.
+    True when the clip now holds the original; False when the saved original cannot be trusted."""
+    if _clip_state(project_dir, rec) != "kling":
+        return True
+    clip = _inside(project_dir, str(rec["clip_path"]))
+    backup = _inside(project_dir, str(rec.get("original_backup")
+                                      or (KLING_DIR / f"{clip.stem}.original.mp4").as_posix()))
+    if not backup.is_file() or _sha256(backup) != rec.get("original_sha256"):
+        return False
+    _replace(backup, clip)
+    return True
+
+
 def _replace(src: Path, dest: Path) -> None:
     tmp = dest.with_name("_" + dest.name + ".swap")
     shutil.copy2(src, tmp)
@@ -924,7 +993,7 @@ def run(project_dir: Path | str, *, request: Optional[dict[str, Any]] = None,
         plan = _latest_artifact(project_dir, "scene_plan")
         manifest_rows = _manifest_voice_rows(project_dir)
         worker = _Pass(project_dir, ledger, factory, poll, wait)
-        resume: list[str] = []
+        resume: list[tuple[str, dict[str, Any]]] = []
         fresh: list[tuple[str, dict[str, Any]]] = []
         seen: set[str] = set()
         claimed: dict[str, str] = {}
@@ -947,6 +1016,14 @@ def run(project_dir: Path | str, *, request: Optional[dict[str, Any]] = None,
             amap = item.get("audio") if isinstance(item.get("audio"), dict) else {}
             files = voice_files(project_dir, cust, amap, manifest_rows)
             return lines, files, _audio_sig(project_dir, cust, files)
+
+        def _collect(sid: str, item: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+            """A task to collect, with the customer's line as it is now (checked before applying)."""
+            try:
+                _, _, now = _lines_and_files(sid, item)
+                return sid, {"audio_now": now, "audio_error": None}
+            except (Ineligible, OSError, ValueError) as exc:
+                return sid, {"audio_now": None, "audio_error": str(exc)[:200]}
 
         for item in items:
             if not isinstance(item, dict) or not str(item.get("scene_id") or "").strip():
@@ -984,7 +1061,7 @@ def run(project_dir: Path | str, *, request: Optional[dict[str, Any]] = None,
                 elif problem or clip_rel != rec.get("clip_path"):
                     ledger.update(sid, note=(problem or "clip_path differs from the clip Kling is "
                                              "working on; it is collected first"))
-                resume.append(sid)
+                resume.append(_collect(sid, item))
                 continue
             if problem or clip is None:
                 _park(ledger, sid, INELIGIBLE, problem or "clip_path is missing")
@@ -1017,15 +1094,12 @@ def run(project_dir: Path | str, *, request: Optional[dict[str, Any]] = None,
                     continue
                 # The customer's line changed after Kling ran: put the untouched original back and
                 # start a new take from it (the old Kling version goes to history).
-                if sha == rec.get("kling_sha256"):
-                    backup = _inside(project_dir, str(rec.get("original_backup") or ""))
-                    if not backup.is_file() or _sha256(backup) != rec.get("original_sha256"):
-                        ledger.update(sid, check_error=(
-                            "the customer's line changed after Kling ran, but the saved original "
-                            "does not match, so nothing was changed"))
-                        continue
-                    _replace(backup, clip)
-                    sha = rec["original_sha256"]
+                if not _put_original_back(project_dir, rec):
+                    ledger.update(sid, check_error=(
+                        "the customer's line changed after Kling ran, but the saved original "
+                        "does not match, so nothing was changed"))
+                    continue
+                sha = _sha256(clip)
                 _supersede(project_dir, ledger, sid, rec, "the customer's line changed")
                 rec, status = ledger.get(sid), None
 
@@ -1057,6 +1131,9 @@ def run(project_dir: Path | str, *, request: Optional[dict[str, Any]] = None,
                       clip_path=clip_rel)
                 continue
             clip_probe = _probe(clip)
+            if not clip_probe["has_video"] or clip_probe["video_s"] <= 0:
+                _park(ledger, sid, INELIGIBLE, "the clip has no video stream", clip_path=clip_rel)
+                continue
             try:
                 lines, files, sig = _lines_and_files(sid, item)
                 cust = [ln for ln in lines if ln["speaker"] == "customer"]
@@ -1076,7 +1153,7 @@ def run(project_dir: Path | str, *, request: Optional[dict[str, Any]] = None,
         # A paid task still in flight is always collected, even if the request no longer lists it.
         for sid, rec in sorted(ledger.data["scenes"].items()):
             if sid not in seen and rec.get("status") == SUBMITTED and rec.get("task_id"):
-                resume.append(sid)
+                resume.append(_collect(sid, {}))
 
         if fresh and not os.environ.get("KLING_API_KEY"):
             for sid, _ in fresh:
@@ -1090,7 +1167,7 @@ def run(project_dir: Path | str, *, request: Optional[dict[str, Any]] = None,
                     f"${max_usd:.2f} Kling budget (already ~${ledger.spent_usd():.2f})"))
             fresh = []
 
-        jobs: list[tuple[str, dict[str, Any]]] = [(sid, {}) for sid in resume] + fresh
+        jobs: list[tuple[str, dict[str, Any]]] = resume + fresh
         if jobs:
             worker.start_clock()
             with ThreadPoolExecutor(max_workers=workers) as pool:
