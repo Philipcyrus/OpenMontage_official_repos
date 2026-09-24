@@ -43,7 +43,9 @@ Liveness + mode.
 {"status":"ok","runner":"claude","async":true,"montage_door":true,
  "process_started_at":"2026-09-16T21:00:00+00:00",
  "build_revision":"b693aa196d25b66851c58d8a1106c1736e584f0f",
- "launcher_code_fingerprint":"4f2c91b3a708fcde"}
+ "launcher_code_fingerprint":"4f2c91b3a708fcde",
+ "launcher_code_fingerprint_on_disk":"4f2c91b3a708fcde",
+ "code_stale":false}
 ```
 `runner:"claude"` = real AI. `runner:"mock"` = placeholder mode (no AI, for wiring tests). `async:true` = poll model (see §4). `montage_door:true` = the direct render door (§15) is mounted.
 
@@ -51,8 +53,11 @@ The deployment fields prove which code the running process actually loaded:
 - `process_started_at` must move forward after a launcher restart.
 - `build_revision` is `OPENMONTAGE_BUILD_REVISION` when supplied, otherwise the Git HEAD
   observed at process start.
-- `launcher_code_fingerprint` hashes the loaded launcher source files. If files change without
-  a restart, `/health` continues reporting the old fingerprint. Treat that as a stale deployment.
+- `launcher_code_fingerprint` hashes the loaded launcher source files at process start.
+- `launcher_code_fingerprint_on_disk` is recomputed on every `/health` call.
+- `code_stale: true` means files on disk changed without a restart. **New `POST /jobs` is
+  refused with `503`** until uvicorn is restarted. In-flight jobs may continue; treat
+  `code_stale` as a deployment alarm.
 
 ### `POST /jobs` — start a job
 Body:
@@ -71,6 +76,12 @@ Returns **immediately**:
 {"job_id":"job_xxxx","status":"running","stage":null,"gate":null,"question":"starting…","artifacts":{}}
 ```
 → **Save `job_id`.** Then poll (§4).
+If `/health` reports `code_stale: true`, this endpoint returns **`503`** until the launcher process is restarted.
+
+**Status-check briefs are rejected (`400`).** Do not call `POST /jobs` with poll / wait text
+(e.g. `"Checking on the job again."`, `"any update?"`, `"Extending the wait"`). Those belong on
+`GET /jobs/{job_id}` using the conversation-stored id — otherwise empty failed jobs appear as
+“agent produced no checkpoint.”
 
 ### `GET /jobs/{job_id}` — current state (poll this)
 ```json
@@ -158,12 +169,18 @@ endpoint, or download the `cost_report.md` / `cost_report.json` artifact by name
 
 Because a stage can take minutes, **`POST` returns instantly with `status:"running"`.** You must **poll `GET /jobs/{job_id}`** until the status changes.
 
+The async `POST /jobs/{id}/respond` body is never empty: it includes `status:"running"`,
+`worker_active:true`, a gate-specific `question` (e.g. `processing — generating clips; poll
+GET /jobs/{id}`), and the current `artifacts` so the Agent Door has something to render.
+Treat `running` + a non-empty `question` as success and **poll** — do **not** surface
+“The Agent Door sent no reply.”
+
 ```
 POST /jobs                    → status: running        (instant)
 loop: GET /jobs/{id} every ~20s
         status == running     → keep polling
         status == awaiting_human → STOP polling, show the gate to the user
-POST /jobs/{id}/respond       → status: running        (instant)
+POST /jobs/{id}/respond       → status: running        (instant; non-empty question)
 loop: GET again … repeat for each gate
         status == done        → video: fetch final.mp4 (+ branded_final if approved at approve_brand); carousel: fetch stills (+ branded_stills if approved)
         status == failed      → show `question` (the error)
@@ -290,7 +307,7 @@ after the last content gate — a post-cut overlay, never in generation. `skip` 
 | `audio_lipsync` | `true` (default) \| `false` | video only — Seedance `audio_references` so on-screen customer/panda mouths follow ElevenLabs VO (`generate_audio:false`; compose still lays the same VO). Pass `false` for HOLD + duration-only |
 | `hero_still` | `true` (default) \| `false` | insert `approve_hero_still` look-lock (video + carousel; default on). Never for panda-image |
 | `max_higgsfield_credits` | integer, or unset | **hard credit ceiling** for the run |
-| `aspect_ratio` | string | stills canvas, passed through to `generate_image`. Carousel default `"4:5"`; **panda-image** default `"1:1"`. Also `9:16`, `WIDTHxHEIGHT`, … |
+| `aspect_ratio` | string | Master canvas for stills / i2v / compose. **Pass-through** — never rewrite a caller-set value. Defaults: **panda-video** `"9:16"`, **panda-carousel** `"4:5"`, **panda-image** `"1:1"`. Also `16:9`, `1:1`, `4:5`, `3:4`, `4:3`, or `WIDTHxHEIGHT`. |
 | `gates` | e.g. `["scene_plan", "stills"]` | carousel only — omit `script` to auto-approve GATE 1 |
 | `media` | `[{"url": "<Dify file link>", "name": "checkout.png"}, …]` | **panda-video, panda-carousel, panda-image** — the user's screenshots, in attachment order. See **User screenshots** below |
 
@@ -333,9 +350,14 @@ description also works.
 
 - **What happens:** Claude records the user's guidance (binding), then at the scene plan decides for
   each placement where the screenshot sits, where the Panda stands, and the highlight / cursor / blur /
-  card (plus zoom and timing for video). Stills and clips are generated with that area left empty.
-  **Screenshots are never sent to Higgsfield** (0 credits for placement). A screenshot the user gave
-  no scene / slide for is **not used**.
+  card (plus zoom and timing for video). Stills and clips are generated with that area left empty
+  (beside) or with a **blank white phone screen** (held — when the brief says the mascot holds /
+  shows the screenshot). **Screenshots are never sent to Higgsfield** (0 credits for placement). A
+  screenshot the user gave no scene / slide for is **not used**.
+  - **Beside (default):** Remotion draws phone/browser/card chrome next to the character.
+  - **Held:** `frame: "held"` — no Remotion chrome; the real PNG is composited onto the generated
+    blank phone screen (axis-aligned; video needs a locked camera). Perspective / tracked motion is
+    not supported.
   - **Video:** at compose the screenshots are laid over their clips with Remotion.
   - **Carousel / image:** the launcher places the screenshots onto each generated still as soon as it
     exists, so the hero, the stills, the storyboard and the branded copies (`branded_stills`) all
@@ -345,6 +367,8 @@ description also works.
 - **Dify side:** enable image upload on the chat (local files), pass `sys.files` into the node that
   builds the `POST /jobs` body, and send `options.media = [{"url": file.url, "name": file.filename}]`
   in the same order. Show the `inputs` list from the response if you want to echo the numbering.
+  **Do not** paste opaque file UUIDs into the brief text alone — without `options.media` the job has
+  no screenshot files and cannot place them.
 - **What the reviewer sees:** `artifacts.screens_board` — one picture per gate (numbered uploads at
   `approve_script`, layouts with the Panda area marked at `approve_scene_plan`; for video also
   screenshots over the stills at `approve_hero_still` / `approve_stills` and over the clips at
@@ -456,7 +480,7 @@ curl -s -H "X-Dify-Token: $T" $BASE/jobs/job_xxxx/artifacts/final.mp4 -o final.m
 Build a **chatflow** (mirrors the existing Mochi v6e pattern with conversation variables):
 
 1. **Start** — HTTP `POST /jobs` with the user's brief + options → store `job_id`, `status` in conversation variables. If the user attached screenshots, add them as `options.media` (§6 "User screenshots").
-2. **Poll loop** — HTTP `GET /jobs/{job_id}`; if `status == running`, wait ~20s and loop; if `awaiting_human`, exit loop.
+2. **Poll loop** — HTTP `GET /jobs/{job_id}` only (never `POST /jobs` for status / “extend wait” / user “any update?”); if `status == running`, wait ~20s and loop; if `awaiting_human`, exit loop.
 3. **Present gate** — show `question` and render `artifacts` (inline `script` / `scene_plan` JSON, or `artifacts.preview` `.md` files at those gates; stills / clips / final at later gates; `screens_board` full width whenever it is present).
 4. **Collect reply** — user says approve or describes an edit.
 5. **Respond** — HTTP `POST /respond` with `{"decision":"approve"}` or `{"decision":"revise","answer":"<user text>"}`.
@@ -464,6 +488,7 @@ Build a **chatflow** (mirrors the existing Mochi v6e pattern with conversation v
 
 **Conversation variables to keep:** `job_id`, last `status`, current `gate`.
 **HTTP node timeouts:** 30–60s (calls are instant; the loop does the waiting).
+**Never restart production** by posting a status-check string as a new brief — that creates an empty job and surfaces “agent produced no checkpoint” while the real `job_id` is still valid.
 
 ---
 
@@ -488,6 +513,7 @@ Long `running` stretches are **normal** — that's why it's async.
 | `404` | unknown `job_id` | check the id |
 | `400` | `skip` at a gate other than `approve_brand` | only send `skip` at the brand gate |
 | `400` on `POST /jobs` | a problem with `options.media` (not an image, too big, link expired or redirected, host not allowed, pipeline not panda-video / panda-carousel / panda-image, Remotion missing) — **no job is created** | show `detail` to the user; re-attach and send again |
+| `400` | brief looks like a status check (not a production brief) | show detail; keep using the existing conversation `job_id` and `GET /jobs/{id}` — do not create a new job |
 | `409` | responded while still `running`, not at a gate, `/brand` at `approve_brand` or before `done` / with nothing to brand | keep polling until `awaiting_human` before `respond`; brand via `/respond` at the brand gate, or `/brand` only after `done` |
 
 ---

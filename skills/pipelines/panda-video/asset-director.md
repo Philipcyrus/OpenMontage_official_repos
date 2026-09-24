@@ -48,11 +48,11 @@ chain as separate generates.
   `asset_manifest`. `screen_overlay` places them at compose.
 - Their scenes still get the normal generated still (hero included) and clip. The prompt facts list,
   per scene, the area to keep plain and where the character stands. Put both into the still prompt
-  ("panda on the left third; the right 60% of the frame is plain white background — empty, no
-  character, props, text or scenery") and into the clip prompt (locked camera, the character stays
-  in its area, no pan or zoom).
-- The launcher checks those areas on every still and clip and flags any that are not empty;
-  regenerate only the flagged one, with the area empty.
+  and the clip prompt (locked camera). **Beside:** leave the screenshot area plain white empty.
+  **Held:** leave the phone screen rect solid plain white blank; keep character + phone in the
+  subject area; no pan/zoom that moves the blank screen.
+- The launcher checks those areas on every still and clip and flags any that are not empty / not
+  white enough; regenerate only the flagged one with the area empty (beside) or blank white (held).
 
 ### 2. PHASE 0 — generate ONE HERO STILL, then STOP (GATE 2.5, approve_hero_still)
 **Only when the `hero_still` job option is on (default on; pass `false` to opt out).**
@@ -62,7 +62,9 @@ LOCK from `config/panda-elements.json` (customer 1.00, panda 0.58 ±0.05, shared
 upright canonical postures) and reject an off-scale result before the gate. Write the assets
 checkpoint `status='awaiting_human'` with
 **top-level** `partial_progress={"phase":"hero_still","hero_scene_id":"<id>","look_notes":[]}`
-(not nested under `asset_manifest.metadata`) and STOP. Preview is the single PNG (not the
+(not nested under `asset_manifest.metadata`) and STOP. **`artifacts.stills` MUST list the hero
+PNG basename** (e.g. `["sc1_hero.png"]`). A full schema-valid `asset_manifest` is **not**
+required at this phase — it lands at PHASE 3 / `approve_assets`. Preview is the single PNG (not the
 storyboard grid). On revise: update the one still + append the note to `look_notes`; re-checkpoint
 with `phase:"hero_still"` and STOP. Do **not** generate remaining stills or video yet.
 
@@ -79,6 +81,8 @@ After the hero is approved (or immediately when `hero_still` is off):
   Do not serialize one scene's submit → poll before submitting the next scene.
 - After all take-1 results return, run take 2 only for unusable results. Per remaining scene:
   same CHARACTER LOCK + 2D MEDIUM + STILLS 2-TAKE.
+- Pass `aspect_ratio` from `scene_plan.metadata.aspect_ratio` / `options.aspect_ratio`
+  (default `9:16`) to every `generate_image` call. Do not silently switch canvases.
 - For every panda+customer still, repeat the numeric PAIR SCALE LOCK in the generation prompt,
   then visually check ground-to-ear-top panda height against ground-to-head customer height.
   Accept only 0.53–0.63 with both feet on the same ground line and both canonical upright
@@ -88,6 +92,9 @@ After the hero is approved (or immediately when `hero_still` is off):
 **Generate NO video and NO audio yet.** Then write the assets checkpoint with
 `status='awaiting_human'` **and top-level `partial_progress={"phase": "stills"}`**
 (not nested under `asset_manifest.metadata`) and STOP.
+**`artifacts.stills` MUST list every storyboard PNG basename** (including the approved hero).
+A full schema-valid `asset_manifest` is required at PHASE 3 / `approve_assets`, not at this
+storyboard pause.
 The launcher surfaces this as the **approve_stills** gate (storyboard grid preview).
 Do **not** mark the assets stage `completed` at this point — that skips the storyboard gate.
 
@@ -193,7 +200,9 @@ generate motion clips before the VO that drives their length (and mouths) exists
      back-to-back. Keep the original section files for compose `voice_tracks` at the same
      absolute script timestamps.
    - `generate_video`: `start_image`, `audio_references`, `generate_audio:false`, the scene's
-     allocated `timeline_contract.scenes[].i2v_duration`, aspect from the job.
+     allocated `timeline_contract.scenes[].i2v_duration`, and **`aspect_ratio` from
+     `scene_plan.metadata.aspect_ratio` / `options.aspect_ratio`** (default `9:16`). Never
+     silently switch to another canvas; confirm the model supports it via `models_explore`.
    - Prompt: 2D + Element LOCK; lip-sync mouth/jaw to the attached audio; no walking / new
      person / photoreal.
    - Manifest row: `model: seedance_2_0`, `duration_seconds` = allocated i2v duration; put VO

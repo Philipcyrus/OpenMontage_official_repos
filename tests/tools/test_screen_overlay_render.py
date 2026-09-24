@@ -146,6 +146,50 @@ def test_still_mode_keeps_every_generated_pixel_outside_the_screenshot(tmp_path)
     assert diffs == 0, f"{diffs} generated pixels changed outside the screenshot"
 
 
+def test_held_still_composites_onto_blank_phone_screen(tmp_path):
+    """frame:held fills the blank screen rect with the upload; outside pixels stay generated."""
+    from PIL import Image, ImageDraw
+
+    proj = tmp_path / "job_held"
+    for sub in ("inputs", "assets/images"):
+        (proj / sub).mkdir(parents=True)
+    shot = Image.new("RGB", (400, 800), "#ffffff")
+    ImageDraw.Draw(shot).rectangle([40, 40, 360, 760], fill="#e11d48")
+    shot.save(proj / "inputs" / "in_01.png")
+    (proj / "inputs" / "job.json").write_text(json.dumps({"pipeline": "panda-image"}), encoding="utf-8")
+    (proj / "inputs" / "inputs.json").write_text(json.dumps([
+        {"n": 1, "input_id": "in_01", "name": "s.png", "file": "in_01.png", "width": 400, "height": 800}]),
+        encoding="utf-8")
+    layout = {
+        "zone": {"x": 0.35, "y": 0.25, "w": 0.30, "h": 0.45},
+        "subject_zone": {"x": 0.15, "y": 0.10, "w": 0.70, "h": 0.80},
+        "frame": "held",
+    }
+    plan = {"version": "1.0", "metadata": {"aspect_ratio": "1:1"}, "scenes": [
+        {"id": "slide-1", "type": "generated", "description": "x", "start_seconds": 0, "end_seconds": 1,
+         "required_assets": [{"type": "image", "source": "provided", "input_id": "in_01",
+                              "description": "d", "layout": layout}]}]}
+    (proj / "checkpoint_scene_plan.json").write_text(json.dumps({"artifacts": {"scene_plan": plan}}),
+                                                     encoding="utf-8")
+    W = H = 1024
+    still_img = Image.new("RGB", (W, H), "#fdc50d")
+    ImageDraw.Draw(still_img).rectangle(
+        [int(0.35 * W), int(0.25 * H), int(0.65 * W), int(0.70 * H)], fill="#ffffff")
+    still = proj / "assets" / "images" / "slide-1.png"
+    still_img.save(still)
+
+    out = proj / "overlay" / "stills" / "slide-1.png"
+    res = ScreenOverlay().execute({"mode": "still", "project_dir": str(proj), "scene_id": "slide-1",
+                                   "still_path": str(still), "output_path": str(out)})
+    assert res.success, res.error
+    img = Image.open(out).convert("RGB")
+    g = sl.device_geometry(layout, W, H, {"width": 400, "height": 800})
+    s = g["screen"]
+    r, gg, b = img.getpixel((int(s["x"] + s["w"] * 0.5), int(s["y"] + s["h"] * 0.5)))
+    assert r > 180 and gg < 90 and b < 120, (r, gg, b)
+    assert img.getpixel((20, 20)) == (0xfd, 0xc5, 0x0d)
+
+
 def _still_job(proj: Path, layout: dict, aspect: str = "4:5") -> None:
     """A one-slide carousel project with one screenshot placement."""
     from PIL import Image, ImageDraw

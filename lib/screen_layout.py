@@ -46,16 +46,20 @@ STILL_PIPELINES = ("panda-carousel", "panda-image")
 PIPELINES = (VIDEO_PIPELINE, *STILL_PIPELINES)
 DEFAULT_ASPECTS = {"panda-video": "9:16", "panda-carousel": "4:5", "panda-image": "1:1"}
 
-FRAMES = ("phone", "browser", "card", "none")
+FRAMES = ("phone", "browser", "card", "none", "held")
 MOTIONS = ("none", "fade", "pop", "slide_left", "slide_right", "slide_up", "slide_down")
+# Held-phone overlays stay axis-aligned on a fixed screen rect — no slide enter/exit.
+HELD_FORBIDDEN_MOTIONS = ("slide_left", "slide_right", "slide_up", "slide_down")
 STEP_KINDS = ("blur_region", "highlight_box", "cursor_move", "click_pulse", "zoom_to", "card")
 
 # Chrome sizes as fractions of the zone's shorter side (mirrors CHROME in screenGeometry.ts).
+# "held" = screenshot fills the generated phone's blank screen (no Remotion chrome).
 CHROME: dict[str, dict[str, float]] = {
     "phone": {"side": 0.035, "top": 0.07, "bottom": 0.05},
     "browser": {"side": 0.012, "top": 0.085, "bottom": 0.012},
     "card": {"side": 0.03, "top": 0.03, "bottom": 0.03},
     "none": {"side": 0.0, "top": 0.0, "bottom": 0.0},
+    "held": {"side": 0.0, "top": 0.0, "bottom": 0.0},
 }
 
 CANVASES: dict[str, tuple[int, int]] = {
@@ -313,6 +317,16 @@ def overlap_area(a: dict[str, float], b: dict[str, float]) -> float:
 
 def overlaps(a: dict[str, float], b: dict[str, float], min_area: float = 1e-4) -> bool:
     return overlap_area(a, b) > min_area
+
+
+def contains_box(outer: dict[str, float], inner: dict[str, float], *, slack: float = EPS) -> bool:
+    """True when ``inner`` sits entirely inside ``outer`` (fraction boxes), within slack."""
+    return (
+        inner["x"] >= outer["x"] - slack
+        and inner["y"] >= outer["y"] - slack
+        and inner["x"] + inner["w"] <= outer["x"] + outer["w"] + slack
+        and inner["y"] + inner["h"] <= outer["y"] + outer["h"] + slack
+    )
 
 
 def fmt_box(b: dict[str, float]) -> str:
@@ -968,22 +982,40 @@ def validate_layouts(scene_plan: Optional[dict[str, Any]], inputs: list[dict[str
             if not valid_box(layout.get("zone"), min_size=0.05):
                 notes.append(f"{label}: zone must be a box inside the frame (fractions 0–1)")
                 continue
-            if layout.get("frame") not in FRAMES:
+            frame = layout.get("frame")
+            if frame not in FRAMES:
                 notes.append(f"{label}: frame must be one of {', '.join(FRAMES)}")
+            held = frame == "held"
             if layout.get("crop") is not None and not valid_box(layout.get("crop")):
                 notes.append(f"{label}: crop must be a box inside the screenshot")
             for key in ("enter", "exit"):
                 mv = layout.get(key)
                 if isinstance(mv, dict) and mv.get("type") not in (None, *MOTIONS):
                     notes.append(f"{label}: {key} type must be one of {', '.join(MOTIONS)}")
+                if (held and isinstance(mv, dict)
+                        and mv.get("type") in HELD_FORBIDDEN_MOTIONS):
+                    notes.append(f"{label}: held-phone overlays stay on a fixed screen rect — "
+                                 f"do not use {key} type {mv.get('type')!r} (omit or use fade/pop)")
+            if held and not still and layout.get("camera") != "locked":
+                notes.append(f"{label}: held-phone needs camera: \"locked\" so the blank screen "
+                             "stays in a fixed place for the overlay")
             natural = {"width": rec.get("width") or 1, "height": rec.get("height") or 1}
             geo = device_geometry(layout, W, H, natural)
-            dev = device_box_fraction(layout, W, H, natural)
+            # For held, zone IS the blank phone screen (no chrome) — compare zone to subject.
+            zone = norm_box(layout.get("zone"))
+            dev = zone if held else device_box_fraction(layout, W, H, natural)
             subject = (norm_box(layout.get("subject_zone"))
                        if valid_box(layout.get("subject_zone")) else None)
             if layout.get("subject_zone") is not None and subject is None:
                 notes.append(f"{label}: subject_zone must be a box inside the frame")
-            if subject and overlaps(dev, subject):
+            if held:
+                if subject is None:
+                    notes.append(f"{label}: held-phone needs a subject_zone covering the "
+                                 "character and the phone body")
+                elif not contains_box(subject, zone):
+                    notes.append(f"{label}: held-phone zone (blank screen) must sit inside "
+                                 f"subject_zone ({fmt_box(subject)})")
+            elif subject and overlaps(dev, subject):
                 notes.append(f"{label}: the screenshot covers the character area "
                              f"({fmt_box(subject)})")
             if "captions" in keep_out and overlaps(dev, keep_out["captions"]):
@@ -1077,11 +1109,21 @@ def keep_clear_lines(scene_plan: Optional[dict[str, Any]],
                     if valid_box(it["layout"].get("subject_zone"))]
         if not zones:
             continue
-        parts = [f"{unit_label(pipeline, group[0]['scene_number'])} ({scene_id}): keep "
-                 + "; ".join(fmt_box(z) for z in zones)
-                 + f" plain white — no character, props or {baked_text_words(pipeline)[0]} there"]
-        if subjects:
-            parts.append("character inside " + "; ".join(fmt_box(s) for s in subjects))
+        held = any((it.get("layout") or {}).get("frame") == "held" for it in group)
+        if held:
+            parts = [f"{unit_label(pipeline, group[0]['scene_number'])} ({scene_id}): keep "
+                     + "; ".join(fmt_box(z) for z in zones)
+                     + " plain white blank phone screen (no UI glyphs, no props, no text) — "
+                     "the real screenshot is composited there after generation"]
+            if subjects:
+                parts.append("character + phone body inside "
+                             + "; ".join(fmt_box(s) for s in subjects))
+        else:
+            parts = [f"{unit_label(pipeline, group[0]['scene_number'])} ({scene_id}): keep "
+                     + "; ".join(fmt_box(z) for z in zones)
+                     + f" plain white — no character, props or {baked_text_words(pipeline)[0]} there"]
+            if subjects:
+                parts.append("character inside " + "; ".join(fmt_box(s) for s in subjects))
         if not still:
             parts.append("camera locked")
         lines.append(", ".join(parts))

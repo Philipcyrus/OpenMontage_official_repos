@@ -707,6 +707,112 @@ assert "ALREADY APPROVED" in cont and "Do NOT ask" in cont
 assert "Do NOT stop to ask" in run._hero_approved_prompt("jH", {})
 print("[ok] _run_after_hero_approved continues past stale hero_still")
 
+# 4c3) after scene_plan approve, gate-less no-op assets triggers continue then forced hero gate
+_labels_sp = []
+_round_sp = {"n": 0}
+_real_sync_sp = run._sync
+_real_run_sp = run._run_agent
+_real_await_sp = run._assets_phase_awaiting
+
+def _sync_noop_assets(state):
+    _round_sp["n"] += 1
+    # Always gate-less running — simulates agent no-op with no checkpoint_assets
+    return {**state, "status": "running", "gate": None, "stage": "assets",
+            "question": "stage scene_plan completed; next: assets", "artifacts": {}}
+
+run._sync = _sync_noop_assets  # type: ignore[method-assign]
+run._run_agent = (lambda prompt, job_id="", label="":
+                  _labels_sp.append(label))  # type: ignore[method-assign]
+run._assets_phase_awaiting = (lambda jid: False)  # type: ignore[method-assign]
+os.environ["CLAUDE_ASSETS_AFTER_PLAN_MAX"] = "2"
+st_sp = run._run_after_scene_plan_approved(
+    {"job_id": "jAfterPlan", "pipeline": "panda-video", "options": {},
+     "artifacts": {}})
+run._sync = _real_sync_sp  # type: ignore[method-assign]
+run._run_agent = _real_run_sp  # type: ignore[method-assign]
+run._assets_phase_awaiting = _real_await_sp  # type: ignore[method-assign]
+assert st_sp["status"] == "awaiting_human", st_sp
+assert st_sp["gate"] == "approve_hero_still", st_sp
+assert st_sp["stage"] == "assets"
+assert _labels_sp[0] == "assets"
+assert any("assets_after_plan" in str(x) for x in _labels_sp), _labels_sp
+start_p = run._assets_start_prompt("jAfterPlan", "panda-video",
+                                   {"pipeline": "panda-video", "options": {}})
+assert "NO other worker" in start_p and "background poller" in start_p
+cont_sp = run._assets_start_continue_prompt("jAfterPlan", "panda-video",
+                                           {"pipeline": "panda-video", "options": {}})
+assert "ALREADY APPROVED" in cont_sp and "NO other worker" in cont_sp
+print("[ok] _run_after_scene_plan_approved forces hero gate after no-op")
+
+# 4c4) start/script no-op ("another worker"/self-PID) → continue until first gate or fail clear
+_labels_st = []
+_round_st = {"n": 0}
+_real_sync_st = run._sync
+_real_run_st = run._run_agent
+from lib import checkpoint as _cp_mod
+_real_init_project = _cp_mod.init_project
+
+def _sync_start_noop(state):
+    _round_st["n"] += 1
+    # No checkpoint written — same as job_f4b6d66f909e
+    return {**state, "status": "failed", "gate": None,
+            "question": "agent produced no checkpoint", "artifacts": {}}
+
+run._sync = _sync_start_noop  # type: ignore[method-assign]
+run._run_agent = (lambda prompt, job_id="", label="":
+                  _labels_st.append(label))  # type: ignore[method-assign]
+_cp_mod.init_project = (lambda *a, **k: None)  # type: ignore[method-assign]
+os.environ["CLAUDE_START_MAX"] = "2"
+st_start = run.start(
+    {"job_id": "jStartNoop", "pipeline": "panda-video", "brief": "real brief",
+     "options": {}, "artifacts": {}})
+run._sync = _real_sync_st  # type: ignore[method-assign]
+run._run_agent = _real_run_st  # type: ignore[method-assign]
+_cp_mod.init_project = _real_init_project  # type: ignore[method-assign]
+assert st_start["status"] == "failed", st_start
+assert "no checkpoint" in (st_start.get("question") or "").lower()
+assert _labels_st[0] == "script", _labels_st
+assert any(str(x).startswith("start_continue_") for x in _labels_st), _labels_st
+assert len([x for x in _labels_st if str(x).startswith("start_continue_")]) == 2
+sp_nn = run._start_prompt("jStartNoop", "real brief", {}, "panda-video")
+assert "NO other worker" in sp_nn and "claude -p" in sp_nn and "ps/pgrep" in sp_nn
+assert "NO other worker" in run._start_prompt("jC", "c", {}, "panda-carousel")
+assert "NO other worker" in run._start_prompt("jI", "i", {}, "panda-image")
+cont_st = run._start_continue_prompt("jStartNoop", "panda-video")
+assert "Distractor-memory" in cont_st and "NO other worker" in cont_st
+assert "NO other worker" in run._continue_prompt("jX", "panda-video")
+print("[ok] start continue loop re-invokes after no-checkpoint no-op")
+
+# 4c5) start continue recovers when second leg writes a gate
+_labels_ok = []
+_round_ok = {"n": 0}
+_real_sync_ok = run._sync
+_real_run_ok = run._run_agent
+_real_init_ok = _cp_mod.init_project
+
+def _sync_start_recover(state):
+    _round_ok["n"] += 1
+    if _round_ok["n"] == 1:
+        return {**state, "status": "failed", "gate": None,
+                "question": "agent produced no checkpoint", "artifacts": {}}
+    return {**state, "status": "awaiting_human", "gate": "approve_script",
+            "stage": "script", "question": "Approve the script", "artifacts": {}}
+
+run._sync = _sync_start_recover  # type: ignore[method-assign]
+run._run_agent = (lambda prompt, job_id="", label="":
+                  _labels_ok.append(label))  # type: ignore[method-assign]
+_cp_mod.init_project = (lambda *a, **k: None)  # type: ignore[method-assign]
+os.environ["CLAUDE_START_MAX"] = "3"
+st_ok = run.start(
+    {"job_id": "jStartOk", "pipeline": "panda-video", "brief": "real brief",
+     "options": {"gates": ["script", "scene_plan", "assets", "final"]}, "artifacts": {}})
+run._sync = _real_sync_ok  # type: ignore[method-assign]
+run._run_agent = _real_run_ok  # type: ignore[method-assign]
+_cp_mod.init_project = _real_init_ok  # type: ignore[method-assign]
+assert st_ok["status"] == "awaiting_human" and st_ok["gate"] == "approve_script", st_ok
+assert _labels_ok == ["script", "start_continue_1"], _labels_ok
+print("[ok] start continue recovers to approve_script after one no-op")
+
 # 4d) _run_until_assets_gate continues while assets stay in_progress
 _cont_labels = []
 _real_sync = run._sync
@@ -891,6 +997,7 @@ assert "089ddcec-c375-4299-8a65-6d8b757dd81a" in img
 assert "Max 2 paid" in img
 vid = run._start_prompt("jV", "a video", {}, "panda-video")
 assert "produce a video" in vid
+assert "aspect_ratio: 9:16" in vid
 assert "STILLS-ONLY" not in vid
 assert "089ddcec-c375-4299-8a65-6d8b757dd81a" in vid
 assert "4c01c8f9-6cfb-4d8c-9eb9-74cb61462103" in vid
@@ -899,6 +1006,10 @@ assert "2D flat" in vid or "2D MEDIUM" in vid
 assert "PHASE 2 (motion sample)" not in vid, "default motion_sample=off must skip sample phase"
 assert "PHASE 3 (media)" in vid
 assert "TTS-FIRST" in vid
+vid16 = run._start_prompt("jV16", "youtube explainer", {"aspect_ratio": "16:9"}, "panda-video")
+assert "aspect_ratio: 16:9" in vid16
+assert "1920x1080" in vid16
+assert "Do NOT silently switch to 9:16" in vid16
 vid_ms = run._start_prompt("jV", "a video", {"motion_sample": True}, "panda-video")
 assert "PHASE 2 (motion sample)" in vid_ms
 assert "TTS-FIRST" in vid_ms
@@ -995,10 +1106,22 @@ assert R._carousel_aspect({}) == "4:5"
 assert R._carousel_aspect({"aspect_ratio": "9:16"}) == "9:16"
 assert R._stills_aspect({}, pipeline="panda-image") == "1:1"
 assert R._stills_aspect({"aspect_ratio": "9:16"}, pipeline="panda-image") == "9:16"
+assert R._stills_aspect({}, pipeline="panda-video") == "9:16"
+assert R._stills_aspect({"aspect_ratio": "16:9"}, pipeline="panda-video") == "16:9"
+assert R._stills_aspect({}, pipeline="panda-carousel") == "4:5"
+assert R._master_resolution("16:9") == "1920x1080"
+assert R._master_resolution("9:16") == "1080x1920"
+assert R._master_resolution(options={"aspect_ratio": "1:1"}, pipeline="panda-video") == "1080x1080"
 assert R._carousel_pixel_size("1:1") == (1080, 1080)
 assert R._carousel_pixel_size("4:5") == (1080, 1350)
 assert R._carousel_pixel_size("9:16") == (1080, 1920)
+assert R._carousel_pixel_size("16:9") == (1920, 1080)
 assert R._carousel_pixel_size("1080x1080") == (1080, 1080)
+aap16 = run._assets_approved_prompt(
+    "jAspect", "panda-video",
+    state={"pipeline": "panda-video", "options": {"aspect_ratio": "16:9"}},
+)
+assert "1920x1080" in aap16 and "1080x1920" not in aap16
 print("[ok] stills aspect helpers")
 
 # 8) stills revise prompt: EDIT vs FRESH + still path; infer-if-omitted ------

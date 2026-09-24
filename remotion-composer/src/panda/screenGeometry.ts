@@ -14,7 +14,7 @@
 
 export type Box = { x: number; y: number; w: number; h: number };
 export type Point = [number, number];
-export type FrameStyle = "phone" | "browser" | "card" | "none";
+export type FrameStyle = "phone" | "browser" | "card" | "none" | "held";
 export type MotionType =
   | "none"
   | "fade"
@@ -78,6 +78,7 @@ export const CHROME: Record<
   browser: { side: 0.012, top: 0.085, bottom: 0.012, body: 0.03, screen: 0.006 },
   card: { side: 0.03, top: 0.03, bottom: 0.03, body: 0.04, screen: 0.02 },
   none: { side: 0, top: 0, bottom: 0, body: 0, screen: 0 },
+  held: { side: 0, top: 0, bottom: 0, body: 0, screen: 0 },
 };
 
 export type DeviceGeometry = {

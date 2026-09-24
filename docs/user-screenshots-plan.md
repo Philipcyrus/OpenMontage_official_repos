@@ -1,6 +1,6 @@
 # User screenshots in Panda videos, carousels and images — build plan
 
-**Scope:** `panda-video`, `panda-carousel` and `panda-image` jobs started from Dify (carousel and image: §5 "Carousel and image"). **Status:** built on branch `feat/user-screenshots` (not merged, not deployed); tested locally — see §8. **Date:** 2026-09-17.
+**Scope:** `panda-video`, `panda-carousel` and `panda-image` jobs started from Dify (carousel and image: §5 "Carousel and image"). **Status:** merged onto `aspect-ratio` with **held-phone** (`frame: "held"`) extension; not yet deployed — set `DIFY_FILES_HOSTS`, Node ≥ 22, restart launcher. **Date:** 2026-09-21.
 
 ---
 
@@ -268,10 +268,16 @@ block", so it is inert for normal jobs before the restart. Then one normal job t
 **Dify flow.** Set `DIFY_FILES_HOSTS` (+ `DIFY_FILES_BASE` if links are relative) and restart; turn on
 image upload; send `options.media`; show `screens_board` full width. One end-to-end job from the chat.
 
-## 10. Not in v1
+## 10. Not in v1 / deferred
 
-- Screenshot inside a generated phone the Panda holds (blank screen + frame-by-frame tracked composite).
-- Screenshot scenes with no Panda shot behind them (needs a no-generation scene and gate-count changes).
+**In scope now (held-phone):** screenshot composited onto a **blank phone screen the Panda holds**
+(`frame: "held"`, zone inside subject_zone, axis-aligned, locked camera on video). Remotion draws
+no chrome — the generated phone is part of the still/clip; the launcher overlays the real PNG after
+generation (same path as beside placements).
+
+**Still deferred:**
+- Perspective warp / frame-by-frame tracked phone motion (phone must stay flat and still in `zone`).
+- Screenshot-only scenes with no Panda shot behind them (needs a no-generation scene and gate-count changes).
 - Video uploads, adding screenshots at a later gate, photos as generation references.
 
 ## 11. Decisions taken in the build

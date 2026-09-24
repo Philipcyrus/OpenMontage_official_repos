@@ -66,7 +66,7 @@ Their guidance is binding — you record it, you do not re-decide it.
 1. Look at every screenshot (read them all in one turn) so you know what each one shows.
 2. Write `projects/<job>/inputs/requests.json` — one entry per upload
    (`schemas/artifacts/screen_requests.schema.json`):
-   `{"n": 1, "input_id": "in_01", "scenes": [2], "moment": "", "instruction": "highlight the Activate button", "shows": "activation page with the Activate button"}`
+   `{"n": 1, "input_id": "in_01", "scenes": [2], "moment": "", "instruction": "highlight the Activate button", "shows": "activation page with the Activate button", "placement": "beside"}`
    - `n` is the attachment number the user sees; they may also name a screenshot by file name or
      by what it shows.
    - `scenes`: the slide numbers the user gave (1 = first slide). Several screenshots may share a
@@ -76,6 +76,8 @@ Their guidance is binding — you record it, you do not re-decide it.
    - No guidance for a screenshot → `"scenes": []` and `"moment": ""`. It is **not used**; never
      place it on your own.
    - `instruction`: how to use it, in the user's words (highlight, blur, frame, text).
+   - `placement`: `"held"` when the brief says the mascot **holds / shows / presents** the screenshot
+     (or a phone screen) toward the viewer; otherwise `"beside"` (default).
 3. Make the slide count at least the highest slide number given, and note in the brief which
    slides carry screenshots.
 4. Never copy screenshots into `assets/`, never edit them, never send them to Higgsfield.

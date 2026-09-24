@@ -498,10 +498,62 @@ _FRESH_NOTE_RE = re.compile(
     r"\b(regenerate|redo|new|from scratch|different scene|start over|fresh)\b", re.I)
 _EDIT_NOTE_RE = re.compile(
     r"\b(change|fix|remove|keep|edit|adjust|replace)\b", re.I)
+# Dify/Open WebUI often routes chat text like "approved. All current stills." as
+# decision=revise (MODE=FRESH) instead of decision=approve. That burns a stills-revise
+# leg and never advances to i2v. Detect bare approval notes with no flagged shots.
+_APPROVAL_NOTE_RE = re.compile(
+    r"\b(approv(e|ed|al)|looks?\s+good|lgtm|ship\s+it|go\s+ahead|"
+    r"proceed(\s+to\s+(animation|video|i2v|clips))?)\b",
+    re.I,
+)
+_APPROVAL_MISROUTE_GATES = frozenset({
+    "approve_stills",
+    "approve_hero_still",
+    "approve_motion_sample",
+    "approve_assets",
+    "approve_final",
+    "approve_scene_plan",
+    "approve_script",
+})
+
+
+def _looks_like_approval_misroute(gate: Optional[str], response: Optional[dict[str, Any]]) -> bool:
+    """True when a revise payload is really a bare approve (no shots, no change request)."""
+    if gate not in _APPROVAL_MISROUTE_GATES:
+        return False
+    resp = response or {}
+    if str(resp.get("decision") or "").strip().lower() != "revise":
+        return False
+    if resp.get("shots"):
+        return False
+    note = str(resp.get("answer") or "").strip()
+    if not note or len(note) > 400:
+        return False
+    if not _APPROVAL_NOTE_RE.search(note):
+        return False
+    # Real revise notes that also say "approve" after a fix stay as revise.
+    if _FRESH_NOTE_RE.search(note) or _EDIT_NOTE_RE.search(note):
+        return False
+    return True
+
+
+def coerce_gate_response(gate: Optional[str], response: Optional[dict[str, Any]]) -> dict[str, Any]:
+    """Return a response dict; rewrite revise→approve when Dify misroutes approval chat text."""
+    resp = dict(response or {})
+    if _looks_like_approval_misroute(gate, resp):
+        resp["decision"] = "approve"
+        # Drop revise-only fields so downstream stills logic cannot re-infer FRESH.
+        resp.pop("mode", None)
+        resp["shots"] = []
+        note = str(resp.get("answer") or "").strip()
+        resp["_coerced_from_revise_approval"] = True
+        if note:
+            resp["_original_revise_answer"] = note
+    return resp
 
 
 def _stills_revise_mode(response: dict[str, Any]) -> str:
-    """Resolve stills revise mode: explicit `fresh`/`edit`, else infer. Default fresh."""
+    """Resolve stills revise mode: explicit `fresh`/`edit`, else infer from the note. Default fresh."""
     raw = (response or {}).get("mode")
     if raw is not None and str(raw).strip():
         m = str(raw).strip().lower()
@@ -607,7 +659,8 @@ def _still_abs_paths(job_id: str, state: Optional[dict[str, Any]], shots: list[A
     return paths
 
 
-# carousel slide canvas — caller sets options.aspect_ratio (default 4:5). Do not coerce to 4:5/1:1.
+# Canvas sizes — caller sets options.aspect_ratio. Do not coerce a caller-set ratio.
+# Defaults (when omitted): video 9:16, carousel 4:5, image 1:1.
 _CAROUSEL_PIXEL_SIZES = {
     "1:1": (1080, 1080),
     "4:5": (1080, 1350),
@@ -621,9 +674,14 @@ _CAROUSEL_PIXEL_SIZES = {
 def _stills_aspect(options: Optional[dict[str, Any]] = None,
                    state: Optional[dict[str, Any]] = None,
                    pipeline: Optional[str] = None) -> str:
-    """Job option `aspect_ratio`. Default 1:1 for panda-image, 4:5 otherwise. Pass-through."""
+    """Job option `aspect_ratio`. Pipeline defaults; caller-set values pass through."""
     p = pipeline or _pipeline_of(state or {})
-    default = "1:1" if p == "panda-image" else "4:5"
+    if p == "panda-image":
+        default = "1:1"
+    elif p == "panda-video":
+        default = "9:16"
+    else:
+        default = "4:5"  # panda-carousel
     opts = options if options is not None else ((state or {}).get("options") or {})
     raw = str((opts or {}).get("aspect_ratio") or default).strip()
     return raw or default
@@ -631,12 +689,12 @@ def _stills_aspect(options: Optional[dict[str, Any]] = None,
 
 def _carousel_aspect(options: Optional[dict[str, Any]] = None,
                      state: Optional[dict[str, Any]] = None) -> str:
-    """Job option `aspect_ratio`, default 4:5 (carousel / video). Pass-through."""
-    return _stills_aspect(options=options, state=state)
+    """Job option `aspect_ratio` (carousel default 4:5). Pass-through."""
+    return _stills_aspect(options=options, state=state, pipeline="panda-carousel")
 
 
 def _carousel_pixel_size(ratio: str) -> tuple[int, int]:
-    """Mock placeholder size for a carousel ratio. Unknown W:H → 1080 on the short side."""
+    """Pixel size for a canvas ratio. Unknown W:H → 1080 on the short side."""
     key = str(ratio or "4:5").strip().lower().replace(" ", "")
     if key in _CAROUSEL_PIXEL_SIZES:
         return _CAROUSEL_PIXEL_SIZES[key]
@@ -653,6 +711,17 @@ def _carousel_pixel_size(ratio: str) -> tuple[int, int]:
                 return (1080, max(1, round(1080 * b / a)))
             return (max(1, round(1080 * a / b)), 1080)
     return _CAROUSEL_PIXEL_SIZES["4:5"]
+
+
+def _master_resolution(ratio: Optional[str] = None,
+                       options: Optional[dict[str, Any]] = None,
+                       state: Optional[dict[str, Any]] = None,
+                       pipeline: Optional[str] = None) -> str:
+    """Master canvas as ``WxH`` for panda_render / pre-conform (from options.aspect_ratio)."""
+    if not ratio:
+        ratio = _stills_aspect(options=options, state=state, pipeline=pipeline)
+    w, h = _carousel_pixel_size(ratio)
+    return f"{w}x{h}"
 
 
 def _script_to_markdown(script: dict[str, Any]) -> str:
@@ -981,6 +1050,7 @@ class MockRunner(Runner):
         return self._do_script(state, {})
 
     def resume(self, state: dict[str, Any], response: dict[str, Any]) -> dict[str, Any]:
+        response = coerce_gate_response(state.get("gate"), response)
         decision = (response or {}).get("decision", "approve")
         gate = state.get("gate")
 
@@ -1114,9 +1184,8 @@ class MockRunner(Runner):
             if n >= 3 and i == 1:
                 scene["hero_moment"] = True
             scenes.append(scene)
-        scene_plan = {"version": "1.0", "scenes": scenes}
-        if stills_only:
-            scene_plan["metadata"] = {"aspect_ratio": _stills_aspect(state=state)}
+        scene_plan = {"version": "1.0", "scenes": scenes,
+                      "metadata": {"aspect_ratio": _stills_aspect(state=state)}}
         store.artifact_path(job_id, "scene_plan.json").write_text(
             json.dumps(scene_plan, indent=2), encoding="utf-8")
         # Surface the plan inline (dict) so Dify can review it as TEXT — no stills here.
@@ -1389,10 +1458,7 @@ class MockRunner(Runner):
                             existing: Optional[list[str]] = None) -> list[str]:
         from PIL import Image, ImageDraw
         colors = [(11, 11, 11), (253, 197, 13), (30, 30, 30)]
-        if state and _is_stills_terminal(state):
-            size = _carousel_pixel_size(_stills_aspect(state=state))
-        else:
-            size = (1080, 1920)
+        size = _carousel_pixel_size(_stills_aspect(state=state)) if state else (1080, 1920)
         if existing:
             names = [_still_basename(x) for x in existing]
             while len(names) < n:
@@ -1506,6 +1572,16 @@ class ClaudeCodeRunner(Runner):
                                            language_coerced=coerced),
                         job_id, start_label)
         state = self._sync(state)
+        # job_f4b6d66f909e: start/script no-op'd ("another worker" / self-PID) with rc=0 and
+        # no checkpoint → _sync failed. Continue until first gate or CLAUDE_START_MAX.
+        max_extra = int(os.environ.get("CLAUDE_START_MAX", "3"))
+        n = 0
+        while self._start_needs_continue(state, job_id) and n < max_extra:
+            n += 1
+            self._run_agent(
+                self._start_continue_prompt(job_id, pipeline, state=state),
+                job_id, f"start_continue_{n}")
+            state = self._sync(state)
         # Gate-collapse: options.gates omits script → auto-approve GATE 1 and continue.
         if (state.get("status") == "awaiting_human" and state.get("gate") == "approve_script"
                 and not _script_gate_enabled(state)):
@@ -1514,13 +1590,41 @@ class ClaudeCodeRunner(Runner):
             state = self._sync(state)
         return state
 
+    def _has_stage_checkpoint(self, job_id: str) -> bool:
+        from lib import checkpoint as cp
+        return cp.get_latest_checkpoint(self._projects_dir, job_id) is not None
+
+    def _start_needs_continue(self, state: dict[str, Any], job_id: str) -> bool:
+        """True when the start leg exited without a usable first-gate checkpoint."""
+        q = str(state.get("question") or "").lower()
+        if state.get("status") == "failed" and "no checkpoint" in q:
+            return True
+        if (
+            state.get("status") == "running"
+            and state.get("gate") is None
+            and not self._has_stage_checkpoint(job_id)
+        ):
+            return True
+        return False
+
     def resume(self, state: dict[str, Any], response: dict[str, Any]) -> dict[str, Any]:
         job_id = state["job_id"]
         if state.get("gate") in _LEGACY_GATES:
             return _legacy_migration(state)
         from lib import checkpoint as cp
+        response = coerce_gate_response(state.get("gate"), response)
         gate = state.get("gate")
         decision = (response or {}).get("decision", "approve")
+        if response.get("_coerced_from_revise_approval"):
+            print(
+                f"[claude.resume] {job_id} coerced revise→approve at gate={gate!r}",
+                flush=True,
+            )
+
+        # Persist a raised/locked credit ceiling from any gate (not only budget_exceeded).
+        new_cap = (response or {}).get("max_higgsfield_credits")
+        if new_cap is not None:
+            state.setdefault("options", {})["max_higgsfield_credits"] = new_cap
 
         if gate == "approve_brand":
             return _resolve_brand_gate(state, decision)
@@ -1530,9 +1634,6 @@ class ClaudeCodeRunner(Runner):
         # BUDGET HOLD — the agent blocked a generation that would exceed max_higgsfield_credits.
         # The human must raise the cap, revise the requested generation, or cancel. Nothing was spent.
         if gate == "budget_exceeded":
-            new_cap = (response or {}).get("max_higgsfield_credits")
-            if new_cap is not None:                       # persist a raised cap for later legs
-                state.setdefault("options", {})["max_higgsfield_credits"] = new_cap
             if decision == "cancel":
                 state.update(status="failed", gate=None,
                              question="Job cancelled at the budget gate — no further Higgsfield credits spent.")
@@ -1604,6 +1705,13 @@ class ClaudeCodeRunner(Runner):
                         "remaining clips yet)", response or {}),
                 job_id, "motion_sample_revise")
             return self._run_until_assets_gate(state, label="motion_sample_revise")
+
+        # Approving scene_plan unlocks assets PHASE 0/1. A single continue that no-ops
+        # (background poller / "another worker already running") leaves status=running with
+        # no gate — same class as post-hero stills stalls. Continue until an assets pause.
+        if gate == "approve_scene_plan" and decision == "approve":
+            self._approve_stage(job_id, stage, _pipeline_of(state))
+            return self._run_after_scene_plan_approved(state)
 
         # Approving full media must run edit (ungated) → compose and land on approve_final.
         # A single continue leg that asks a question and exits leaves status=running/gate=null
@@ -1826,6 +1934,64 @@ class ClaudeCodeRunner(Runner):
             )
         return state
 
+    def _assets_phase_awaiting(self, job_id: str) -> bool:
+        """True when assets checkpoint is a human pause (hero / stills / motion / full media)."""
+        from lib import checkpoint as cp
+        assets = cp.read_checkpoint(self._projects_dir, job_id, "assets", soft=True) or {}
+        return assets.get("status") == "awaiting_human"
+
+    def _assets_start_gate(self, state: dict[str, Any]) -> str:
+        """First human pause after scene_plan for this job's options."""
+        if _is_stills_terminal(state) or not _hero_still_enabled(state):
+            return "approve_stills"
+        return "approve_hero_still"
+
+    def _run_after_scene_plan_approved(self, state: dict[str, Any]) -> dict[str, Any]:
+        """Enter assets PHASE 0/1 after scene_plan approve; do not exit gate-less running.
+
+        job_c84fec277145: assets agent no-op'd ("another worker already running" / background
+        poller) with no checkpoint_assets → _sync returned status=running / gate=null → failed
+        without a resumable gate. Cap via CLAUDE_ASSETS_AFTER_PLAN_MAX (default 3).
+        """
+        job_id = state["job_id"]
+        pipeline = _pipeline_of(state)
+        self._run_agent(
+            self._assets_start_prompt(job_id, pipeline, state=state),
+            job_id, "assets")
+        max_extra = int(os.environ.get("CLAUDE_ASSETS_AFTER_PLAN_MAX", "3"))
+        state = self._sync(state)
+        n = 0
+        while (
+            state.get("status") == "running"
+            and state.get("gate") is None
+            and not self._assets_phase_awaiting(job_id)
+            and n < max_extra
+        ):
+            n += 1
+            self._run_agent(
+                self._assets_start_continue_prompt(job_id, pipeline, state=state),
+                job_id, f"assets_after_plan_{n}")
+            state = self._sync(state)
+        if (
+            state.get("status") == "running"
+            and state.get("gate") is None
+            and not self._assets_phase_awaiting(job_id)
+        ):
+            gate = self._assets_start_gate(state)
+            arts = state.get("artifacts") or {}
+            state.update(
+                status="awaiting_human",
+                stage="assets",
+                gate=gate,
+                question=(
+                    f"Assets generation after scene_plan approve did not write an assets "
+                    f"checkpoint after {max_extra} continue attempt(s). Approve to retry "
+                    f"{gate}, or revise — existing scene_plan is kept."
+                ),
+                artifacts=arts,
+            )
+        return state
+
     def _stuck_before_final_gate(self, state: dict[str, Any]) -> bool:
         """True while the post-approve-assets worker has not reached a terminal/gated state.
 
@@ -1868,7 +2034,8 @@ class ClaudeCodeRunner(Runner):
         job_id = state["job_id"]
         pipeline = _pipeline_of(state)
         try:
-            self._run_agent(self._assets_approved_prompt(job_id, pipeline), job_id, "edit")
+            self._run_agent(self._assets_approved_prompt(job_id, pipeline, state=state),
+                            job_id, "edit")
         except Exception as exc:  # timeout/auth/provider failure remains safely resumable
             return self._final_retry_gate(state, f"initial edit/compose leg failed: {exc}")
         max_extra = int(os.environ.get("CLAUDE_EDIT_COMPOSE_MAX", "3"))
@@ -1878,7 +2045,7 @@ class ClaudeCodeRunner(Runner):
             n += 1
             try:
                 self._run_agent(
-                    self._edit_compose_continue_prompt(job_id, pipeline),
+                    self._edit_compose_continue_prompt(job_id, pipeline, state=state),
                     job_id, f"edit_continue_{n}")
             except Exception as exc:
                 return self._final_retry_gate(
@@ -1970,6 +2137,12 @@ class ClaudeCodeRunner(Runner):
                         and not (isinstance(latest.get("partial_progress"), dict)
                                  and latest["partial_progress"].get("phase"))):
                     self._backfill_assets_phase(job_id, latest, "stills", pp)
+                # Thin hero/stills pause: agent omitted artifacts.stills but PNGs exist on disk.
+                if (phase in ("hero_still", "stills")
+                        and arts.get("stills")
+                        and not (isinstance(latest.get("artifacts"), dict)
+                                 and latest["artifacts"].get("stills"))):
+                    self._backfill_stills_artifacts(job_id, latest, arts["stills"], pp)
             else:
                 gate = _STAGE_GATE.get(stage, f"approve_{stage}")
             _apply_previews(job_id, arts, gate)
@@ -2035,6 +2208,35 @@ class ClaudeCodeRunner(Runner):
             cp.write_checkpoint(
                 self._projects_dir, job_id, "assets", "awaiting_human",
                 latest.get("artifacts") or {},
+                pipeline_type=latest.get("pipeline_type") or _DEFAULT_PIPELINE,
+                human_approval_required=True, human_approved=False,
+                partial_progress=merged,
+            )
+        except (OSError, ValueError, TypeError):
+            pass
+
+    def _backfill_stills_artifacts(
+        self,
+        job_id: str,
+        latest: dict[str, Any],
+        stills: list[str],
+        pp: Optional[dict[str, Any]] = None,
+    ) -> None:
+        """Persist disk-scanned still basenames into a thin hero/stills checkpoint once."""
+        from lib import checkpoint as cp
+        arts = dict(latest.get("artifacts") or {})
+        arts["stills"] = list(stills)
+        merged = dict(pp or {})
+        if isinstance(latest.get("partial_progress"), dict):
+            for k, v in latest["partial_progress"].items():
+                merged.setdefault(k, v)
+        phase = merged.get("phase")
+        if not phase:
+            return
+        try:
+            cp.write_checkpoint(
+                self._projects_dir, job_id, "assets", "awaiting_human",
+                arts,
                 pipeline_type=latest.get("pipeline_type") or _DEFAULT_PIPELINE,
                 human_approval_required=True, human_approved=False,
                 partial_progress=merged,
@@ -2307,6 +2509,8 @@ class ClaudeCodeRunner(Runner):
         scale_line = _pair_scale_lock_line()
         lipsync_line = _audio_lipsync_line(options)
         lang_note = _language_lock_note(options, coerced=language_coerced)
+        ratio = _stills_aspect(options, pipeline=pipeline)
+        master = _master_resolution(ratio)
 
         if music is False or str(music).lower() in ("false", "none", "no", "off"):
             music_line = "MUSIC — do NOT add a background music bed for this job."
@@ -2316,9 +2520,16 @@ class ClaudeCodeRunner(Runner):
                           f"(ElevenLabs Music, same ELEVENLABS_API_KEY).{mood} Keep it under the VO.")
 
         return (
+            f"{self._launcher_leg_no_noop_rules('script')}\n"
             f"Run the `{pipeline}` pipeline to produce a video.\n"
             f"project_id: {job_id}\nBrief: {brief}\n"
-            f"language: {lang}    narrator: {narrator}\n\n"
+            f"language: {lang}    narrator: {narrator}    aspect_ratio: {ratio}\n\n"
+            "ASPECT / CANVAS — MANDATORY: honor the job's aspect_ratio end-to-end. Record it on "
+            f"scene_plan.metadata.aspect_ratio as '{ratio}'. Pass the same ratio to Higgsfield "
+            "generate_image / generate_video (confirm via models_explore). Compose with "
+            f"panda_render resolution='{master}'. Do NOT silently switch to 9:16 or another "
+            "canvas. If the chosen model cannot produce this aspect, STOP and escalate — do not "
+            "rewrite the ratio.\n"
             "BRAND — MANDATORY, do NOT improvise: read config/panda-elements.json and USE its "
             "Higgsfield reference Element IDs — customer "
             "`089ddcec-c375-4299-8a65-6d8b757dd81a`, panda "
@@ -2376,13 +2587,15 @@ class ClaudeCodeRunner(Runner):
                 "  - assets PHASE 0 (hero look-lock): generate ONLY ONE hero still "
                 "(hero_moment scene, else scene 1). Checkpoint status='awaiting_human' AND "
                 "top-level partial_progress={\"phase\":\"hero_still\",\"hero_scene_id\":\"…\","
-                "\"look_notes\":[]} and STOP. Do NOT generate other stills yet.\n"
+                "\"look_notes\":[]}; artifacts.stills MUST list the hero basename "
+                "(full asset_manifest not required until later). STOP. Do NOT generate other stills yet.\n"
                 "  - assets PHASE 1 (stills): after hero is approved, KEEP the hero PNG; generate "
                 "REMAINING stills under LOOK LOCK (import hero as style ref once + look_notes). "
                 "Preflight all remaining take-1 stills and enforce the complete-batch budget, "
                 "then submit with max 4 Higgsfield jobs in flight (2 after a 429), poll the set "
-                "together, then run take 2 only for unusable take-1 results. Write "
-                "asset_manifest with credits. Checkpoint status='awaiting_human' AND top-level "
+                "together, then run take 2 only for unusable take-1 results. List all basenames in "
+                "artifacts.stills; write asset_manifest with credits when present. Checkpoint "
+                "status='awaiting_human' AND top-level "
                 "partial_progress={\"phase\":\"stills\"} and STOP.\n"
             )
             shape_line = (
@@ -2404,6 +2617,7 @@ class ClaudeCodeRunner(Runner):
                 "(GATE 2) → assets STILLS ONLY (GATE 3) → DONE.\n"
             )
         return (
+            f"{self._launcher_leg_no_noop_rules('script')}\n"
             f"Run the `panda-carousel` pipeline to produce a STILLS-ONLY social carousel "
             f"(NOT a video).\n"
             f"project_id: {job_id}\nBrief: {brief}\n"
@@ -2445,6 +2659,7 @@ class ClaudeCodeRunner(Runner):
             budget_line = ("BUDGET — no credit cap set. Still record the still's get_cost credits "
                            "in asset_manifest.")
         return (
+            f"{self._launcher_leg_no_noop_rules('scene_plan')}\n"
             f"Run the `panda-image` pipeline to produce ONE STILLS-ONLY social image "
             f"(NOT a video, NOT a carousel).\n"
             f"project_id: {job_id}\nBrief: {brief}\n"
@@ -2486,7 +2701,10 @@ class ClaudeCodeRunner(Runner):
                 "Write the assets "
                 "checkpoint status='awaiting_human' AND top-level "
                 "partial_progress={\"phase\":\"hero_still\",\"hero_scene_id\":\"…\","
-                "\"look_notes\":[]} (NOT nested under asset_manifest.metadata) and STOP. "
+                "\"look_notes\":[]} (NOT nested under asset_manifest.metadata). "
+                "artifacts MUST list the hero PNG basename under artifacts.stills "
+                "(full schema-valid asset_manifest is NOT required until PHASE 3 / "
+                "approve_assets). STOP. "
                 "Do NOT generate other stills or any video yet.\n"
             )
             stills = (
@@ -2499,10 +2717,12 @@ class ClaudeCodeRunner(Runner):
                 "reduce to 2 after a 429), poll the set together; do not serialize. Run take 2 "
                 "only for unusable take-1 results. Same CHARACTER LOCK + 2D MEDIUM + STILLS "
                 "2-TAKE per remaining scene. "
-                "Record all stills (incl. hero) in asset_manifest with credits. Write the assets "
+                "Record all stills (incl. hero) under artifacts.stills (basenames) and in "
+                "asset_manifest with credits when present. Write the assets "
                 "checkpoint status='awaiting_human' AND top-level "
                 "partial_progress={\"phase\":\"stills\"} and STOP. Do NOT generate any video yet. "
-                "Do NOT mark assets completed yet.\n"
+                "Do NOT mark assets completed yet. Full schema-valid asset_manifest is required "
+                "at PHASE 3 / approve_assets, not at this storyboard pause.\n"
             )
         else:
             hero = ""
@@ -2516,8 +2736,9 @@ class ClaudeCodeRunner(Runner):
                 "(max 4 Higgsfield jobs in flight; 2 after a 429), poll the set together, then "
                 "take 2 = i2i only for unusable take 1; max 2 paid generate_image per scene. "
                 "Then write the assets "
-                "checkpoint with status='awaiting_human' AND partial_progress={\"phase\":\"stills\"} "
-                "and STOP. Do NOT generate any video yet.\n")
+                "checkpoint with status='awaiting_human' AND partial_progress={\"phase\":\"stills\"}, "
+                "artifacts.stills listing every PNG basename, and STOP. Do NOT generate any video "
+                "yet. Full schema-valid asset_manifest is required at PHASE 3 / approve_assets.\n")
         if audio_lipsync:
             motion_how = (
                 "For customer/panda speaking clips: seedance_2_0 with start_image + "
@@ -2613,14 +2834,99 @@ class ClaudeCodeRunner(Runner):
             extra = (" This is a SINGLE still — do NOT generate video, TTS, music, or compose. "
                      "There is no script stage. After the one still the pipeline is complete.")
         return (
+            f"{self._launcher_leg_no_noop_rules('continue')} "
             f"Continue the `{p}` pipeline for project_id: {job_id}. Read the latest "
             "checkpoint, proceed from the next stage, and STOP at the next human_approval gate "
             f"(status='awaiting_human', end your turn). If the pipeline is complete, finish.{extra}"
         )
 
-    def _assets_approved_prompt(self, job_id: str, pipeline: Optional[str] = None) -> str:
+    def _launcher_leg_no_noop_rules(self, stage: str = "pipeline") -> str:
+        """Hard rules against 'another worker already running' / self-PID no-ops.
+
+        job_f4b6d66f909e / job_c84fec: Claude memory about Dify distractors led the agent to
+        ``ps`` for ``claude -p``, treat its own process as a sibling leg, and exit rc=0 with
+        no checkpoint.
+        """
+        return (
+            f"YOU are the launcher-spawned `{stage}` leg for this project_id — there is NO other "
+            "worker already generating. A `claude -p` process for this job is YOU (not a sibling). "
+            "Do NOT run ps/pgrep/process scans to decide whether to work. Do NOT assume another "
+            "agent owns this job because state.json says status=running. Do NOT start a background "
+            "poller, /loop, sleep-and-exit, or 'wait for another worker' and end the turn. Memory "
+            "about Dify status-check / '### Task:' distractor briefs does NOT apply when this "
+            "prompt names your project_id and a real Brief — you MUST write the stage checkpoint "
+            "(status='awaiting_human' or completed per the pipeline) and STOP. Exiting with no "
+            "checkpoint leaves the job failed as 'agent produced no checkpoint'."
+        )
+
+    def _assets_no_noop_rules(self) -> str:
+        """Assets-phase wording; same contract as `_launcher_leg_no_noop_rules`."""
+        return self._launcher_leg_no_noop_rules("assets")
+
+    def _start_continue_prompt(self, job_id: str, pipeline: Optional[str] = None,
+                               state: Optional[dict[str, Any]] = None) -> str:
+        """Re-nudge after a start leg that exited without any checkpoint."""
+        p = pipeline or _pipeline_of(state or {}) or _DEFAULT_PIPELINE
+        first = "scene_plan" if p == "panda-image" else "script"
+        return (
+            f"For project_id: {job_id} (`{p}`), you previously stopped without writing any "
+            f"checkpoint (\"agent produced no checkpoint\" / assumed another worker). "
+            f"{self._launcher_leg_no_noop_rules(first)} "
+            "Distractor-memory rules do NOT apply — this is the real production start for this "
+            f"job_id. Write idea + {first} (and stop at the first human_approval gate with "
+            "status='awaiting_human'). Do NOT ask the human a question; do NOT poll and exit."
+        )
+
+    def _assets_start_prompt(self, job_id: str, pipeline: Optional[str] = None,
+                             state: Optional[dict[str, Any]] = None) -> str:
+        """Enter assets after scene_plan approve — PHASE 0 hero or PHASE 1 stills."""
+        p = pipeline or _pipeline_of(state or {}) or _DEFAULT_PIPELINE
+        st = state or {"job_id": job_id, "pipeline": p}
+        opts = st.get("options") if isinstance(st.get("options"), dict) else {}
+        motion = _motion_sample_enabled(st)
+        hero = _hero_still_enabled(st)
+        audio_lipsync = str(opts.get("audio_lipsync", True)).lower() not in (
+            "false", "0", "no", "off", "")
+        phases = self._assets_phases_text(
+            motion, hero_still=hero, audio_lipsync=audio_lipsync)
+        first = (
+            "PHASE 0 (hero still look-lock) only — one still, then STOP."
+            if hero else
+            "PHASE 1 (stills) — generate storyboard stills, then STOP."
+        )
+        return (
+            f"For project_id: {job_id}, the `scene_plan` stage is APPROVED on the `{p}` pipeline. "
+            f"Start the `assets` stage now. {self._assets_no_noop_rules()} "
+            f"This turn: {first} Do NOT ask clarifying questions — apply pipeline defaults. "
+            "Read skills/meta/checkpoint-protocol.md and the assets director for this pipeline. "
+            f"Follow these phase rules:\n{phases}"
+            f"{_pair_scale_lock_line()}"
+        )
+
+    def _assets_start_continue_prompt(self, job_id: str, pipeline: Optional[str] = None,
+                                      state: Optional[dict[str, Any]] = None) -> str:
+        """Re-nudge after an assets-start leg that exited without an awaiting_human checkpoint."""
+        p = pipeline or _pipeline_of(state or {}) or _DEFAULT_PIPELINE
+        st = state or {"job_id": job_id, "pipeline": p}
+        hero = _hero_still_enabled(st)
+        phase_goal = (
+            'partial_progress={"phase":"hero_still",...} for approve_hero_still'
+            if hero else
+            'partial_progress={"phase":"stills"} for approve_stills'
+        )
+        return (
+            f"For project_id: {job_id} (`{p}`), scene_plan was ALREADY APPROVED and assets must "
+            f"start. You previously stopped without writing checkpoint_assets.json. "
+            f"{self._assets_no_noop_rules()} Do NOT ask the human a question. Generate the first "
+            f"assets pause now and rewrite assets with status='awaiting_human' and {phase_goal}. "
+            "That is the only valid next pause."
+        )
+
+    def _assets_approved_prompt(self, job_id: str, pipeline: Optional[str] = None,
+                                state: Optional[dict[str, Any]] = None) -> str:
         """Prompt after GATE 4 (approve_assets): run ungated edit then compose → approve_final."""
         p = pipeline or _DEFAULT_PIPELINE
+        master = _master_resolution(state=state, pipeline=p)
         return (
             f"For project_id: {job_id}, the FULL MEDIA phase of the `assets` stage "
             f"(GATE 4 / approve_assets) is APPROVED on the `{p}` pipeline. "
@@ -2631,8 +2937,9 @@ class ClaudeCodeRunner(Runner):
             "skills/meta/checkpoint-protocol.md. Build edit_decisions from scene_plan + "
             "asset_manifest (cut points, caption bands, render_runtime carried UNCHANGED). "
             "Mute/discard the native AAC track baked into Higgsfield/Kling i2v clips before "
-            "mixing narration+music. Pre-conform off-spec 1076x1928 clips to 1080x1920 via "
-            "an all-top crop (not a centred cover-crop).\n"
+            f"mixing narration+music. Pre-conform off-spec clips to {master} via "
+            "an all-top crop (not a centred cover-crop). Pass that same resolution to "
+            "panda_render.\n"
             "2. Use asset_manifest.metadata.timeline_contract as the effective timeline. Scene "
             "lengths may be unequal, but the final must remain within ±5% of the requested total. "
             "Record each cut's source_duration_seconds, effective_duration_seconds, and bounded "
@@ -2645,7 +2952,8 @@ class ClaudeCodeRunner(Runner):
             "Never shift picture and VO independently or apply unresolved offsets.\n"
             "4. Write the edit checkpoint status='completed' (ungated), then immediately "
             "run compose per skills/pipelines/panda-video/compose-director.md "
-            "(panda_render for ffmpeg / render_runtime already locked). Verify final.mp4, "
+            f"(panda_render resolution='{master}' / render_runtime already locked). Verify "
+            "final.mp4, "
             "write render_report + final_review. Carry unresolved lip-sync scene ids into "
             "final_review.checks.lip_sync_check and set both its and final_review's top-level "
             "recommended_action='present_to_user'; do not retry again or block. Checkpoint "
@@ -2656,9 +2964,11 @@ class ClaudeCodeRunner(Runner):
         )
 
     def _edit_compose_continue_prompt(self, job_id: str,
-                                      pipeline: Optional[str] = None) -> str:
+                                      pipeline: Optional[str] = None,
+                                      state: Optional[dict[str, Any]] = None) -> str:
         """Re-nudge after a continue leg that asked/exited without reaching approve_final."""
         p = pipeline or _DEFAULT_PIPELINE
+        master = _master_resolution(state=state, pipeline=p)
         return (
             f"For project_id: {job_id} (`{p}`), clip/media approval ALREADY happened. You "
             "previously stopped without reaching compose's approve_final gate. Do NOT ask "
@@ -2666,8 +2976,9 @@ class ClaudeCodeRunner(Runner):
             "If edit_decisions is missing, write it now from metadata.timeline_contract "
             "(unequal audio-driven scene lengths; requested total ±5%; bounded post-speech holds; "
             "apply only locally validated lip-sync offsets from immutable scene-local timestamps; "
-            "mute native clip audio; all-top crop). Then compose "
-            "to final.mp4, carry unresolved lip-sync scene warnings into final_review with "
+            f"mute native clip audio; all-top crop to {master}). Then compose "
+            f"to final.mp4 with panda_render resolution='{master}', carry unresolved lip-sync "
+            "scene warnings into final_review with "
             "recommended_action='present_to_user', and checkpoint compose status='awaiting_human'. "
             "Do NOT retry lip-sync again and do NOT leave status running with no gate."
         )
@@ -2822,6 +3133,7 @@ class ClaudeCodeRunner(Runner):
         if is_hero or is_stills:
             extra += " " + _pair_scale_lock_line()
         return (
+            f"{self._launcher_leg_no_noop_rules(str(stage or 'revise'))} "
             f"Revise stage '{stage}' for project_id: {job_id} per this feedback: {note}.{shot_txt}"
             f"{extra} "
             "Rewrite that stage's checkpoint with status='awaiting_human' and STOP for approval."

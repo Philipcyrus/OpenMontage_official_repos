@@ -47,9 +47,10 @@
     }
   },
   "properties": {
-    "zone": {"$ref": "#/$defs/box", "description": "Where the screenshot (with its frame) may sit."},
-    "subject_zone": {"$ref": "#/$defs/box", "description": "Where the character stands; the still/clip keeps it out of zone."},
-    "frame": {"type": "string", "enum": ["phone", "browser", "card", "none"]},
+    "frame": {"type": "string", "enum": ["phone", "browser", "card", "none", "held"],
+              "description": "phone/browser/card = Remotion chrome beside the character; none = bare overlay; held = screenshot fills a blank phone screen the character holds (zone inside subject_zone, no Remotion chrome)."},
+    "subject_zone": {"$ref": "#/$defs/box", "description": "Where the character stands. Beside placements: keep out of zone. Held: covers character + phone body and must contain zone."},
+    "zone": {"$ref": "#/$defs/box", "description": "Where the screenshot sits (with chrome for phone/browser/card; blank phone screen for held)."},
     "crop": {"$ref": "#/$defs/box", "description": "Part of the screenshot shown at the start (default: all)."},
     "show": {
       "type": "object",

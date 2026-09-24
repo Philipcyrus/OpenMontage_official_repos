@@ -236,7 +236,11 @@ def commit(prepared: tuple[Path, list[dict[str, Any]]], project_dir: Path,
     dest.mkdir(parents=True, exist_ok=True)
     try:
         for rec in records:
-            os.replace(tmp / rec["file"], dest / rec["file"])
+            # shutil.move (not os.replace): prepare() stages under /tmp, which is often a
+            # different filesystem from projects/ — os.replace then raises EXDEV (errno 18)
+            # and POST /jobs returns 500 ("could not store the images"), which Dify surfaces
+            # as "Couldn't reach the render service".
+            shutil.move(str(tmp / rec["file"]), str(dest / rec["file"]))
         (dest / sl.JOB_FILE).write_text(json.dumps({"pipeline": pipeline, "language": language}),
                                         encoding="utf-8")
         (dest / sl.INPUTS_FILE).write_text(json.dumps(records, ensure_ascii=False, indent=1),

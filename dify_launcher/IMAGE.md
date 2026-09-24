@@ -70,11 +70,22 @@ Same dual-mode as carousel, on the single still (`shots:[1]`):
 ## User screenshots (`options.media`)
 
 Attach screenshots to the brief and say which to use on the image and how (*"use screenshot 2,
-highlight Activate"*); about two fit one image readably. The still is generated with that area left
-empty and the launcher places the screenshots onto it as soon as it exists, so `approve_stills` and
+highlight Activate"*; or *"panda holds up screenshot 1 on the phone"*). About two fit one image
+readably when placed beside the character; **held** is typically one screenshot on a blank phone
+screen the mascot holds. The still is generated with that area left empty (or blank white for held)
+and the launcher places the screenshots onto it as soon as it exists, so `approve_stills` and
 `branded_stills` show them. Revisions (`edit` / `fresh`) work from the clean still. Screenshots never
-go to Higgsfield. Setup, limits and checks: [`DIFY_INTEGRATION.md`](DIFY_INTEGRATION.md) §6
+go to Higgsfield. Pass real file URLs via `options.media` — do not paste file UUIDs into the brief
+alone. Setup, limits and checks: [`DIFY_INTEGRATION.md`](DIFY_INTEGRATION.md) §6
 "User screenshots".
+
+### Smoke (held-phone on panda-image)
+
+1. Set `DIFY_FILES_HOSTS` (+ `DIFY_FILES_BASE` if links are relative); Node ≥ 22 + `remotion-composer`.
+2. `POST /jobs` with `pipeline: "panda-image"`, brief like *"1:1 still: panda holds up this phone
+   screen toward the viewer"*, and `options.media: [{"url": "<dify file url>", "name": "screen.png"}]`.
+3. Approve scene plan (layouts board / facts should show `frame: held`, blank-screen keep-clear).
+4. Approve stills — the reviewed PNG must show the real screenshot on the phone, not placeholder UI.
 
 ---
 

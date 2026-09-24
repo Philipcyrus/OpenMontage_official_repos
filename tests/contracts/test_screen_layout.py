@@ -104,6 +104,21 @@ def test_chrome_geometry_matches_remotion_component():
         m = re.search(rf"{frame}:\s*\{{\s*side:\s*([\d.]+),\s*top:\s*([\d.]+),\s*bottom:\s*([\d.]+)", ts)
         assert m, frame
         assert tuple(float(v) for v in m.groups()) == (vals["side"], vals["top"], vals["bottom"])
+    assert "held" in sl.FRAMES
+    assert sl.CHROME["held"] == sl.CHROME["none"]
+
+
+def test_held_contains_box_and_schema():
+    outer = {"x": 0.2, "y": 0.2, "w": 0.6, "h": 0.6}
+    inner = {"x": 0.3, "y": 0.3, "w": 0.3, "h": 0.3}
+    assert sl.contains_box(outer, inner)
+    assert not sl.contains_box(inner, outer)
+    layout = {
+        "zone": inner, "subject_zone": outer, "frame": "held", "camera": "locked",
+    }
+    assert not sl.schema_errors(layout, "screen_layout")
+    req = {"input_id": "in_01", "scenes": [1], "placement": "held"}
+    assert not sl.schema_errors([req], "screen_requests")
 
 
 @pytest.mark.parametrize("name", ["screen_layout", "screen_requests"])

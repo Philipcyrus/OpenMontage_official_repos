@@ -107,8 +107,9 @@ DIFY_RUNNER=mock uvicorn dify_launcher.app:app --host 0.0.0.0 --port 8600
 - `max_higgsfield_credits` — integer credit ceiling (unset = no cap). Before any Higgsfield
   generation, if cumulative spend would exceed it the agent blocks and pauses at `budget_exceeded`
   (raise the cap / revise / cancel). Hard pre-generation block — never overspends silently.
-- `aspect_ratio` — carousel default `4:5`; **panda-image** default `1:1`. Also `9:16`,
-  `3:4`, `16:9`, or `WIDTHxHEIGHT`. See [`CAROUSEL.md`](CAROUSEL.md) / [`IMAGE.md`](IMAGE.md).
+- `aspect_ratio` — **panda-video** default `9:16`; carousel default `4:5`; **panda-image** default `1:1`.
+  Also `16:9`, `3:4`, `4:3`, or `WIDTHxHEIGHT`. Pass-through — never rewritten. See
+  [`CAROUSEL.md`](CAROUSEL.md) / [`IMAGE.md`](IMAGE.md).
 - `gates` — carousel only: list of gates to surface. Default `["script", "scene_plan", "stills"]`.
   Omit `script` to auto-approve GATE 1.
 - `media` — panda-video, panda-carousel and panda-image: the user's screenshots as
