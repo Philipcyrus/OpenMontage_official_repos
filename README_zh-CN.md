@@ -114,6 +114,17 @@ make test                                     # 上游引擎契约测试
 | `deploy/` | EC2 安装脚本、systemd 单元、反向代理配置 |
 | `lib/`、`schemas/`、`tools/`、`skills/` | OpenMontage 引擎（上游） |
 
+## 版本发布
+
+版本记录在仓库的 **Releases** 页面，不另设变更日志文件。每次推送到 `main` 都会运行
+`.github/workflows/release.yml`：打上下一个版本标签，并发布一个 GitHub Release，说明中列出自上一版本以来合并的 PR。
+
+- 默认提升**次版本号**（`v0.9.0` → `v0.10.0`）。给 PR 加标签 `release:patch` 或 `release:major` 可改变提升方式，
+  加 `release:skip` 则不发布。
+- 带 `enhancement`、`bug` 或 `documentation` 标签的 PR 会在说明中分组显示（`.github/release.yml`）。
+- 如需发布被跳过的提交：**Actions → Release → Run workflow**，选择提升方式。
+- `v0.1.0`–`v0.9.0` 为补打的版本，自 2026-08-03 导入以来每个里程碑一个。
+
 ## 致谢与许可
 
 基于 **[OpenMontage](https://github.com/calesthio/OpenMontage)**（智能体化视频流水线引擎）构建。以 **AGPLv3** 许可 —— 见 [`LICENSE`](LICENSE)。

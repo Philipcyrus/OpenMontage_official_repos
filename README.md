@@ -151,6 +151,19 @@ Or drive the live API with curl — see [`deploy/README.md`](deploy/README.md).
 | `deploy/` | EC2 install script, systemd unit, reverse-proxy config |
 | `lib/`, `schemas/`, `tools/`, `skills/` | the OpenMontage engine (upstream) |
 
+## Releases
+
+Version history lives on the repo's **Releases** page. There's no changelog file. Every push to `main` runs
+`.github/workflows/release.yml`, which tags the next version and publishes a GitHub Release whose notes
+list the pull requests merged since the previous one.
+
+- The bump is **minor** by default (`v0.9.0` → `v0.10.0`). Label the PR `release:patch` or
+  `release:major` to change that, or `release:skip` for no release.
+- PRs labelled `enhancement`, `bug` or `documentation` are grouped under those headings in the notes
+  (`.github/release.yml`).
+- To release a commit that was skipped, run **Actions → Release → Run workflow** and pick the bump.
+- `v0.1.0`–`v0.9.0` were tagged retroactively, one per milestone since the 2026-08-03 import.
+
 ## Credits & license
 
 Built on **[OpenMontage](https://github.com/calesthio/OpenMontage)** (agentic video pipeline
