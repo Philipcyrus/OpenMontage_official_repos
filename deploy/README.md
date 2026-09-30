@@ -109,6 +109,13 @@ node -v            # expect v22.23.2  (NOT v18.x)
 which npx          # expect ~/.nvm/versions/node/v22.23.2/bin/npx
 which claude       # expect ~/.npm-global/bin/claude  (needed for DIFY_RUNNER=claude)
 
+# if the pull changed remotion-composer/package-lock.json (e.g. a dependency security
+# bump), reinstall exactly from the lockfile — `git pull` alone leaves the old packages in
+# node_modules. `npm ci` never rewrites the lockfile, so the checkout stays clean for the
+# next pull; it does wipe node_modules/.remotion, so re-fetch the headless browser too.
+git diff --quiet ORIG_HEAD HEAD -- remotion-composer/package-lock.json || \
+  (cd remotion-composer && npm ci && npx remotion browser ensure)
+
 # start (--host 0.0.0.0 so the reverse proxy in another namespace can reach it)
 # SECURITY: the EC2 security group MUST restrict inbound 8501 to the proxy only.
 nohup python -m uvicorn dify_launcher.app:app --host 0.0.0.0 --port 8501 \
