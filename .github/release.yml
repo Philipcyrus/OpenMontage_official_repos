@@ -1,0 +1,19 @@
+# Groups the notes GitHub generates for each release (.github/workflows/release.yml).
+# A PR goes under the first category whose label it carries; unlabelled PRs land
+# in "Other changes". The release:* labels only choose the version bump.
+changelog:
+  categories:
+    - title: New features
+      labels:
+        - enhancement
+        - feature
+    - title: Fixes
+      labels:
+        - bug
+        - fix
+    - title: Documentation
+      labels:
+        - documentation
+    - title: Other changes
+      labels:
+        - "*"
