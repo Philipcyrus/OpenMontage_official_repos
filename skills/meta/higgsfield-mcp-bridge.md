@@ -207,7 +207,8 @@ quality settings merely to gain concurrency.
 0. **TTS-first duration (panda-video)** — generate and probe all scene VO **before** preflight,
    then call `lib.i2v_duration.allocate_scene_durations` once for the full timeline. Set each
    `duration` from its allocation (allowed values from `models_explore`) so scene lengths follow
-   audio while the final cut remains within ±5% of the requested total. Preserve scene-local
+   audio, with the target set to `ceil(sum of measured VO seconds)` (the requested total is a
+   pacing weight only). Preserve scene-local
    audio offsets. See `skills/pipelines/panda-video/asset-director.md`.
 
 ### Audio lip-sync (panda-video)

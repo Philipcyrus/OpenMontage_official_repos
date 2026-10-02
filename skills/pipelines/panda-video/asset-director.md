@@ -31,7 +31,7 @@ brand + character consistency, recording everything in `asset_manifest`. Phases:
 | Prior artifacts | `scene_plan`, `script` | What to generate + narration text |
 | Style | `styles/panda.yaml` | On-brand look (image prompt prefix, negatives, anchors) |
 | Elements | `config/panda-elements.json` | Panda/customer Element ids + narration voice ids |
-| Helper | `lib/i2v_duration.py` (`allocate_scene_durations`) | Allocate unequal audio-driven scene durations within the requested total band |
+| Helper | `lib/i2v_duration.py` (`allocate_scene_durations`) | Allocate unequal audio-driven scene durations around the measured-dialogue target |
 | Tools | `image_selector`, `higgsfield_mcp_video`, `seedance_video`, `elevenlabs_tts`, `audio_probe`, `music_gen` | Generation + VO duration probe |
 
 ## Process
@@ -168,8 +168,8 @@ generate motion clips before the VO that drives their length (and mouths) exists
    (`audio_probe` / `ffprobe`) and calculate its scene-local start/end, including deliberate
    leading silence. After ALL VO is measured, call
    `lib.i2v_duration.allocate_scene_durations` once for the full scene set with:
-   - the user's requested total (`script.total_duration_seconds`, falling back to the final
-     `scene_plan` end);
+   - `target_duration_seconds=ceil(sum of measured VO seconds)` — measured dialogue is the
+     runtime; the user's requested total is not a candidate;
    - `tolerance_fraction=0.05`;
    - approved scene-plan durations as pacing weights, not fixed equal slots;
    - measured scene-local audio bounds and the duration list from `models_explore`; and
@@ -179,14 +179,28 @@ generate motion clips before the VO that drives their length (and mouths) exists
    `fixed_i2v_duration`; the allocator may assign it a bounded post-speech tail hold but must not
    regenerate it just to consume slack. Persist the complete returned object unchanged as
    `asset_manifest.metadata.timeline_contract`; keep `vo_duration_map` for backward compatibility.
-   The allocator selects unequal supported i2v durations that keep the final cut within ±5% of
-   the requested total, favoring useful visual breathing room over equal per-shot padding.
 
-   If a scene's audio ends after the provider's maximum duration, retry that TTS once at the
-   smallest speed increase needed (never above the existing 1.15 cap), re-probe, then allocate
-   again. If it still cannot fit, do not submit that i2v or silently shorten/extend the master:
-   checkpoint for `approve_assets` with `timeline_contract.status="pacing_revision_required"`
-   and a question naming the scene/copy that needs revision.
+   **Dialogue duration priority:** measured ElevenLabs VO is the runtime. Pass
+   `target_duration_seconds=ceil(sum of measured VO seconds)` — never
+   `max(requested_total, …)` and never a previous `timeline_contract.minimum_duration_seconds`.
+   The requested total and scene-plan durations are pacing weights only. When the target differs
+   from the brief, append a `decision_log` entry (`category: "pacing"`, `subject:
+   "dialogue_priority"`) and continue i2v — do **not** stop at any gate and do **not** reopen
+   `approve_stills`, whether speech runs longer or shorter than the brief. If allocate returns
+   `pacing_revision_required` only because each scene was rounded up to a supported clip length,
+   re-allocate once with `target_duration_seconds=<that result's output_duration_seconds>` and
+   continue. The allocator still selects unequal supported i2v durations, favoring useful visual
+   breathing room over equal per-shot padding.
+
+   The **only** pacing stop is provider max: if a scene's audio ends after the provider's
+   maximum duration (`DurationAllocationError`), retry that TTS once at the smallest speed
+   increase needed (never above the existing 1.15 cap), re-probe, then allocate again. If it
+   still cannot fit, do not submit any i2v or silently shorten the master: write
+   `timeline_contract.status="pacing_revision_required"` with
+   `provider_max_scenes=[<scene ids>]`, checkpoint `approve_assets` (`status="awaiting_human"`,
+   **no** `partial_progress.phase="stills"`), and STOP. The launcher asks the human one question
+   for those scenes: approve a minimal narration trim (prices, plan names and the CTA verbatim)
+   or revise with replacement wording.
 3. **Motion clips:** animate remaining approved stills via Higgsfield MCP. Reuse the approved
    sample’s approach when it matches; **lipsync-eligible shots always use `seedance_2_0`** even
    if the sample was HOLD-only.
@@ -300,8 +314,8 @@ only the flagged shots (`response.shots`) — if a speaking shot’s VO changes,
 re-snap `duration` (and re-upload `audio_references`) before re-running i2v.
 
 Approving GATE 4 confirms the audio-driven `timeline_contract`, including unequal scene lengths.
-Its output must be within ±5% of the requested total unless the human explicitly approves a
-duration exception recorded in `decision_log`. Compose still **lays the same ElevenLabs VO**
+Its output must be within ±5% of `timeline_contract.target_duration_seconds` (the measured
+dialogue length, logged as `dialogue_priority` when it differs from the brief). Compose still **lays the same ElevenLabs VO**
 under lipsync clips (`generate_audio:false` → silent clip; mouths already match that VO).
 
 ### 6. Character and voice consistency

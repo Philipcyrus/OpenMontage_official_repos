@@ -71,8 +71,10 @@ Rules (upstream governance — do NOT break):
    `remotion`/`hyperframes`, call
    `video_compose` with the matching runtime; pass `proposal_packet` if present so the tool's
    swap-detection runs.
-2. **Verify** the output exists and passes ffprobe (duration within the requested ±5% band,
-   resolution matching the job canvas, has audio). A target-duration validation failure is not a warning: correct the
+2. **Verify** the output exists and passes ffprobe (duration within ±5% of
+   `timeline_contract.target_duration_seconds` — which may be longer or shorter than the original
+   brief under dialogue-duration priority — resolution matching the job canvas, has audio). A target-duration
+   validation failure is not a warning: correct the
    scene/transition math and render again before writing the final checkpoint.
 3. **Write `render_report` and `final_review`.** Copy the asset manifest QA summary into optional
    `final_review.checks.lip_sync_check`, including reviewed scenes, applied offsets, affected scene
@@ -86,7 +88,8 @@ Rules (upstream governance — do NOT break):
 ## Success criteria
 - Output matches `edit_decisions.render_runtime` (no silent swap)
 - CLEAN/unbranded master; `final.mp4` exists and passes ffprobe at the job canvas resolution
-- Final duration is within `timeline_contract`'s requested ±5% band
+- Final duration is within ±5% of `timeline_contract.target_duration_seconds` (dialogue-priority
+  targets may be longer or shorter than the original brief)
 - Scene durations are unequal when audio pacing calls for it; no active lip-synced speech is
   padded, trimmed, or retimed
 - Every unresolved lip-sync result names its scene at approve_final; no hidden pass and no loop

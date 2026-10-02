@@ -99,9 +99,10 @@ If the video is narrated, the narration MUST fit the runtime:
 3. Budget **2.0–2.5 words/sec** (calm/reassuring) or **2.5–3.0 words/sec** (energetic).
 4. Allocate words per scene proportional to its seconds; keep opening/closing scenes light.
 Validate: total words within budget; no scene's narration overflows its slot. (Word budget is a
-**prior** only. In assets, measured ElevenLabs duration drives the full-scene allocation while
-the requested total stays within ±5% — see TTS-first in `asset-director.md`. A large overrun
-after TTS requires the bounded speed retry or a pacing revision; do not expect prompt-only lip sync.)
+**prior** only. In assets, measured ElevenLabs duration sets the runtime and the requested total
+is only a pacing weight — see TTS-first in `asset-director.md`. A scene whose VO exceeds the
+provider's longest clip after TTS requires the bounded speed retry or a narration trim; do not
+expect prompt-only lip sync.)
 
 ### 7. Declare `required_assets` per scene
 For each scene that needs a still, list **exactly one** `{type: "image", description: "...",

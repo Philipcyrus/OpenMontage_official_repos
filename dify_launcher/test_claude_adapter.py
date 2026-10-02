@@ -79,6 +79,8 @@ assert "AUDIO LIPSYNC — ON" in _stills_on
 assert "lipsync_qa" in _stills_on
 assert "allocate_scene_durations" in _stills_on
 assert "tolerance_fraction=0.05" in _stills_on
+assert "PACING PRIORITY" in _stills_on
+assert "ElevenLabs dialogue" in _stills_on
 assert "timeline_contract" in _stills_on
 assert "only that scene once" in _stills_on
 assert "attempt 3" in _stills_on
@@ -552,6 +554,106 @@ assert "stills" in (st.get("question") or "").lower()
 assert "clips + audio" not in (st.get("question") or "")
 print("[ok] _sync stills-only no phase → approve_stills + storyboard")
 
+# 3c2b) stills-only + narration/timeline pacing hold → approve_assets (no stills backfill)
+# job_a83d0af8347c regression: post-TTS pacing_revision_required must not remap to storyboard.
+from dify_launcher.runner import (
+    _past_stills_assets_progress as _psp,
+    _resolve_assets_gate as _rag,
+    _dialogue_priority_target as _dpt,
+    _is_preclip_pacing_hold as _iph,
+)
+_pacing_q = (
+    "Full-timeline pacing conflict (decision d-004): measured VO sums to 18.29s vs "
+    "requested 15s +/-5%. Trim s2/s3 or approve extending to ~19s."
+)
+_pacing_manif = {
+    "version": "1.0",
+    "assets": [
+        {"id": "s1", "type": "image", "path": "assets/images/s1.png"},
+        {"id": "vo-s1", "type": "narration", "path": "assets/audio/vo-s1.mp3",
+         "duration_seconds": 4.0},
+    ],
+    "metadata": {
+        "timeline_contract": {
+            "version": "1.0",
+            "target_duration_seconds": 15.0,
+            "output_duration_seconds": 19.0,
+            "status": "pacing_revision_required",
+            "within_target_band": False,
+        },
+        "vo_duration_map": {"s1": 4.0, "s2": 8.49, "s3": 5.8},
+    },
+}
+assert _psp({"asset_manifest": _pacing_manif})
+assert not _psp({"stills": ["s1.png"]})
+assert _rag(None, {"stills": ["s1.png"]}, None) == "approve_stills"
+assert _rag(None, {"stills": ["s1.png"], "asset_manifest": _pacing_manif}) == "approve_assets"
+assert _rag("stills", {"stills": ["s1.png"], "asset_manifest": _pacing_manif}) == "approve_assets"
+assert _rag("stills", {"stills": ["s1.png"]}, None) == "approve_stills"
+# dialogue priority: 4+8.49+5.8=18.29 → ceil 19 (beats brief 15)
+assert _dpt({"asset_manifest": _pacing_manif}) == 19.0
+assert _iph({"stills": ["s1.png"], "asset_manifest": _pacing_manif})
+assert not _iph({"stills": ["s1.png"], "clips": ["s1.mp4"],
+                 "asset_manifest": _pacing_manif})
+print("[ok] _past_stills_assets_progress / _resolve_assets_gate pacing vs thin stills")
+print("[ok] _dialogue_priority_target / _is_preclip_pacing_hold")
+
+JOBPAC = "jPacingHoldNoClips"
+projpac = run._projects_dir / JOBPAC
+(projpac / "assets" / "images").mkdir(parents=True, exist_ok=True)
+(projpac / "artifacts").mkdir(parents=True, exist_ok=True)
+_Image.new("RGB", (40, 40), (11, 11, 11)).save(projpac / "assets" / "images" / "s1.png")
+_bf_pac = []
+_real_write_pac = cp.write_checkpoint
+
+def _capture_pac(*a, **kw):
+    _bf_pac.append(kw.get("partial_progress"))
+    return _real_write_pac(*a, **kw)
+
+cp.write_checkpoint = _capture_pac  # type: ignore[method-assign]
+_fake_latest.cp = {
+    "stage": "assets", "status": "awaiting_human",
+    "question": _pacing_q,
+    "partial_progress": None,
+    "artifacts": {"asset_manifest": _pacing_manif},
+    "pipeline_type": "panda-video",
+}
+st = run._sync({"job_id": JOBPAC, "pipeline": "panda-video"})
+cp.write_checkpoint = _real_write_pac  # type: ignore[method-assign]
+assert st["gate"] == "approve_assets", st
+_pq = st.get("question") or ""
+assert "~19s" in _pq and "no video has been generated" in _pq, _pq
+assert "Approve the stills" not in _pq and "clips + audio" not in _pq, _pq
+assert "Trim s2/s3" not in _pq, "agent brief-vs-TTS options must not reach the user"
+assert not any(
+    isinstance(pp, dict) and pp.get("phase") == "stills" for pp in _bf_pac
+), _bf_pac
+# stale phase=stills + narration must also heal to approve_assets (no backfill wipe)
+_bf_pac2 = []
+_real_write_pac2 = cp.write_checkpoint
+
+def _capture_pac2(*a, **kw):
+    _bf_pac2.append(kw.get("partial_progress"))
+    return _real_write_pac2(*a, **kw)
+
+cp.write_checkpoint = _capture_pac2  # type: ignore[method-assign]
+_fake_latest.cp = {
+    "stage": "assets", "status": "awaiting_human",
+    "question": _pacing_q,
+    "partial_progress": {"phase": "stills"},
+    "artifacts": {"asset_manifest": _pacing_manif},
+    "pipeline_type": "panda-video",
+}
+st = run._sync({"job_id": JOBPAC, "pipeline": "panda-video"})
+cp.write_checkpoint = _real_write_pac2  # type: ignore[method-assign]
+assert st["gate"] == "approve_assets", st
+assert "Approve the stills" not in (st.get("question") or "")
+assert "~19s" in (st.get("question") or "")
+assert not any(
+    isinstance(pp, dict) and pp.get("phase") == "stills" for pp in _bf_pac2
+), _bf_pac2
+print("[ok] _sync pacing hold (stills+narration, no clips) → approve_assets")
+
 # 3c3) metadata.partial_progress.phase=stills (agent nest mistake) → approve_stills
 _fake_latest.cp = {"stage": "assets", "status": "awaiting_human", "artifacts": {},
                    "metadata": {"partial_progress": {"phase": "stills", "hero_scene_id": "scene-3"}},
@@ -955,6 +1057,204 @@ run._approve_stage = _real_approve_aa  # type: ignore[method-assign]
 assert _final_gate_calls, "approve_assets must call _run_until_final_gate"
 assert st_aa["gate"] == "approve_final"
 print("[ok] approve_assets resume uses _run_until_final_gate")
+
+# 4g2) approve_assets with pre-clip pacing hold → assets_media (not final gate);
+# target from ElevenLabs VO sum (dialogue priority), not brief.
+_aa_pac_labels = []
+_aa_pac_prompts = []
+_real_run_aap = run._run_agent
+_real_until_aap = run._run_until_assets_gate
+_real_final_aap = run._run_until_final_gate
+_final_aap_calls = []
+
+def _until_aap(state, label="assets"):
+    _aa_pac_labels.append(f"until:{label}")
+    return {**state, "status": "awaiting_human", "gate": "approve_assets",
+            "stage": "assets", "question": "Approve the generated media",
+            "artifacts": {**(state.get("artifacts") or {}), "clips": ["s1.mp4"]}}
+
+run._run_agent = (lambda prompt, job_id="", label="":
+                  (_aa_pac_labels.append(label),
+                   _aa_pac_prompts.append(prompt)))  # type: ignore[method-assign]
+run._run_until_assets_gate = _until_aap  # type: ignore[method-assign]
+run._run_until_final_gate = (lambda st: (_final_aap_calls.append(1), st)[1]
+                            )  # type: ignore[method-assign]
+_pac_arts = {
+    "stills": ["s1.png"],
+    "asset_manifest": {
+        "version": "1.0",
+        "assets": [{"id": "vo", "type": "narration", "path": "a.mp3",
+                    "duration_seconds": 18.29}],
+        "metadata": {
+            "vo_duration_map": {"s1": 4.0, "s2": 8.49, "s3": 5.8},
+            "timeline_contract": {
+                "status": "pacing_revision_required",
+                "target_duration_seconds": 15.0,
+                "output_duration_seconds": 19.0,
+                "within_target_band": False,
+            },
+        },
+    },
+}
+st_pac = run.resume(
+    {"job_id": "jPac", "gate": "approve_assets", "status": "awaiting_human",
+     "pipeline": "panda-video", "options": {}, "artifacts": _pac_arts},
+    {"decision": "approve", "answer": "whatever"},
+)
+run._run_agent = _real_run_aap  # type: ignore[method-assign]
+run._run_until_assets_gate = _real_until_aap  # type: ignore[method-assign]
+run._run_until_final_gate = _real_final_aap  # type: ignore[method-assign]
+assert not _final_aap_calls, "pre-clip pacing approve must NOT call _run_until_final_gate"
+assert "assets_media" in _aa_pac_labels, _aa_pac_labels
+assert _aa_pac_prompts, "expected pacing-resolved prompt"
+_pac_prompt = _aa_pac_prompts[0]
+assert "dialogue duration" in _pac_prompt.lower() or "PACING PRIORITY" in _pac_prompt, (
+    _pac_prompt[:300])
+assert "target_duration_seconds=19" in _pac_prompt, _pac_prompt[:400]
+assert "approve_stills" in _pac_prompt.lower()  # must say do NOT reopen
+assert st_pac.get("gate") == "approve_assets"
+print("[ok] approve_assets pre-clip pacing hold resumes assets_media (dialogue priority)")
+
+# 4g3) _run_until_assets_gate auto-resolves pre-clip pacing hold (no human gate loop)
+_auto_labels = []
+_auto_prompts = []
+_real_run_auto = run._run_agent
+_real_sync_auto = run._sync
+_auto_sync_n = {"n": 0}
+
+def _sync_auto(state):
+    _auto_sync_n["n"] += 1
+    if _auto_sync_n["n"] == 1:
+        return {**state, "status": "awaiting_human", "gate": "approve_assets",
+                "stage": "assets", "artifacts": _pac_arts,
+                "question": _pacing_q}
+    return {**state, "status": "awaiting_human", "gate": "approve_assets",
+            "stage": "assets",
+            "artifacts": {**_pac_arts, "clips": ["s1.mp4"]},
+            "question": "Approve the generated media"}
+
+run._run_agent = (lambda prompt, job_id="", label="":
+                  (_auto_labels.append(label),
+                   _auto_prompts.append(prompt)))  # type: ignore[method-assign]
+run._run_agent  # keep mypy quiet
+run._sync = _sync_auto  # type: ignore[method-assign]
+st_auto = run._run_until_assets_gate(
+    {"job_id": "jPacAuto", "pipeline": "panda-video", "options": {},
+     "artifacts": _pac_arts},
+    label="assets_media")
+run._run_agent = _real_run_auto  # type: ignore[method-assign]
+run._sync = _real_sync_auto  # type: ignore[method-assign]
+assert any("pacing_auto" in lab for lab in _auto_labels), _auto_labels
+assert any("dialogue duration" in p.lower() or "PACING PRIORITY" in p
+           for p in _auto_prompts), (_auto_prompts[0][:240] if _auto_prompts else None)
+assert st_auto.get("artifacts", {}).get("clips"), "auto-resolve must continue past pacing hold"
+print("[ok] _run_until_assets_gate auto-resolves pre-clip pacing hold")
+
+# 4g4) job_4256806ee093: 38s brief, ~29.3s VO, 15s clip cap. Measured TTS is the runtime —
+# target 30 (not 37 from the 36.1s band floor), no stills gate, no brief-vs-TTS question.
+from dify_launcher.runner import (
+    _provider_max_scenes as _pms,
+    _question_for_gate as _qfg,
+)
+_short_arts = {
+    "stills": ["sc1.png", "sc2_hero.png"],
+    "asset_manifest": {
+        "version": "1.0",
+        "assets": [
+            {"id": "sc1_still", "type": "image", "path": "assets/images/sc1.png"},
+            {"id": "vo_s1", "type": "narration", "path": "a.mp3", "duration_seconds": 14.89},
+            {"id": "vo_s2", "type": "narration", "path": "b.mp3", "duration_seconds": 14.393},
+        ],
+        "metadata": {
+            "vo_duration_map": {"sc1": 14.89, "sc2": 14.393},
+            "timeline_contract": {
+                "target_duration_seconds": 38.0,
+                "minimum_duration_seconds": 36.1,
+                "output_duration_seconds": 30.0,
+                "status": "pacing_revision_required",
+                "within_target_band": False,
+                "scenes": [
+                    {"scene_id": "sc1", "audio_end_seconds": 14.89, "i2v_duration": 15},
+                    {"scene_id": "sc2", "audio_end_seconds": 14.393, "i2v_duration": 15},
+                ],
+            },
+        },
+    },
+}
+assert _dpt(_short_arts) == 30.0, _dpt(_short_arts)
+assert _pms(_short_arts) == []
+assert _rag("stills", _short_arts) == "approve_assets"
+_short_q = _qfg("approve_assets", artifacts=_short_arts)
+assert "~30s" in _short_q and "38" not in _short_q, _short_q
+assert "Approve the stills" not in _short_q and "clips + audio" not in _short_q, _short_q
+_short_prompt = run._assets_pacing_resolved_prompt(
+    "jShort", {}, {"decision": "approve"}, state={"artifacts": _short_arts})
+assert "target_duration_seconds=30" in _short_prompt, _short_prompt[:500]
+assert "target_duration_seconds=37" not in _short_prompt
+assert "dialogue_priority" in _short_prompt
+print("[ok] measured TTS target (30s) beats 38s brief and band floor; pacing question only")
+
+# 4g5) provider-max hold: one scene's VO longer than the longest clip → human gate, no auto loop
+_over_arts = _json.loads(_json.dumps(_short_arts))
+_over_tc = _over_arts["asset_manifest"]["metadata"]["timeline_contract"]
+_over_tc["provider_max_scenes"] = ["sc1"]
+assert _pms(_over_arts) == ["sc1"]
+_over_q = _qfg("approve_assets", artifacts=_over_arts)
+assert "sc1" in _over_q and "trim" in _over_q, _over_q
+assert "Approve the stills" not in _over_q and "clips + audio" not in _over_q, _over_q
+# audio past its allocated clip also counts as provider max
+_ov2 = _json.loads(_json.dumps(_short_arts))
+_ov2["asset_manifest"]["metadata"]["timeline_contract"]["scenes"][1]["audio_end_seconds"] = 16.0
+assert _pms(_ov2) == ["sc2"]
+
+_pm_labels = []
+_real_run_pm = run._run_agent
+_real_sync_pm = run._sync
+run._run_agent = (lambda prompt, job_id="", label="":
+                  _pm_labels.append(label))  # type: ignore[method-assign]
+run._sync = (lambda state: {**state, "status": "awaiting_human", "gate": "approve_assets",
+                            "stage": "assets", "artifacts": _over_arts,
+                            "question": _over_q})  # type: ignore[method-assign]
+st_pm = run._run_until_assets_gate(
+    {"job_id": "jPM", "pipeline": "panda-video", "options": {}, "artifacts": _over_arts},
+    label="assets_media")
+run._run_agent = _real_run_pm  # type: ignore[method-assign]
+run._sync = _real_sync_pm  # type: ignore[method-assign]
+assert not _pm_labels, f"provider-max hold must not auto-continue: {_pm_labels}"
+assert st_pm["gate"] == "approve_assets"
+
+_pm_approve = run._assets_pacing_resolved_prompt(
+    "jPM", {}, {"decision": "approve"}, state={"artifacts": _over_arts})
+assert "minimal narration trim for ['sc1'] ONLY" in _pm_approve, _pm_approve[:400]
+assert "approve_stills" in _pm_approve.lower()
+_pm_revise = run._assets_pacing_resolved_prompt(
+    "jPM", {}, {"decision": "revise", "answer": "Use: One plan, both countries, $45."},
+    state={"artifacts": _over_arts})
+assert "One plan, both countries, $45." in _pm_revise
+assert "minimal narration trim" not in _pm_revise
+print("[ok] provider-max hold: human gate, approve = trim flagged scene, revise = user wording")
+
+# 4g6) revise at a pre-clip approve_assets hold continues to clips (not generic revise)
+_rv_labels = []
+_rv_prompts = []
+_real_run_rv = run._run_agent
+_real_until_rv = run._run_until_assets_gate
+run._run_agent = (lambda prompt, job_id="", label="":
+                  (_rv_labels.append(label), _rv_prompts.append(prompt)))  # type: ignore[method-assign]
+run._run_until_assets_gate = (lambda state, label="assets":
+                              {**state, "status": "awaiting_human", "gate": "approve_assets",
+                               "artifacts": {**_over_arts, "clips": ["sc1.mp4"]}}
+                              )  # type: ignore[method-assign]
+st_rv = run.resume(
+    {"job_id": "jRV", "gate": "approve_assets", "status": "awaiting_human",
+     "pipeline": "panda-video", "options": {}, "artifacts": _over_arts},
+    {"decision": "revise", "answer": "Shorter: One plan, both countries."})
+run._run_agent = _real_run_rv  # type: ignore[method-assign]
+run._run_until_assets_gate = _real_until_rv  # type: ignore[method-assign]
+assert _rv_labels == ["assets_media"], _rv_labels
+assert "One plan, both countries." in _rv_prompts[0]
+assert st_rv["artifacts"].get("clips")
+print("[ok] revise at pre-clip hold → assets_media with the user's wording")
 
 # 5) legacy gate on resume -> clear migration message (no agent run) --------
 mig = run.resume({"job_id": "jLegacy", "gate": "approve_storyboard", "artifacts": {}},

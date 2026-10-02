@@ -30,10 +30,12 @@ compose in the **same** headless leg. This is **not** the hybrid footage-led edi
 
 One primary cut per scene clip in `asset_manifest`. Read
 `asset_manifest.metadata.timeline_contract`; it is the authoritative effective timeline once
-assets are approved. It may assign unequal scene lengths, but its total must remain within ±5%
-of the user's requested duration. If its status is `pacing_revision_required` or
-`within_target_band` is false, do not compose unless the human explicitly approved a duration
-exception recorded in `decision_log`.
+assets are approved. It may assign unequal scene lengths. Stay within ±5% of
+`timeline_contract.target_duration_seconds` — the measured ElevenLabs dialogue length, which may
+be longer or shorter than the original brief (honor the logged `dialogue_priority` decision).
+If status is `pacing_revision_required` because a single scene still exceeds the provider max,
+do not compose until that copy/speed issue is resolved. A mismatch with the brief alone is never
+a blocker.
 
 For each cut, keep `in_seconds=0`, set `out_seconds` no later than the measured source media end,
 and record `source_duration_seconds`, allocated `effective_duration_seconds`, and
@@ -93,7 +95,7 @@ scene-plan section/scene timestamps plus the current effective scene start.
 
 Prefer the full-scene allocation in `asset_manifest.metadata.timeline_contract`; use legacy
 `vo_duration_map` only for old jobs that lack it. The allocator has already selected supported
-i2v durations and bounded post-speech holds while preserving the requested total-duration band.
+i2v durations and bounded post-speech holds within the band around its measured-dialogue target.
 Mute native clip AAC and lay the ElevenLabs bed as today — do not keep Higgsfield native audio.
 **AUDIO LIPSYNC clips**
 (Seedance with `generate_audio:false`, noted in `generation_summary` / `metadata.lip_sync_qa`)
@@ -124,6 +126,7 @@ clips here.
   immutable scene-local offset (and `speaker` when multi-voice)
 - Only the scene allocator and QA-validated offset alter a narration's global timestamp; its
   relationship to the speaking clip remains unchanged
-- Effective timeline stays within ±5% of the requested duration and no hold covers active speech
+- Effective timeline stays within ±5% of `timeline_contract.target_duration_seconds` (may be
+  longer or shorter than the original brief under dialogue-duration priority) and no hold covers active speech
 - Native clip audio muted in the edit plan; frame pre-conform noted for compose
 - Same headless turn reaches compose `awaiting_human` — never a bare question exit

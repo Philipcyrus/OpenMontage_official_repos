@@ -126,15 +126,208 @@ def _stills_only_media(arts: dict[str, Any]) -> bool:
     return bool(arts.get("stills")) and not arts.get("clips") and not arts.get("final")
 
 
-def _resolve_assets_gate(phase: Optional[str], arts: dict[str, Any]) -> str:
-    """Map assets phase (+ stills-only inference) to a launcher gate."""
+def _asset_manifest_from(arts: Optional[dict[str, Any]] = None,
+                         latest: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    """Pull asset_manifest from mirrored arts or the raw checkpoint artifacts."""
+    for blob in (arts, (latest or {}).get("artifacts") if isinstance(latest, dict) else None):
+        if not isinstance(blob, dict):
+            continue
+        manif = blob.get("asset_manifest") if isinstance(blob.get("asset_manifest"), dict) else {}
+        if manif:
+            return manif
+        raw = blob.get("_checkpoint_artifacts")
+        if isinstance(raw, dict) and isinstance(raw.get("asset_manifest"), dict):
+            return raw["asset_manifest"]
+    return {}
+
+
+def _past_stills_assets_progress(arts: Optional[dict[str, Any]] = None,
+                                 latest: Optional[dict[str, Any]] = None) -> bool:
+    """True once post-stills media work has started (TTS / timeline), even with no clips yet.
+
+    job_a83d0af8347c: agent correctly cleared partial_progress.phase for a GATE 4 pacing hold
+    (stills on disk, narration + timeline_contract, no clips). Blind stills-only inference then
+    remapped that pause to approve_stills and backfilled phase=stills, wiping the pacing
+    question. Narration / timeline_contract / vo_duration_map mean we are past the storyboard
+    gate.
+    """
+    manif = _asset_manifest_from(arts, latest)
+    if not manif:
+        return False
+    assets = manif.get("assets") if isinstance(manif.get("assets"), list) else []
+    for row in assets:
+        if isinstance(row, dict) and str(row.get("type") or "").lower() in (
+                "narration", "audio", "voiceover", "vo"):
+            return True
+    meta = manif.get("metadata") if isinstance(manif.get("metadata"), dict) else {}
+    if isinstance(meta.get("timeline_contract"), dict):
+        return True
+    if isinstance(meta.get("vo_duration_map"), dict) and meta["vo_duration_map"]:
+        return True
+    return False
+
+
+def _dialogue_vo_seconds_sum(arts: Optional[dict[str, Any]] = None,
+                             latest: Optional[dict[str, Any]] = None) -> Optional[float]:
+    """Sum measured ElevenLabs VO seconds from vo_duration_map or narration asset rows."""
+    manif = _asset_manifest_from(arts, latest)
+    if not manif:
+        return None
+    meta = manif.get("metadata") if isinstance(manif.get("metadata"), dict) else {}
+    vo_map = meta.get("vo_duration_map") if isinstance(meta.get("vo_duration_map"), dict) else {}
+    total = 0.0
+    n = 0
+    for value in vo_map.values():
+        try:
+            total += float(value)
+            n += 1
+        except (TypeError, ValueError):
+            continue
+    if n:
+        return total
+    assets = manif.get("assets") if isinstance(manif.get("assets"), list) else []
+    for row in assets:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("type") or "").lower() not in ("narration", "audio", "voiceover", "vo"):
+            continue
+        try:
+            total += float(row.get("duration_seconds"))
+            n += 1
+        except (TypeError, ValueError):
+            continue
+    return total if n else None
+
+
+def _dialogue_priority_target(arts: Optional[dict[str, Any]] = None,
+                              latest: Optional[dict[str, Any]] = None) -> Optional[float]:
+    """Timeline target = ceil(measured ElevenLabs VO sum). Ceil so 18.29s → 19s.
+
+    The brief / scene-plan total and the allocator band floor (minimum_duration_seconds) are
+    NOT candidates: job_4256806ee093 had ~29.3s of VO against a 38s brief and a 15s-per-clip
+    cap; folding in the 36.1s floor produced an unreachable 37s target and a pacing loop.
+    """
+    vo_sum = _dialogue_vo_seconds_sum(arts, latest)
+    if vo_sum is None or vo_sum <= 0:
+        return None
+    return float(math.ceil(vo_sum))
+
+
+def _provider_max_scenes(arts: Optional[dict[str, Any]] = None,
+                         latest: Optional[dict[str, Any]] = None) -> list[str]:
+    """Scene ids whose speech still does not fit the provider's longest clip.
+
+    Explicit ``timeline_contract.provider_max_scenes`` (written by the agent when
+    allocate_scene_durations raises DurationAllocationError), plus any allocated scene whose
+    audio ends after its i2v_duration.
+    """
+    manif = _asset_manifest_from(arts, latest)
+    meta = manif.get("metadata") if isinstance(manif.get("metadata"), dict) else {}
+    tc = meta.get("timeline_contract") if isinstance(meta.get("timeline_contract"), dict) else {}
+    found: list[str] = []
+    explicit = tc.get("provider_max_scenes")
+    if isinstance(explicit, list):
+        found.extend(str(s) for s in explicit if str(s).strip())
+    scenes = tc.get("scenes") if isinstance(tc.get("scenes"), list) else []
+    for row in scenes:
+        if not isinstance(row, dict):
+            continue
+        try:
+            audio_end = float(row.get("audio_end_seconds"))
+            i2v = float(row.get("i2v_duration"))
+        except (TypeError, ValueError):
+            continue
+        sid = str(row.get("scene_id") or "").strip()
+        if sid and audio_end > i2v + 1e-3 and sid not in found:
+            found.append(sid)
+    return found
+
+
+def _is_preclip_pacing_hold(arts: Optional[dict[str, Any]] = None,
+                            latest: Optional[dict[str, Any]] = None) -> bool:
+    """True when GATE 4 paused pre-clip solely for a timeline/duration conflict (no clips yet)."""
+    blob = arts if isinstance(arts, dict) else {}
+    if not _stills_only_media(blob) or not _past_stills_assets_progress(blob, latest):
+        return False
+    manif = _asset_manifest_from(blob, latest)
+    meta = manif.get("metadata") if isinstance(manif.get("metadata"), dict) else {}
+    tc = meta.get("timeline_contract") if isinstance(meta.get("timeline_contract"), dict) else {}
+    if not tc:
+        return False
+    status = str(tc.get("status") or "").lower()
+    if status == "pacing_revision_required":
+        return True
+    if tc.get("within_target_band") is False:
+        return True
+    return False
+
+
+def _pacing_dialogue_priority_line() -> str:
+    """Agent instruction: measured TTS is the runtime; the brief total never opens a gate."""
+    return (
+        "PACING PRIORITY — measured ElevenLabs dialogue duration IS the runtime. After probing "
+        "VO, call allocate_scene_durations with target_duration_seconds=ceil(sum of measured VO "
+        "seconds). Do NOT use max(requested_total, …) and do NOT use a previous "
+        "timeline_contract.minimum_duration_seconds; the user's requested total and scene-plan "
+        "durations are pacing weights only (planned_duration_seconds). If that target differs "
+        "from the brief, append a decision_log entry (category 'pacing', subject "
+        "'dialogue_priority') and continue i2v — never stop at a gate for it and never reopen "
+        "approve_stills. If allocate returns pacing_revision_required only because each scene "
+        "was rounded up to a supported clip length, re-allocate ONCE with "
+        "target_duration_seconds=<that result's output_duration_seconds> and continue. The ONLY "
+        "pacing stop is DurationAllocationError: a scene's VO still ends after the provider's "
+        "longest clip after one TTS speed retry (≤1.15). Then write timeline_contract with "
+        "status='pacing_revision_required' and provider_max_scenes=[<scene ids>], checkpoint "
+        "status='awaiting_human' WITHOUT partial_progress.phase='stills', and STOP."
+    )
+
+
+def _is_preclip_hold(arts: Optional[dict[str, Any]] = None,
+                     latest: Optional[dict[str, Any]] = None) -> bool:
+    """GATE 4 pause after TTS/timeline but before any clip exists."""
+    blob = arts if isinstance(arts, dict) else {}
+    return _stills_only_media(blob) and _past_stills_assets_progress(blob, latest)
+
+
+def _preclip_pacing_question(arts: Optional[dict[str, Any]] = None,
+                             latest: Optional[dict[str, Any]] = None) -> str:
+    """The single human question for a pre-clip pacing hold (no stills / clips wording)."""
+    over = _provider_max_scenes(arts, latest)
+    if over:
+        names = ", ".join(over)
+        return (
+            f"Narration for scene(s) {names} is still longer than the video model's longest "
+            "clip after speeding it up, so no video has been generated yet. Approve to let the "
+            "agent trim only that narration to fit (prices, plan names and the closing line "
+            "stay word-for-word), or revise with the shorter wording you want for those scenes."
+        )
+    target = _dialogue_priority_target(arts, latest)
+    length = f" (~{target:g}s)" if target is not None else ""
+    return (
+        f"Narration is ready and sets the video length{length}; no video has been generated "
+        "yet. Approve to generate the clips at that length, or revise with a note on the "
+        "narration."
+    )
+
+
+def _resolve_assets_gate(phase: Optional[str], arts: dict[str, Any],
+                         latest: Optional[dict[str, Any]] = None) -> str:
+    """Map assets phase (+ stills-only inference) to a launcher gate.
+
+    Explicit known phases win — except a stale ``stills`` marker after TTS/timeline
+    progress (job_a83d0af8347c backfill loop), which must surface as approve_assets.
+    Stills-only with no phase still maps to approve_stills for the thin storyboard pause.
+    """
     known = {"hero_still": "approve_hero_still",
              "stills": "approve_stills",
              "motion_sample": "approve_motion_sample",
              "budget_hold": "budget_exceeded"}
+    past = _past_stills_assets_progress(arts, latest)
+    if phase == "stills" and past:
+        return "approve_assets"
     if phase in known:
         return known[phase]
-    if _stills_only_media(arts):
+    if _stills_only_media(arts) and not past:
         return "approve_stills"
     return "approve_assets"
 
@@ -204,6 +397,8 @@ def _question_for_gate(gate: Optional[str], *, stage: Optional[str] = None,
     if gate == "approve_motion_sample":
         return ("Approve the MOTION on this one sample clip (camera, animation, how the panda "
                 "moves) before all clips are generated — or request a revision of the motion.")
+    if gate == "approve_assets" and _is_preclip_hold(artifacts):
+        return _preclip_pacing_question(artifacts)
     if gate == "approve_assets":
         return (
             "Approve the generated media (clips + audio), or request revision of "
@@ -1717,6 +1912,20 @@ class ClaudeCodeRunner(Runner):
         # A single continue leg that asks a question and exits leaves status=running/gate=null
         # (Dify "Agent Door sent no reply"). Cap retries then fail clearly — same pattern as
         # _run_after_hero_approved.
+        # Exception: GATE 4 reached as a pre-clip pacing hold (stills + TTS/timeline, no clips).
+        # Approving there means "continue PHASE 3 / generate i2v" (often a duration exception),
+        # not complete assets → edit/compose (job_a83d0af8347c).
+        # Revising that pre-clip hold applies the note and still continues to clips, instead
+        # of the generic revise leg that stops again with no clips.
+        if gate == "approve_assets" and decision in ("approve", "revise"):
+            arts = state.get("artifacts") or {}
+            if (_stills_only_media(arts)
+                    and _past_stills_assets_progress(arts)):
+                self._run_agent(
+                    self._assets_pacing_resolved_prompt(
+                        job_id, state.get("options"), response or {}, state=state),
+                    job_id, "assets_media")
+                return self._run_until_assets_gate(state, label="assets_media")
         if gate == "approve_assets" and decision == "approve":
             self._approve_stage(job_id, stage, _pipeline_of(state))
             return self._run_until_final_gate(state)
@@ -1883,10 +2092,32 @@ class ClaudeCodeRunner(Runner):
         Agents often exit early while Higgsfield motion jobs render. Without this loop,
         _sync used to mis-classify stills-only in_progress as approve_stills. Cap via
         CLAUDE_IN_PROGRESS_MAX (default 8) so a stuck render cannot spin forever.
+
+        Pre-clip pacing holds where every scene fits the provider are auto-resolved at the
+        measured-TTS target — never surface as a human gate and never remapped to stills. Only
+        a provider-max hold (a scene's VO longer than the longest clip) reaches the human.
         """
         job_id = state["job_id"]
         max_extra = int(os.environ.get("CLAUDE_IN_PROGRESS_MAX", "8"))
+        max_pacing = int(os.environ.get("CLAUDE_PACING_AUTO_MAX", "2"))
         state = self._sync(state)
+        pacing_n = 0
+        while (state.get("status") == "awaiting_human"
+               and state.get("gate") == "approve_assets"
+               and _is_preclip_pacing_hold(state.get("artifacts") or {})
+               and not _provider_max_scenes(state.get("artifacts") or {})
+               and pacing_n < max_pacing):
+            pacing_n += 1
+            self._run_agent(
+                self._assets_pacing_resolved_prompt(
+                    job_id, state.get("options"),
+                    {"answer": (
+                        "auto: measured ElevenLabs dialogue duration is the runtime; "
+                        "do not reopen stills or any pacing gate"
+                    )},
+                    state=state),
+                job_id, f"{label}_pacing_auto_{pacing_n}")
+            state = self._sync(state)
         n = 0
         while (state.get("status") == "running" and self._assets_cp_in_progress(job_id)
                and n < max_extra):
@@ -2091,8 +2322,8 @@ class ClaudeCodeRunner(Runner):
             "narration/music markers). Do NOT regenerate stills or reopen the stills gate. "
             "TTS-FIRST: finish every missing ElevenLabs VO + audio_probe, then run the full-scene "
             "allocate_scene_durations timeline allocation before queueing remaining image_to_video. "
-            "Preserve the requested total within ±5% with unequal audio-driven scene lengths and "
-            "persist metadata.timeline_contract. Follow the AUDIO LIPSYNC line below for "
+            f"{_pacing_dialogue_priority_line()} Persist metadata.timeline_contract with unequal "
+            "audio-driven scene lengths. Follow the AUDIO LIPSYNC line below for "
             "customer/panda clips (seedance_2_0 + audio_references when on). Poll every queued "
             "Higgsfield job until complete, download clips into assets/video/, finish any remaining "
             f"music, record everything in asset_manifest. {_pair_scale_lock_line()} Then rewrite the assets checkpoint "
@@ -2124,21 +2355,26 @@ class ClaudeCodeRunner(Runner):
                 # assets pauses at: hero look-lock, stills, motion sample, CONDITIONAL budget hold,
                 # then full media. Phase may be top-level partial_progress OR nested under
                 # metadata.partial_progress / asset_manifest.metadata.stage_phase (agent mistakes).
-                # Stills-only media with no phase → approve_stills (never approve_assets).
+                # Stills-only + no phase → approve_stills UNLESS post-TTS/timeline progress exists
+                # (pacing hold must stay approve_assets — job_a83d0af8347c).
                 phase, pp = _assets_phase_from_checkpoint(latest, arts)
-                gate = _resolve_assets_gate(phase, arts)
+                gate = _resolve_assets_gate(phase, arts, latest)
                 if isinstance(pp.get("look_notes"), list):
                     state["look_notes"] = list(pp["look_notes"])
                 if pp.get("hero_scene_id"):
                     arts.setdefault("hero_scene_id", pp["hero_scene_id"])
                 # Backfill top-level partial_progress when we inferred stills and checkpoint
-                # lacked it (keeps future legs / resume honest).
+                # lacked it (keeps future legs / resume honest). Never after TTS/timeline.
                 if (gate == "approve_stills"
+                        and not _past_stills_assets_progress(arts, latest)
                         and not (isinstance(latest.get("partial_progress"), dict)
                                  and latest["partial_progress"].get("phase"))):
                     self._backfill_assets_phase(job_id, latest, "stills", pp)
                 # Thin hero/stills pause: agent omitted artifacts.stills but PNGs exist on disk.
-                if (phase in ("hero_still", "stills")
+                # Skip when post-TTS/timeline progress means this is a GATE 4 pause (stale
+                # phase=stills must not be rewritten — job_a83d0af8347c).
+                if (gate in ("approve_stills", "approve_hero_still")
+                        and phase in ("hero_still", "stills")
                         and arts.get("stills")
                         and not (isinstance(latest.get("artifacts"), dict)
                                  and latest["artifacts"].get("stills"))):
@@ -2148,8 +2384,13 @@ class ClaudeCodeRunner(Runner):
             _apply_previews(job_id, arts, gate)
             fallback_question = _question_for_gate(
                 gate, stage=stage, artifacts=arts)
-            question = self._screenshot_question(
-                state, gate, arts, _safe_checkpoint_question(latest, fallback_question))
+            # Pre-clip hold: one launcher question only — agent copy listed brief-vs-TTS
+            # options that approving cannot pick between (job_4256806ee093).
+            if gate == "approve_assets" and _is_preclip_hold(arts, latest):
+                base_question = _preclip_pacing_question(arts, latest)
+            else:
+                base_question = _safe_checkpoint_question(latest, fallback_question)
+            question = self._screenshot_question(state, gate, arts, base_question)
             state.update(status="awaiting_human", stage=stage, gate=gate,
                          question=question, artifacts=arts)
         elif status == "in_progress" or status not in ("completed",):
@@ -2167,8 +2408,10 @@ class ClaudeCodeRunner(Runner):
         else:  # completed
             # Recover skipped stills/storyboard gate after hero look-lock.
             # ONLY when status is completed — not in_progress mid-clip-render.
+            # Do not reopen stills after TTS/timeline (pacing / media already past storyboard).
             if (stage == "assets" and not _is_stills_terminal(state)
-                    and _stills_only_media(arts)):
+                    and _stills_only_media(arts)
+                    and not _past_stills_assets_progress(arts, latest)):
                 phase, pp = _assets_phase_from_checkpoint(latest, arts)
                 gate = "approve_hero_still" if phase == "hero_still" else "approve_stills"
                 if isinstance(pp.get("look_notes"), list):
@@ -2770,8 +3013,8 @@ class ClaudeCodeRunner(Runner):
                 "  PHASE 3 (media): only after the motion sample is approved, TTS-FIRST for all "
                 "remaining speaking sections, probe ALL VO, then call "
                 "lib/i2v_duration.allocate_scene_durations once for the full timeline "
-                "(requested total ±5%; unequal scene lengths; approved sample duration fixed), "
-                "THEN animate the "
+                f"({_pacing_dialogue_priority_line()} unequal scene lengths; approved sample "
+                "duration fixed), THEN animate the "
                 f"REMAINING stills ({motion_how}). Preflight all pending clips and enforce the "
                 "complete-batch budget, then submit as waves (max 4 jobs in flight; 2 after a 429), "
                 "checkpoint scene_id→job_id immediately, poll the set together, and start music "
@@ -2782,8 +3025,9 @@ class ClaudeCodeRunner(Runner):
         return hero + stills + (
             "  PHASE 3 (media): only after the stills are approved, TTS-FIRST (ElevenLabs per "
             "speaking section + audio_probe for ALL VO), then call "
-            "lib/i2v_duration.allocate_scene_durations once for the full timeline (requested "
-            "total ±5%; unequal audio-driven scene lengths), THEN animate approved stills "
+            "lib/i2v_duration.allocate_scene_durations once for the full timeline "
+            f"({_pacing_dialogue_priority_line()} unequal audio-driven scene lengths), THEN "
+            "animate approved stills "
             f"({motion_how}; duration from the allocation). Preflight all pending clips and enforce "
             "the complete-batch budget, then submit as waves (max 4 jobs in flight; 2 after "
             "a 429), checkpoint scene_id→job_id immediately, poll the set together, and start "
@@ -2941,11 +3185,14 @@ class ClaudeCodeRunner(Runner):
             "an all-top crop (not a centred cover-crop). Pass that same resolution to "
             "panda_render.\n"
             "2. Use asset_manifest.metadata.timeline_contract as the effective timeline. Scene "
-            "lengths may be unequal, but the final must remain within ±5% of the requested total. "
+            "lengths may be unequal. Honor the dialogue_priority decision in decision_log "
+            "(measured ElevenLabs VO is the runtime) — stay within ±5% of "
+            "timeline_contract.target_duration_seconds, which may be longer or shorter than the "
+            "original brief. "
             "Record each cut's source_duration_seconds, effective_duration_seconds, and bounded "
-            "post-speech tail_hold_seconds. Reject pacing_revision_required unless the human "
-            "explicitly approved a logged duration exception. Do NOT shorten locked copy, retime "
-            "lip-synced motion, or let a hold cover active speech.\n"
+            "post-speech tail_hold_seconds. Reject unresolved pacing_revision_required only when "
+            "a single scene still exceeds provider max (never for a brief mismatch). Do NOT shorten locked "
+            "copy, retime lip-synced motion, or let a hold cover active speech.\n"
             "3. Read asset_manifest.metadata.lip_sync_qa. Apply only offsets whose local re-check "
             "passed: derive the signed delta from attempt-1 expected offset and recompute affected "
             "VO start_seconds from effective_scene_start + immutable original scene-local offset. "
@@ -2974,7 +3221,8 @@ class ClaudeCodeRunner(Runner):
             "previously stopped without reaching compose's approve_final gate. Do NOT ask "
             "the human a question — decide and proceed. "
             "If edit_decisions is missing, write it now from metadata.timeline_contract "
-            "(unequal audio-driven scene lengths; requested total ±5%; bounded post-speech holds; "
+            "(unequal audio-driven scene lengths; ±5% of timeline_contract target — measured "
+            "dialogue may be longer or shorter than the original brief; bounded post-speech holds; "
             "apply only locally validated lip-sync offsets from immutable scene-local timestamps; "
             f"mute native clip audio; all-top crop to {master}). Then compose "
             f"to final.mp4 with panda_render resolution='{master}', carry unresolved lip-sync "
@@ -2989,10 +3237,10 @@ class ClaudeCodeRunner(Runner):
             f"For project_id: {job_id}, the STILLS phase of the `assets` stage is APPROVED. Do NOT "
             "mark the assets stage completed yet. TTS-FIRST for every speaking script section "
             "(ElevenLabs + VOICE CAST), probe ALL durations (audio_probe), then call "
-            "lib/i2v_duration.allocate_scene_durations once for the full timeline using the "
-            "requested total, tolerance_fraction=0.05, scene-plan weights, scene-local audio "
-            "bounds, and models_explore allowed durations. THEN animate the approved stills with "
-            "each allocated i2v_duration per the AUDIO LIPSYNC line below "
+            "lib/i2v_duration.allocate_scene_durations once for the full timeline "
+            f"({_pacing_dialogue_priority_line()} tolerance_fraction=0.05, scene-plan weights, "
+            "scene-local audio bounds, and models_explore allowed durations). THEN animate the "
+            "approved stills with each allocated i2v_duration per the AUDIO LIPSYNC line below "
             "(seedance_2_0 + audio_references for customer/panda when on; else HOLD LOCK). "
             "Preflight all pending clips and enforce the complete-batch budget before any submit; "
             "submit max 4 Higgsfield jobs in flight (2 after a 429), checkpoint every "
@@ -3005,6 +3253,69 @@ class ClaudeCodeRunner(Runner):
             + _pair_scale_lock_line() + "\n"
             + _voice_line(options or {}) + "\n" + _audio_lipsync_line(options)
             + _lip_sync_qa_line(options)
+        )
+
+    def _assets_pacing_resolved_prompt(
+        self,
+        job_id: str,
+        options: Optional[dict[str, Any]] = None,
+        response: Optional[dict[str, Any]] = None,
+        state: Optional[dict[str, Any]] = None,
+    ) -> str:
+        """Resolve a pre-clip pacing hold: measured TTS is the runtime; continue PHASE 3 i2v.
+
+        A provider-max hold (scene VO longer than the longest clip) cannot be fixed by
+        re-allocating, so approving it authorizes a minimal copy trim of only those scenes;
+        a revise answer is applied to those scenes instead.
+        """
+        resp = response or {}
+        answer = (str(resp.get("answer") or "").strip()
+                  or str(resp.get("_original_revise_answer") or "").strip())
+        arts = (state or {}).get("artifacts") if isinstance(state, dict) else None
+        arts_blob = arts if isinstance(arts, dict) else None
+        over = _provider_max_scenes(arts_blob)
+        target = _dialogue_priority_target(arts_blob)
+        target_txt = (f"target_duration_seconds={target:g}" if target is not None else
+                      "target_duration_seconds=ceil(sum of measured VO seconds)")
+        if over:
+            fix = (
+                f"The human's direction for {over}: {answer!r}. Apply it to ONLY those scenes' "
+                "narration, re-run TTS for those scenes (VOICE CAST), and re-probe."
+                if answer and resp.get("decision") == "revise" else
+                f"The human APPROVED a minimal narration trim for {over} ONLY: shorten each "
+                "flagged scene's script text just enough that its VO fits the provider's "
+                "longest clip at speed ≤1.15, keeping every price, plan name, number, and the "
+                "closing CTA verbatim. Re-run TTS for those scenes (VOICE CAST) and re-probe."
+                + (f" Note from the human: {answer!r}." if answer else "")
+            )
+            return (
+                f"For project_id: {job_id}, the pre-clip provider-max pacing hold is RESOLVED — "
+                f"do NOT loop at approve_stills or any pacing gate. {fix} Append a decision_log "
+                "entry (category 'pacing', subject 'dialogue_priority') recording the trim. Keep "
+                "every other scene's VO file. Then re-allocate with "
+                "target_duration_seconds=ceil(sum of ALL measured VO seconds) "
+                "(tolerance_fraction=0.05). THEN animate the approved stills (i2v + lipsync QA + "
+                "music) per the STILLS-approved PHASE 3 rules below, rewrite assets checkpoint "
+                "status='awaiting_human' WITHOUT partial_progress.phase='stills', and STOP for "
+                "full media approval (clips present).\n\n"
+                + self._stills_approved_prompt(job_id, options)
+            )
+        note = answer or ("auto: measured ElevenLabs dialogue duration is the runtime; "
+                          "do not reopen stills or any pacing gate")
+        return (
+            f"For project_id: {job_id}, the pre-clip pacing conflict is RESOLVED — measured "
+            f"TTS is the runtime; do NOT loop at approve_stills or any pacing gate. "
+            f"Decision: {note!r}. {_pacing_dialogue_priority_line()} "
+            f"Append a decision_log entry (category 'pacing', subject 'dialogue_priority') "
+            f"superseding any open pacing_revision_required entry, with {target_txt}. "
+            f"Re-run allocate_scene_durations with {target_txt} "
+            "(tolerance_fraction=0.05) using the EXISTING VO files on disk — do NOT "
+            "regenerate TTS unless a file is missing. Do NOT reopen approve_stills. "
+            "THEN animate the approved stills (i2v + lipsync QA + music) per the STILLS-"
+            "approved PHASE 3 rules below, rewrite assets checkpoint status='awaiting_human' "
+            "WITHOUT partial_progress.phase='stills', and STOP for full media approval "
+            f"(clips present).\n\n"
+            + self._stills_approved_prompt(job_id, options)
         )
 
     def _budget_raised_prompt(self, job_id: str, new_cap: Any) -> str:
@@ -3036,8 +3347,9 @@ class ClaudeCodeRunner(Runner):
         return (
             f"For project_id: {job_id}, the MOTION SAMPLE is APPROVED. Do NOT mark the assets stage "
             "completed yet. TTS-FIRST for remaining speaking sections (reuse sample-scene VO), "
-            "probe ALL VO, then call allocate_scene_durations once for the full requested timeline "
-            "(±5%; unequal scene lengths; fixed_i2v_duration for the approved sample), THEN animate "
+            "probe ALL VO, then call allocate_scene_durations once for the full timeline "
+            f"({_pacing_dialogue_priority_line()} unequal scene lengths; fixed_i2v_duration for "
+            "the approved sample), THEN animate "
             "the REMAINING approved stills with their allocated durations per "
             "the AUDIO LIPSYNC line below (reuse the approved sample's approach when it matches; "
             "lipsync shots stay on seedance_2_0 + audio_references). Preflight all pending clips "
