@@ -345,6 +345,15 @@ def _lip_sync_warning_suffix(artifacts: Optional[dict[str, Any]]) -> str:
         for scene_id, report in scenes.items()
         if isinstance(report, dict) and report.get("unresolved_warning")
     ]
+    subshots = qa.get("subshots") if isinstance(qa.get("subshots"), dict) else {}
+    for scene_id, lines in subshots.items():
+        if not isinstance(lines, dict):
+            continue
+        for section_id, report in lines.items():
+            if isinstance(report, dict) and report.get("unresolved_warning"):
+                speaker = report.get("speaker")
+                who = f" ({speaker})" if speaker else ""
+                affected.append(f"{scene_id}/{section_id}{who}")
     if not warnings and not affected:
         return ""
     scene_text = ", ".join(affected) if affected else "unknown"
@@ -563,29 +572,50 @@ def _ensure_audio_lipsync_default(options: Optional[dict[str, Any]],
     return opts
 
 
+_SPEECH_LANGUAGE_NAMES = {"en": "English", "zh": "Mandarin Chinese"}
+
+
 def _audio_lipsync_line(options: Optional[dict[str, Any]]) -> str:
-    """AUDIO LIPSYNC — Seedance audio_references for on-screen customer/panda (default on)."""
+    """AUDIO LIPSYNC — Seedance native speech re-voiced into the cast voice (default on)."""
     if not _audio_lipsync_enabled(options):
         return ("AUDIO LIPSYNC — OFF for this job. Keep TTS-first duration-driven i2v with HOLD "
-                "LOCK (mouth frozen) and lay ElevenLabs VO at compose. Do NOT pass "
-                "audio_references.\n")
+                "LOCK (mouth frozen) and lay ElevenLabs VO at compose. Do NOT set "
+                "generate_audio:true.\n")
+    language = _SPEECH_LANGUAGE_NAMES.get(
+        str((options or {}).get("language") or "en").strip().lower(), "English"
+    )
     return (
         "AUDIO LIPSYNC — ON (default; pass options.audio_lipsync:false to opt out). "
-        "TTS-first still mandatory. For on-screen customer/panda speaking scenes that produce "
-        "a video clip: after probing VO duration, use Higgsfield model seedance_2_0 with "
-        "medias start_image=approved still and audio_references=that scene's timing-preserving "
-        "ElevenLabs VO bed (MCP media_upload), generate_audio:false, duration from "
-        "the full-scene timeline allocation (or snap_i2v_duration for a pre-allocation motion sample). "
-        "Prompt: keep 2D + Element LOCK; animate mouth/jaw to lip-sync the attached audio; "
-        "subtle idle only — no walking, no new person, no photoreal/3D. Do NOT mouth-freeze "
-        "(drop HOLD LOCK for these shots only). Narrator-only / text_card / no-face scenes stay "
-        "HOLD or static. Multi-speaker on one clip: build one timing-preserving scene-local bed "
-        "using each section's offset relative to scene start (adelay + amix); preserve pauses "
-        "and overlaps and never join files back-to-back. At compose, move each original VO with "
-        "its allocated scene while preserving that immutable scene-local offset. If audio_references "
-        "upload/generate fails: fall back to HOLD + duration-only i2v, log in decision_log, "
-        "continue. Compose still mutes native AAC (silent when generate_audio:false) and lays "
-        "the same ElevenLabs VO bed.\n"
+        "Seedance lip-syncs only to speech it generates itself; audio_references does NOT drive "
+        "the mouth, so never attach a VO file. Narrator TTS first; then split each scene with "
+        "lib/i2v_duration.build_scene_subshots (pass each section's script `text`): every "
+        "on-screen customer/panda line is its own SPEAKING SUBSHOT, laid end to end after the "
+        "previous line's measured end (script timestamps give order, not clocks). Generate the "
+        "speaking subshots FIRST: Higgsfield model seedance_2_0, medias start_image=approved "
+        "still only, generate_audio:true, duration = the subshot's i2v_duration (native-speech "
+        "estimate). Prompt: 2D + Element LOCK, static camera; the speaker faces camera, stays in "
+        f"place and speaks right away in {language} (always name it — Seedance otherwise may "
+        "translate the line) at a brisk, natural conversational "
+        f"pace; then `<Speaker> says, in {language}: \"<line>\"` with ONLY that ONE line, followed by "
+        "'says only this one sentence, word for word, then stops talking; silence after the "
+        "line' (otherwise it ad-libs extra words), quoted as "
+        "tools.audio.elevenlabs_voice_changer.spoken_form(text, script.pronunciation_guides) "
+        "returns it (brand words respelled — Seedance spells out 'eSIM' unless it is written "
+        "'e-sim'; add a missing guide and log it); the mouth closes when the line ends; the "
+        "listener's lips stay closed; no other voices, music or sound effects. The speaking "
+        "prompt OVERRIDES the scene plan's movement and mood (no walking, turning away, nodding, "
+        "laughing or big gestures). Do NOT mouth-freeze the speaker. Right after ingest, re-voice "
+        "each clip with elevenlabs_voice_changer (voice_id = VOICE CAST id for that speaker, "
+        "expected_text = the script line, pronunciation_guides, output under "
+        "assets/audio/native/); transcript_match.ok false = fail_generation. Then rebuild each "
+        "scene's subshots with generated_i2v_duration, measured_seconds = speech_end_s and path "
+        "= the re-voiced file, run allocate_scene_durations, and only then generate fill/HOLD "
+        "clips. Narrator lines, leading silence and scene tails are closed-mouth FILLS (approved "
+        "still, or a HOLD LOCK reaction/neutral-motion clip); no clip ever speaks a narrator "
+        "line. Narrator-only / text_card / no-face scenes stay HOLD or static. If a speaking "
+        "generation fails: fall back to HOLD + that line's TTS file for that subshot, log in "
+        "decision_log, continue. Compose mutes every clip's native AAC and lays each re-voiced "
+        "line / narrator file at its own subshot; voices never overlap.\n"
     )
 
 
@@ -594,14 +624,21 @@ def _lip_sync_qa_line(options: Optional[dict[str, Any]]) -> str:
     if not _audio_lipsync_enabled(options):
         return ""
     return (
-        "LIP-SYNC QA — before approve_assets, run lipsync_qa on every audio_lipsync:true "
-        "customer/panda clip with its exact scene-local VO bed; mark narrator/HOLD clips skipped. "
-        "Review the sampled mouth frames and persist asset_manifest.metadata.lip_sync_qa. "
-        "On fail_timing, apply and locally re-check the measured edit offset without regeneration. "
-        "On fail_generation, preflight and regenerate only that scene once with the same model, "
-        "VO, still, and duration plus immediate-speaking/face-visible direction; checkpoint the "
+        "LIP-SYNC QA — before approve_assets, run lipsync_qa once per speaking subshot, with "
+        "audio_path = that speaker's own VO file (the re-voiced file elevenlabs_voice_changer "
+        "wrote for that clip) plus scene_id, section_id and speaker, and record that clip's "
+        "transcript_match; mark narrator fills/HOLD clips "
+        "skipped. Review EVERY sampled frame (they are phase-labelled) and report the tail and "
+        "listener counts too: a held grin is one mouth shape, a mouth closed through the tail "
+        "fails, and a listener with parted lips fails. Persist each report under "
+        "asset_manifest.metadata.lip_sync_qa.subshots.<scene_id>.<section_id>. "
+        "On fail_timing, apply and locally re-check the measured offset for that line only "
+        "without regeneration — never shift a sibling line, the narrator or the whole scene. "
+        "On fail_generation (including a failed transcript_match), preflight and regenerate only "
+        "that subshot once with the same model, quoted line, still, and duration plus "
+        "immediate-speaking/face-visible direction, then re-voice it; checkpoint the "
         "retry job id immediately and retain both takes. Never spend on inconclusive/tool failure, "
-        "never submit attempt 3, and never retry passing scenes. Select the better take. A second "
+        "never submit attempt 3, and never retry passing subshots. Select the better take. A second "
         "failure still reaches approve_assets with an unresolved warning.\n"
     )
 
@@ -2324,7 +2361,8 @@ class ClaudeCodeRunner(Runner):
             "allocate_scene_durations timeline allocation before queueing remaining image_to_video. "
             f"{_pacing_dialogue_priority_line()} Persist metadata.timeline_contract with unequal "
             "audio-driven scene lengths. Follow the AUDIO LIPSYNC line below for "
-            "customer/panda clips (seedance_2_0 + audio_references when on). Poll every queued "
+            "customer/panda lines (one seedance_2_0 native-speech subshot per line speaking only that "
+            "line, re-voiced with elevenlabs_voice_changer, when on). Poll every queued "
             "Higgsfield job until complete, download clips into assets/video/, finish any remaining "
             f"music, record everything in asset_manifest. {_pair_scale_lock_line()} Then rewrite the assets checkpoint "
             "status='awaiting_human' WITHOUT partial_progress.phase='stills' (and without "
@@ -2984,14 +3022,17 @@ class ClaudeCodeRunner(Runner):
                 "yet. Full schema-valid asset_manifest is required at PHASE 3 / approve_assets.\n")
         if audio_lipsync:
             motion_how = (
-                "For customer/panda speaking clips: seedance_2_0 with start_image + "
-                "audio_references=VO, generate_audio:false, lip-sync mouth to audio (no mouth "
-                "HOLD). Narrator/text_card: HOLD or static. Fallback HOLD on failure."
+                "Each on-screen customer/panda line is its own speaking subshot: seedance_2_0 "
+                "with start_image only + generate_audio:true speaking that one quoted line (native "
+                "lip-sync, no mouth HOLD), re-voiced into the cast voice with "
+                "elevenlabs_voice_changer. Narrator lines are closed-mouth fills; "
+                "narrator-only/text_card: HOLD or static. Fallback HOLD on failure."
             )
             hold_note = "AUDIO LIPSYNC path (see AUDIO LIPSYNC line)"
             qa_how = (
-                "Then run mandatory lipsync_qa with the exact VO, allow only one local timing "
-                "correction or one paid failed-scene regeneration, retain both takes, and persist "
+                "Then run mandatory lipsync_qa per speaking subshot with that speaker's own VO, "
+                "allow only one local timing correction or one paid failed-subshot regeneration, "
+                "retain both takes, and persist "
                 "unresolved warnings; never attempt a third take. "
             )
         else:
@@ -3193,10 +3234,13 @@ class ClaudeCodeRunner(Runner):
             "post-speech tail_hold_seconds. Reject unresolved pacing_revision_required only when "
             "a single scene still exceeds provider max (never for a brief mismatch). Do NOT shorten locked "
             "copy, retime lip-synced motion, or let a hold cover active speech.\n"
-            "3. Read asset_manifest.metadata.lip_sync_qa. Apply only offsets whose local re-check "
-            "passed: derive the signed delta from attempt-1 expected offset and recompute affected "
-            "VO start_seconds from effective_scene_start + immutable original scene-local offset. "
-            "Never shift picture and VO independently or apply unresolved offsets.\n"
+            "3. For scenes with metadata.scene_subshots, emit one cut per subshot and the VO "
+            "voice_tracks from lib/i2v_duration.place_scene_subshots (lines in sequence, never "
+            "overlapping). Read asset_manifest.metadata.lip_sync_qa.subshots. Apply only offsets "
+            "whose local re-check passed: derive the signed delta from attempt-1 expected offset "
+            "and pass it for that section_id only (it moves that one line; never a sibling line or "
+            "the whole scene). Always recompute from the immutable scene_subshots plus the current "
+            "effective scene start. Never apply unresolved offsets.\n"
             "4. Write the edit checkpoint status='completed' (ungated), then immediately "
             "run compose per skills/pipelines/panda-video/compose-director.md "
             f"(panda_render resolution='{master}' / render_runtime already locked). Verify "
@@ -3223,7 +3267,8 @@ class ClaudeCodeRunner(Runner):
             "If edit_decisions is missing, write it now from metadata.timeline_contract "
             "(unequal audio-driven scene lengths; ±5% of timeline_contract target — measured "
             "dialogue may be longer or shorter than the original brief; bounded post-speech holds; "
-            "apply only locally validated lip-sync offsets from immutable scene-local timestamps; "
+            "one cut per subshot with sequential, non-overlapping voice_tracks from "
+            "place_scene_subshots; apply only locally validated per-line lip-sync offsets; "
             f"mute native clip audio; all-top crop to {master}). Then compose "
             f"to final.mp4 with panda_render resolution='{master}', carry unresolved lip-sync "
             "scene warnings into final_review with "
@@ -3236,18 +3281,23 @@ class ClaudeCodeRunner(Runner):
         return (
             f"For project_id: {job_id}, the STILLS phase of the `assets` stage is APPROVED. Do NOT "
             "mark the assets stage completed yet. TTS-FIRST for every speaking script section "
-            "(ElevenLabs + VOICE CAST), probe ALL durations (audio_probe), then call "
+            "(ElevenLabs + VOICE CAST), probe ALL durations (audio_probe), split every scene with "
+            "an on-screen customer/panda line into sequential speaking/fill subshots "
+            "(lib/i2v_duration.build_scene_subshots). When AUDIO LIPSYNC is on, generate and "
+            "re-voice the speaking subshots first and rebuild those scenes from the measured "
+            "speech (see the AUDIO LIPSYNC line below). Then call "
             "lib/i2v_duration.allocate_scene_durations once for the full timeline "
             f"({_pacing_dialogue_priority_line()} tolerance_fraction=0.05, scene-plan weights, "
-            "scene-local audio bounds, and models_explore allowed durations). THEN animate the "
-            "approved stills with each allocated i2v_duration per the AUDIO LIPSYNC line below "
-            "(seedance_2_0 + audio_references for customer/panda when on; else HOLD LOCK). "
+            "subshot_content_seconds for subshot scenes, scene-local audio bounds for single-clip "
+            "scenes, and models_explore allowed durations). THEN animate the remaining fill and "
+            "HOLD clips (HOLD LOCK for everything when lipsync is off). "
             "Preflight all pending clips and enforce the complete-batch budget before any submit; "
             "submit max 4 Higgsfield jobs in flight (2 after a 429), checkpoint every "
-            "scene_id→job_id immediately, and poll the set together instead of serializing. "
-            "Start music while i2v jobs are in flight. Record every file in asset_manifest including "
-            "metadata.timeline_contract and legacy vo_duration_map (plus audio_lipsync on eligible "
-            "clips), then rewrite the "
+            "subshot_id (or scene_id)→job_id immediately, and poll the set together instead of "
+            "serializing. Start music while i2v jobs are in flight. Record every file in "
+            "asset_manifest including metadata.scene_subshots, metadata.timeline_contract and "
+            "legacy vo_duration_map ([audio_lipsync:true] in generation_summary of speaking "
+            "subshot clips), then rewrite the "
             "assets checkpoint with status='awaiting_human' (WITHOUT the 'stills' phase marker) "
             "and STOP for the full media approval.\n\n"
             + _pair_scale_lock_line() + "\n"
@@ -3352,7 +3402,8 @@ class ClaudeCodeRunner(Runner):
             "the approved sample), THEN animate "
             "the REMAINING approved stills with their allocated durations per "
             "the AUDIO LIPSYNC line below (reuse the approved sample's approach when it matches; "
-            "lipsync shots stay on seedance_2_0 + audio_references). Preflight all pending clips "
+            "speaking subshots stay on seedance_2_0 native speech, one quoted line each). "
+            "Preflight all pending clips "
             "and enforce the complete-batch budget before any submit; submit max 4 Higgsfield "
             "jobs in flight (2 after a 429), checkpoint every scene_id→job_id immediately, and "
             "poll the set together instead of serializing; start music while i2v is in flight. "

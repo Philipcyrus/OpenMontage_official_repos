@@ -60,15 +60,16 @@ assert R._audio_lipsync_enabled({"audio_lipsync": False}) is False
 assert R._audio_lipsync_enabled({"audio_lipsync": "false"}) is False
 assert R._audio_lipsync_enabled({"audio_lipsync": "off"}) is False
 assert "AUDIO LIPSYNC — ON" in R._audio_lipsync_line({})
-assert "audio_references" in R._audio_lipsync_line({})
-assert "generate_audio:false" in R._audio_lipsync_line({})
+assert "never attach a VO file" in R._audio_lipsync_line({})
+assert "generate_audio:true" in R._audio_lipsync_line({})
+assert "elevenlabs_voice_changer" in R._audio_lipsync_line({})
 assert "seedance_2_0" in R._audio_lipsync_line({})
 _off = R._audio_lipsync_line({"audio_lipsync": False})
 assert "AUDIO LIPSYNC — OFF" in _off
 assert "HOLD" in _off
-assert "Do NOT pass" in _off and "audio_references" in _off
+assert "Do NOT set" in _off and "generate_audio:true" in _off
 _sp_on = run._start_prompt("jLips", "a video about eSIM", {}, "panda-video")
-assert "AUDIO LIPSYNC — ON" in _sp_on and "audio_references" in _sp_on
+assert "AUDIO LIPSYNC — ON" in _sp_on and "generate_audio:true" in _sp_on
 assert "PAIR SCALE LOCK" in _sp_on and "panda ear-top height=0.58" in _sp_on
 _sp_off = run._start_prompt(
     "jLipsOff", "a video about eSIM", {"audio_lipsync": False}, "panda-video")
@@ -82,7 +83,9 @@ assert "tolerance_fraction=0.05" in _stills_on
 assert "PACING PRIORITY" in _stills_on
 assert "ElevenLabs dialogue" in _stills_on
 assert "timeline_contract" in _stills_on
-assert "only that scene once" in _stills_on
+assert "only that subshot once" in _stills_on
+assert "that speaker's own VO file" in _stills_on
+assert "never attach a VO file" in _stills_on
 assert "attempt 3" in _stills_on
 _stills_off = run._stills_approved_prompt("jLips", {"audio_lipsync": False})
 assert "AUDIO LIPSYNC — OFF" in _stills_off
@@ -726,7 +729,8 @@ for batch_prompt in (
     assert "preflight all" in batch_prompt.lower(), batch_prompt
     assert "PAIR SCALE LOCK" in batch_prompt, batch_prompt
     assert "character_scale_qa" in batch_prompt, batch_prompt
-assert "timing-preserving" in R._audio_lipsync_line({})
+assert "SPEAKING SUBSHOT" in R._audio_lipsync_line({})
+assert "timing-preserving" not in R._audio_lipsync_line({})
 assert "concat" not in R._audio_lipsync_line({}).lower()
 print("[ok] hero-approved prompt + assets phases text")
 
@@ -979,7 +983,8 @@ aap = run._assets_approved_prompt("jEditHang", "panda-video")
 assert "Do NOT ask" in aap or "Do NOT stop to ask" in aap, aap
 assert "timeline_contract" in aap
 assert "±5%" in aap
-assert "effective_scene_start + immutable original scene-local offset" in aap
+assert "place_scene_subshots" in aap
+assert "for that section_id only" in aap
 assert "approve_final" in aap
 edit_cont = run._edit_compose_continue_prompt("jEditHang", "panda-video")
 assert "Do NOT ask" in edit_cont and "approve_final" in edit_cont

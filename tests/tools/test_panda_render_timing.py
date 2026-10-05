@@ -145,6 +145,145 @@ def test_preflight_rejects_frozen_mouth_during_active_speech() -> None:
         )
 
 
+def test_preflight_counts_head_trim_against_source_motion() -> None:
+    scene = {
+        "duration_s": 3.25,
+        "source_duration_s": 5.0,
+        "audio_end_s": 3.0,
+        "audio_lipsync": True,
+        "source_in_s": 0.4,
+    }
+    assert expected_timeline_duration(
+        [scene], {"type": "cut", "duration_s": 0}
+    ) == pytest.approx(3.25)
+    with pytest.raises(ValueError, match="frozen hold would cover active speech"):
+        expected_timeline_duration(
+            [{**scene, "source_in_s": 2.5}], {"type": "cut", "duration_s": 0}
+        )
+    with pytest.raises(ValueError, match="source_in_s cannot be negative"):
+        expected_timeline_duration(
+            [{**scene, "source_in_s": -0.1}], {"type": "cut", "duration_s": 0}
+        )
+
+
+def _silent_voice(path: Path) -> Path:
+    path.write_bytes(b"")
+    return path
+
+
+def test_panda_render_refuses_overlapping_voice_tracks(tmp_path: Path) -> None:
+    narrator = _silent_voice(tmp_path / "vo-s21-narrator.mp3")
+    panda = _silent_voice(tmp_path / "vo-s22-panda.mp3")
+    result = PandaRender().execute(
+        {
+            "scenes": [{"media_path": str(tmp_path / "never-staged.mp4"), "duration_s": 8}],
+            "transition": {"type": "cut", "duration_s": 0},
+            "audio": {
+                "voice_tracks": [
+                    {"path": str(narrator), "at_s": 0.0, "duration_s": 3.1,
+                     "section_id": "s21"},
+                    {"path": str(panda), "at_s": 2.0, "duration_s": 4.2,
+                     "section_id": "s22"},
+                ]
+            },
+            "output_path": str(tmp_path / "never-rendered.mp4"),
+        }
+    )
+    assert result.success is False
+    assert "voice_tracks overlap" in (result.error or "")
+    assert "s21" in result.error and "s22" in result.error
+
+
+def test_panda_render_rejects_more_cuts_than_montage_accepts(tmp_path: Path) -> None:
+    result = PandaRender().execute(
+        {
+            "scenes": [
+                {"media_path": str(tmp_path / f"cut-{i}.mp4"), "duration_s": 1}
+                for i in range(61)
+            ],
+            "transition": {"type": "cut", "duration_s": 0},
+            "output_path": str(tmp_path / "never-rendered.mp4"),
+        }
+    )
+    assert result.success is False
+    assert "at most 60" in (result.error or "")
+
+
+def test_voice_tracks_schema_documents_sequential_contract() -> None:
+    audio = PandaRender.input_schema["properties"]["audio"]["properties"]
+    item = audio["voice_tracks"]["items"]["properties"]
+    assert {"path", "at_s", "duration_s", "section_id"} <= set(item)
+    assert audio["allow_voice_overlap"]["default"] is False
+    scene = PandaRender.input_schema["properties"]["scenes"]["items"]["properties"]
+    assert scene["source_in_s"]["minimum"] == 0
+
+
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg is required")
+def test_subshot_cuts_render_with_sequential_voices(tmp_path: Path) -> None:
+    from lib.i2v_duration import build_scene_subshots, place_scene_subshots
+
+    def _tone(path: Path, seconds: float) -> Path:
+        subprocess.run(
+            ["ffmpeg", "-y", "-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}",
+             "-c:a", "libmp3lame", str(path)],
+            check=True, capture_output=True,
+        )
+        return path
+
+    vo = {
+        "s1": _tone(tmp_path / "vo-s1-narrator.mp3", 1.5),
+        "s2": _tone(tmp_path / "vo-s2-panda.mp3", 2.0),
+    }
+    plan = build_scene_subshots(
+        "sc1",
+        [
+            {"section_id": "s1", "speaker": "narrator", "measured_seconds": 1.5,
+             "script_start_seconds": 0.0, "script_end_seconds": 1.0, "path": str(vo["s1"])},
+            {"section_id": "s2", "speaker": "panda", "measured_seconds": 2.0,
+             "script_start_seconds": 1.0, "script_end_seconds": 2.5, "path": str(vo["s2"]),
+             "generated_i2v_duration": 5},
+        ],
+        allowed_durations=[5],
+    )
+    placed = place_scene_subshots(
+        plan, effective_scene_start_seconds=0.0, effective_duration_seconds=5.0,
+    )
+    clip = tmp_path / "sc1-s2.mp4"
+    _color_clip(clip, 5)
+    still = tmp_path / "sc1-still.mp4"
+    _color_clip(still, 5)
+    scenes = []
+    for cut in placed["subshots"]:
+        speaking = cut["kind"] == "speaking"
+        scenes.append({
+            "media_path": str(clip if speaking else still),
+            "duration_s": cut["duration_seconds"],
+            "source_duration_s": 5,
+            "audio_end_s": cut["audio_end_seconds"],
+            "audio_lipsync": speaking,
+            "source_in_s": cut["source_in_seconds"],
+        })
+    result = PandaRender().execute(
+        {
+            "profile": "ugc",
+            "resolution": "64x64",
+            "fps": 12,
+            "transition": {"type": "cut", "duration_s": 0},
+            "scenes": scenes,
+            "audio": {"voice_tracks": [
+                {k: t[k] for k in ("path", "at_s", "duration_s", "section_id")}
+                for t in placed["voice_tracks"]
+            ]},
+            "target_duration_s": 5,
+            "duration_tolerance_fraction": 0.05,
+            "output_path": str(tmp_path / "final.mp4"),
+            "run_id": "subshot-render",
+        }
+    )
+    assert result.success, result.error
+    assert result.data["voice_track_count"] == 2
+
+
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg is required")
 def test_missing_duration_probe_is_not_a_target_band_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

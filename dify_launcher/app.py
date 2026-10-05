@@ -408,6 +408,15 @@ def _recover_worker_result(
         or original.get("_recovery_stage")
         or original.get("stage")
     )
+    # A scene_plan leg that dies before writing its checkpoint leaves nothing to approve:
+    # approving approve_scene_plan would mark a missing plan complete and skip the stage.
+    if (
+        gate == "approve_scene_plan"
+        and job_id
+        and _raw_checkpoint_status(str(job_id), "scene_plan") is None
+        and _raw_checkpoint_status(str(job_id), "script") == "completed"
+    ):
+        gate, stage = "approve_script", "script"
     if gate:
         recovered.update(
             status="awaiting_human",
