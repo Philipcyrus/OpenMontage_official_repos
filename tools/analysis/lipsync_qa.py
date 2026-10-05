@@ -4,6 +4,10 @@ The tool performs deterministic timing analysis and extracts densely sampled
 frames around speech. The agent reviews those frames and may invoke the tool a
 second time with ``visual_observation`` to receive a bounded classification.
 It deliberately does not claim phoneme-level accuracy from still frames.
+
+Each call reviews one speaker: one speaking-subshot clip against that speaker's
+own VO file. Scoring a clip against a mix of several voices would measure the
+onset of whichever voice speaks first, not the one the mouth follows.
 """
 
 from __future__ import annotations
@@ -27,8 +31,11 @@ from tools.base_tool import (
 
 
 _SILENCE_RE = re.compile(r"silence_(start|end):\s*([0-9.]+)")
-_OFFSET_TOLERANCE_SECONDS = 0.30
+_OFFSET_TOLERANCE_SECONDS = 0.20
 _DURATION_TOLERANCE_SECONDS = 0.15
+_SAMPLE_STEP_SECONDS = 0.25
+_TAIL_FRACTION = 0.4
+_LISTENER_OPEN_MAX_RATIO = 0.3
 _MAX_ABS_AUDIO_OFFSET_SECONDS = 2.0
 _PROBE_TIMEOUT_SECONDS = 15
 _SILENCE_DETECT_TIMEOUT_SECONDS = 60
@@ -81,7 +88,7 @@ def build_sample_timestamps(
     *,
     expected_offset: float,
     clip_duration: float,
-    max_samples: int = 16,
+    max_samples: int = 20,
 ) -> list[float]:
     """Sample pre-speech, onset, active speech, and post-speech frames."""
     if not intervals or clip_duration <= 0:
@@ -97,7 +104,8 @@ def build_sample_timestamps(
         cursor = start + 0.15
         while cursor < end:
             relative.append(cursor)
-            cursor += 0.35
+            cursor += _SAMPLE_STEP_SECONDS
+    relative.append(max(onset, speech_end - 0.10))
     relative.append(speech_end + 0.15)
 
     upper = max(clip_duration - 0.04, 0.0)
@@ -111,6 +119,35 @@ def build_sample_timestamps(
         step = (len(timestamps) - 1) / (max_samples - 1)
         timestamps = [timestamps[round(index * step)] for index in range(max_samples)]
     return timestamps
+
+
+def label_sample_phase(
+    timestamp: float,
+    intervals: list[tuple[float, float]],
+    *,
+    expected_offset: float,
+) -> str:
+    """Where a clip timestamp falls in the line: pre, onset, active, pause, tail or post.
+
+    ``tail`` is active speech in the last 40% of the line, where a mouth that gave up early
+    shows; ``pause`` is a gap between words longer than the sampling step.
+    """
+    if not intervals:
+        return "post"
+    rel = timestamp - expected_offset
+    onset = intervals[0][0]
+    speech_end = intervals[-1][1]
+    if rel < onset:
+        return "pre"
+    if rel > speech_end:
+        return "post"
+    if not any(start <= rel <= end for start, end in intervals):
+        return "pause"
+    if rel <= onset + 0.30:
+        return "onset"
+    if rel >= onset + (1.0 - _TAIL_FRACTION) * (speech_end - onset):
+        return "tail"
+    return "active"
 
 
 def classify_lipsync(
@@ -158,6 +195,23 @@ def classify_lipsync(
             "status": "fail_generation",
             "reason": "Mouth articulation is flat or closed through too much active speech.",
         }
+    tail_samples = int(observation.get("tail_active_samples", 0))
+    tail_closed = int(observation.get("tail_closed_mouth_samples", 0))
+    if tail_samples >= 2 and tail_closed / tail_samples >= 0.5:
+        return {
+            "status": "fail_generation",
+            "reason": "The mouth stops articulating before the line ends (closed through the tail).",
+        }
+    listener_samples = int(observation.get("listener_visible_samples", 0))
+    listener_open = int(observation.get("listener_open_mouth_samples", 0))
+    if listener_samples > 0 and listener_open / listener_samples >= _LISTENER_OPEN_MAX_RATIO:
+        return {
+            "status": "fail_generation",
+            "reason": (
+                f"The listening character's mouth is open in {listener_open}/{listener_samples} "
+                "samples, so both characters read as talking."
+            ),
+        }
     if observed_onset is None:
         return {
             "status": "inconclusive",
@@ -181,14 +235,17 @@ def classify_lipsync(
         }
     return {
         "status": "pass",
-        "reason": "Mouth visibility, articulation, and onset timing passed the conservative rubric.",
+        "reason": (
+            "Mouth visibility, articulation through the tail, a closed listener mouth, and onset "
+            "timing passed the conservative rubric."
+        ),
         "measured_av_offset_seconds": measured_offset,
     }
 
 
 class LipSyncQA(BaseTool):
     name = "lipsync_qa"
-    version = "0.1.0"
+    version = "0.3.0"
     tier = ToolTier.CORE
     capability = "analysis"
     provider = "ffmpeg"
@@ -219,19 +276,56 @@ class LipSyncQA(BaseTool):
         "type": "object",
         "required": ["video_path", "audio_path"],
         "properties": {
-            "video_path": {"type": "string"},
-            "audio_path": {"type": "string"},
+            "video_path": {
+                "type": "string",
+                "description": "One speaking subshot clip (one on-screen speaker, one line).",
+            },
+            "audio_path": {
+                "type": "string",
+                "description": (
+                    "That speaker's own VO file — the clip's re-voiced line from "
+                    "elevenlabs_voice_changer. Never a scene mix or another speaker's line."
+                ),
+            },
             "scene_id": {"type": "string"},
+            "section_id": {
+                "type": "string",
+                "description": "Script section of the line; the report is stored under "
+                               "metadata.lip_sync_qa.subshots.<scene_id>.<section_id>.",
+            },
+            "subshot_id": {"type": "string"},
+            "speaker": {"type": "string", "enum": ["customer", "panda", "narrator"]},
             "output_dir": {"type": "string"},
             "expected_audio_offset_seconds": {"type": "number", "default": 0},
-            "max_samples": {"type": "integer", "minimum": 6, "maximum": 24, "default": 16},
+            "max_samples": {"type": "integer", "minimum": 6, "maximum": 24, "default": 20},
             "visual_observation": {
                 "type": "object",
                 "properties": {
                     "mouth_visible_ratio": {"type": "number", "minimum": 0, "maximum": 1},
                     "active_speech_samples": {"type": "integer", "minimum": 0},
                     "closed_mouth_active_samples": {"type": "integer", "minimum": 0},
-                    "distinct_mouth_shapes": {"type": "integer", "minimum": 0},
+                    "distinct_mouth_shapes": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "A smile or grin held unchanged across frames is ONE shape.",
+                    },
+                    "tail_active_samples": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Frames labelled phase=tail (last 40% of the line).",
+                    },
+                    "tail_closed_mouth_samples": {"type": "integer", "minimum": 0},
+                    "listener_visible_samples": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Active/tail frames where the other character's face shows.",
+                    },
+                    "listener_open_mouth_samples": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Of those, frames where the listener's lips are parted "
+                                       "(open grin, laugh, talking shape).",
+                    },
                     "observed_mouth_onset_seconds": {"type": "number", "minimum": 0},
                     "speech_onset_seconds": {"type": "number", "minimum": 0},
                     "notes": {"type": "string"},
@@ -243,6 +337,19 @@ class LipSyncQA(BaseTool):
     def execute(self, inputs: dict[str, Any]) -> ToolResult:
         video_path = Path(inputs["video_path"])
         audio_path = Path(inputs["audio_path"])
+        identity = {
+            "scene_id": inputs.get("scene_id"),
+            "section_id": inputs.get("section_id"),
+            "subshot_id": inputs.get("subshot_id"),
+            "speaker": inputs.get("speaker"),
+            "audio_path": str(audio_path),
+        }
+        if inputs.get("speaker") == "narrator":
+            return ToolResult(success=True, data={
+                **identity,
+                "status": "skipped",
+                "reason": "narrator lines are closed-mouth fills; no mouth follows them",
+            })
         if not video_path.is_file():
             return ToolResult(success=False, error=f"Video not found: {video_path}")
         if not audio_path.is_file():
@@ -272,14 +379,22 @@ class LipSyncQA(BaseTool):
                 intervals,
                 expected_offset=expected_offset,
                 clip_duration=clip_duration,
-                max_samples=int(inputs.get("max_samples", 16)),
+                max_samples=int(inputs.get("max_samples", 20)),
             )
             output_dir = Path(
                 inputs.get("output_dir")
                 or video_path.parent / "lipsync_qa" / video_path.stem
             )
             output_dir.mkdir(parents=True, exist_ok=True)
-            frames = self._extract_frames(video_path, timestamps, output_dir)
+            frames = [
+                {
+                    **frame,
+                    "phase": label_sample_phase(
+                        frame["timestamp_seconds"], intervals, expected_offset=expected_offset
+                    ),
+                }
+                for frame in self._extract_frames(video_path, timestamps, output_dir)
+            ]
             speech_onset = intervals[0][0] if intervals else None
             speech_end = intervals[-1][1] if intervals else None
             observation = inputs.get("visual_observation")
@@ -292,7 +407,7 @@ class LipSyncQA(BaseTool):
                 observation=observation,
             )
             data = {
-                "scene_id": inputs.get("scene_id"),
+                **identity,
                 "status": classification["status"],
                 "reason": classification["reason"],
                 "clip_duration_seconds": round(clip_duration, 3),

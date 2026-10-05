@@ -54,29 +54,43 @@ Rules (upstream governance — do NOT break):
    with the approved clips (+ VO/music) at the `ugc` profile (CLEAN, no branding). Pass
    `resolution` from the job canvas (`scene_plan.metadata.aspect_ratio` /
    `options.aspect_ratio`: default `9:16` → `1080x1920`, `16:9` → `1920x1080`, etc.) — do not
-   hardcode vertical. Set each
-   `scenes[].duration_s` from its cut's `effective_duration_seconds` (not the downloaded clip
-   length), and pass `target_duration_s` plus `duration_tolerance_fraction=0.05` from
-   `asset_manifest.metadata.timeline_contract`. Also pass each scene's measured
-   `source_duration_s`, allocated `audio_end_s`, and `audio_lipsync` flag so the renderer rejects
-   any trim or frozen hold that would intersect active lip-synced speech. Pass every
-   narration segment as `audio.voice_tracks` (`path` + `at_s` from `edit_decisions.audio.narration.segments`);
-   single-VO jobs may still use `audio.voice_path`. Mute / discard native AAC on Higgsfield clips
-   (TTS-first VO is the dialogue bed; AUDIO LIPSYNC Seedance clips use `generate_audio:false` so
-   mouths match that VO while the clip stays silent — still lay the same ElevenLabs files).
+   hardcode vertical. Emit **one `panda_render` scene per edit cut** — a subshot scene becomes
+   several consecutive scenes (its speaking clips and its closed-mouth fills, stills included).
+   Set each `scenes[].duration_s` from its cut's `effective_duration_seconds` (not the
+   downloaded clip length), and pass `target_duration_s` plus `duration_tolerance_fraction=0.05`
+   from `asset_manifest.metadata.timeline_contract`. Also pass each scene's measured
+   `source_duration_s`, allocated `audio_end_s`, `audio_lipsync` flag, and `source_in_s` (the
+   cut's `in_seconds`; non-zero only for a validated negative per-subshot offset) so the renderer
+   rejects any trim or frozen hold that would intersect active lip-synced speech. Use a hard
+   `cut` transition between subshots of the same scene — an xfade would blend two mouths and eat
+   into a line. `panda_render` accepts at most 60 scenes; if a long job exceeds that, merge
+   adjacent fill cuts that use the same still (never merge speaking cuts).
+
+   Pass every narration segment as `audio.voice_tracks` (`path`, `at_s`, `duration_s`, and
+   `section_id` from `edit_decisions.audio.narration.segments`); single-VO jobs may still use
+   `audio.voice_path`. Voice tracks are sequential: `panda_render` refuses overlapping tracks, and
+   that refusal means edit placed two lines on top of each other — fix the edit, never set
+   `allow_voice_overlap` to get past it. Mute / discard native AAC on Higgsfield clips (the
+   voice tracks are the dialogue). AUDIO LIPSYNC Seedance clips are native speech
+   (`generate_audio:true`): their AAC is Seedance's raw voice and must never reach the master —
+   lay the re-voiced ElevenLabs file (`elevenlabs_voice_changer`, same timing) for each line, and
+   the ElevenLabs TTS file for narrator lines. Legacy clips with `generate_audio:false` are
+   silent; lay their ElevenLabs files the same way.
    Use narration `start_seconds` exactly as edit wrote them: the edit stage already combined the
-   allocated effective scene start, immutable scene-local audio offset, and any locally validated
-   lip-sync delta. Do not reapply, remove, or cumulatively add offsets during compose.
+   allocated effective scene start, sequential subshot placement, and any locally validated
+   per-line lip-sync delta. Do not reapply, remove, or cumulatively add offsets during compose.
    Honor only post-speech `tail_hold_seconds` from the timeline contract. For
    `remotion`/`hyperframes`, call
    `video_compose` with the matching runtime; pass `proposal_packet` if present so the tool's
    swap-detection runs.
-2. **Verify** the output exists and passes ffprobe (duration within the requested ±5% band,
-   resolution matching the job canvas, has audio). A target-duration validation failure is not a warning: correct the
+2. **Verify** the output exists and passes ffprobe (duration within ±5% of
+   `timeline_contract.target_duration_seconds` — which may be longer or shorter than the original
+   brief under dialogue-duration priority — resolution matching the job canvas, has audio). A target-duration
+   validation failure is not a warning: correct the
    scene/transition math and render again before writing the final checkpoint.
 3. **Write `render_report` and `final_review`.** Copy the asset manifest QA summary into optional
-   `final_review.checks.lip_sync_check`, including reviewed scenes, applied offsets, affected scene
-   ids, and warnings. A result still unresolved after attempt 2 uses `status:"warning"` and
+   `final_review.checks.lip_sync_check`, including reviewed scenes and subshots (per speaker),
+   applied offsets, affected scene/subshot ids, and warnings. A result still unresolved after attempt 2 uses `status:"warning"` and
    `recommended_action:"present_to_user"` both inside `lip_sync_check` and at final-review top
    level; it does not cause another automatic retry or block the final gate. Include
    `asset_manifest` and `final_review` in the compose checkpoint artifacts so the launcher can
@@ -86,8 +100,10 @@ Rules (upstream governance — do NOT break):
 ## Success criteria
 - Output matches `edit_decisions.render_runtime` (no silent swap)
 - CLEAN/unbranded master; `final.mp4` exists and passes ffprobe at the job canvas resolution
-- Final duration is within `timeline_contract`'s requested ±5% band
+- Final duration is within ±5% of `timeline_contract.target_duration_seconds` (dialogue-priority
+  targets may be longer or shorter than the original brief)
 - Scene durations are unequal when audio pacing calls for it; no active lip-synced speech is
   padded, trimmed, or retimed
+- No two voice tracks overlap; every speaking cut carries only its own speaker's line
 - Every unresolved lip-sync result names its scene at approve_final; no hidden pass and no loop
 - Checkpoint left in `awaiting_human` for the final gate

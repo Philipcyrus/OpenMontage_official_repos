@@ -180,6 +180,18 @@ def _next_recovery_target(
     if gate == "approve_motion_sample":
         return "approve_assets", "assets"
     if gate == "approve_assets":
+        # Pre-clip pacing hold (stills + TTS, no clips): approving continues PHASE 3,
+        # so recovery must stay on approve_assets — not jump to approve_final.
+        arts = state.get("artifacts") if isinstance(state.get("artifacts"), dict) else {}
+        try:
+            from dify_launcher.runner import (
+                _past_stills_assets_progress,
+                _stills_only_media,
+            )
+            if _stills_only_media(arts) and _past_stills_assets_progress(arts):
+                return "approve_assets", "assets"
+        except Exception:  # noqa: BLE001 — recovery must never crash respond
+            pass
         return "approve_final", "compose"
     if gate == "approve_final":
         return "approve_brand", "brand"
@@ -189,7 +201,8 @@ def _next_recovery_target(
             stage if isinstance(stage, str) else None)
 
 
-def _running_ack_question(gate: Optional[str], decision: str) -> str:
+def _running_ack_question(gate: Optional[str], decision: str,
+                          state: Optional[dict[str, Any]] = None) -> str:
     """Non-empty question so Agent Door never treats a long async hop as 'no reply'."""
     if decision == "revise":
         return "processing — revising; poll GET /jobs/{id} until status changes"
@@ -197,6 +210,18 @@ def _running_ack_question(gate: Optional[str], decision: str) -> str:
         return "processing — finishing without brand; poll GET /jobs/{id}"
     if decision == "cancel":
         return "processing — cancelling; poll GET /jobs/{id}"
+    # Pre-clip pacing hold at approve_assets continues PHASE 3 (clips), not edit/compose.
+    if gate == "approve_assets" and isinstance(state, dict):
+        arts = state.get("artifacts") if isinstance(state.get("artifacts"), dict) else {}
+        try:
+            from dify_launcher.runner import (
+                _past_stills_assets_progress,
+                _stills_only_media,
+            )
+            if _stills_only_media(arts) and _past_stills_assets_progress(arts):
+                return "processing — generating clips; poll GET /jobs/{id}"
+        except Exception:  # noqa: BLE001
+            pass
     by_gate = {
         "approve_script": "processing — writing scene plan; poll GET /jobs/{id}",
         "approve_scene_plan": (
@@ -383,6 +408,15 @@ def _recover_worker_result(
         or original.get("_recovery_stage")
         or original.get("stage")
     )
+    # A scene_plan leg that dies before writing its checkpoint leaves nothing to approve:
+    # approving approve_scene_plan would mark a missing plan complete and skip the stage.
+    if (
+        gate == "approve_scene_plan"
+        and job_id
+        and _raw_checkpoint_status(str(job_id), "scene_plan") is None
+        and _raw_checkpoint_status(str(job_id), "script") == "completed"
+    ):
+        gate, stage = "approve_script", "script"
     if gate:
         recovered.update(
             status="awaiting_human",
@@ -718,7 +752,7 @@ def respond(job_id: str, body: Respond, x_dify_token: Optional[str] = Header(Non
             **state,
             "status": "running",
             "gate": None,
-            "question": _running_ack_question(state.get("gate"), decision),
+            "question": _running_ack_question(state.get("gate"), decision, state),
             "_recovery_gate": recovery_gate,
             "_recovery_stage": recovery_stage,
             "_processing_operation": f"resume:{state.get('gate') or 'unknown'}",

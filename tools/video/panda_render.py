@@ -45,6 +45,9 @@ from tools.base_tool import (
 )
 
 
+_MAX_SCENES = 60  # montage_svc ComposeRequest.scenes max_length
+
+
 def _safe_id(s: str) -> str:
     """Coerce an arbitrary string into montage's ^[A-Za-z0-9_-]{1,64}$ id space."""
     import re
@@ -80,14 +83,18 @@ def expected_timeline_duration(
                 f"{duration:.3f}s"
             )
         source_duration = scene.get("source_duration_s")
+        source_in = float(scene.get("source_in_s") or 0.0)
+        if source_in < 0:
+            raise ValueError("source_in_s cannot be negative")
         if (
             scene.get("audio_lipsync")
             and source_duration is not None
-            and audio_end > float(source_duration) + 1e-6
+            and audio_end > float(source_duration) - source_in + 1e-6
         ):
             raise ValueError(
                 f"lip-synced scene audio ends at {audio_end:.3f}s after source motion "
-                f"{float(source_duration):.3f}s; a frozen hold would cover active speech"
+                f"{float(source_duration) - source_in:.3f}s; a frozen hold would cover "
+                "active speech"
             )
     tr = transition or {}
     overlap = (
@@ -113,6 +120,50 @@ def _target_duration_error(
         f"{float(target_s):.3f}s ±{float(tolerance_fraction) * 100:.1f}% "
         f"({lower:.3f}-{upper:.3f}s)"
     )
+
+
+def _check_voice_tracks_sequential(tracks: list[dict[str, Any]]) -> None:
+    """Refuse a voice bed where two lines play at once."""
+    from lib.i2v_duration import find_voice_overlaps
+    from montage_svc.render.ffmpeg_ops import probe_duration
+
+    timed = []
+    for i, tr in enumerate(tracks):
+        p = Path(tr["path"])
+        if not p.is_file():
+            raise FileNotFoundError(f"voice_tracks[{i}] not found: {p}")
+        timed.append(
+            {
+                "path": p.name,
+                "section_id": tr.get("section_id"),
+                "at_s": float(tr.get("at_s", 0) or 0),
+                "duration_s": float(tr.get("duration_s") or probe_duration(p)),
+            }
+        )
+    overlaps = find_voice_overlaps(timed)
+    if overlaps:
+        raise ValueError(
+            "voice_tracks overlap — place multi-speaker scenes as sequential "
+            "subshots: " + "; ".join(overlaps)
+        )
+
+
+def _trim_head(src: Path, source_in_s: float, out_path: Path) -> Path:
+    """Drop the first source_in_s seconds of a speaking clip (lip-sync lead fix)."""
+    import subprocess
+
+    cmd = [
+        "ffmpeg", "-y", "-ss", f"{source_in_s:.3f}", "-i", str(src),
+        "-an", "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p",
+        str(out_path),
+    ]
+    proc = subprocess.run(cmd, capture_output=True, text=True)
+    if proc.returncode != 0 or not out_path.is_file():
+        raise RuntimeError(
+            f"source_in_s trim failed (rc={proc.returncode}): "
+            f"{(proc.stderr or proc.stdout or '')[-800:]}"
+        )
+    return out_path
 
 
 def _premix_voice_tracks(
@@ -275,6 +326,16 @@ class PandaRender(BaseTool):
                             "default": False,
                             "description": "When true, active audio must also fit source motion before any tail hold.",
                         },
+                        "source_in_s": {
+                            "type": "number",
+                            "minimum": 0,
+                            "default": 0,
+                            "description": (
+                                "Seconds trimmed off the head of this clip before it is cut to "
+                                "duration_s. Set only from a validated negative lip-sync offset "
+                                "on a speaking subshot."
+                            ),
+                        },
                         "captions": {
                             "type": "object",
                             "properties": {"zh": {"type": "string"}, "en": {"type": "string"}},
@@ -296,7 +357,9 @@ class PandaRender(BaseTool):
                         "description": (
                             "Multi-speaker VO: each entry is placed at at_s (seconds) and premixed "
                             "into one voice bed before montage mix. Prefer this when the script "
-                            "has multiple section.speaker lines."
+                            "has multiple section.speaker lines. Lines must not overlap; the "
+                            "render fails when two tracks play at once unless "
+                            "allow_voice_overlap is true."
                         ),
                         "items": {
                             "type": "object",
@@ -304,6 +367,12 @@ class PandaRender(BaseTool):
                             "properties": {
                                 "path": {"type": "string"},
                                 "at_s": {"type": "number", "default": 0},
+                                "duration_s": {
+                                    "type": "number",
+                                    "minimum": 0,
+                                    "description": "Measured length; probed when omitted.",
+                                },
+                                "section_id": {"type": "string"},
                                 "speaker": {
                                     "type": "string",
                                     "enum": ["customer", "panda", "narrator"],
@@ -317,6 +386,11 @@ class PandaRender(BaseTool):
                     }},
                     "music_db": {"type": "number", "default": -18.0},
                     "voice_db": {"type": "number", "default": -6.0},
+                    "allow_voice_overlap": {
+                        "type": "boolean",
+                        "default": False,
+                        "description": "Opt out of the sequential-voice check (deliberate crosstalk only).",
+                    },
                 },
             },
             "run_id": {"type": "string", "description": "Optional; derived from output name if omitted."},
@@ -356,6 +430,21 @@ class PandaRender(BaseTool):
             return ToolResult(success=False, error=f"panda_render duration preflight failed: {exc}")
         if preflight_error:
             return ToolResult(success=False, error=f"panda_render duration preflight failed: {preflight_error}")
+        if len(scenes_in) > _MAX_SCENES:
+            return ToolResult(
+                success=False,
+                error=(
+                    f"panda_render accepts at most {_MAX_SCENES} cuts, got {len(scenes_in)}; "
+                    "merge adjacent fill subshots that share one still"
+                ),
+            )
+        audio_in: dict[str, Any] = inputs.get("audio") or {}
+        voice_tracks: list = list(audio_in.get("voice_tracks") or [])
+        if voice_tracks and not audio_in.get("allow_voice_overlap"):
+            try:
+                _check_voice_tracks_sequential(voice_tracks)
+            except (FileNotFoundError, KeyError, TypeError, ValueError) as exc:
+                return ToolResult(success=False, error=f"panda_render voice preflight failed: {exc}")
 
         from montage_svc import storage as st
         from montage_svc.render.pipelines import run_compose
@@ -369,8 +458,6 @@ class PandaRender(BaseTool):
 
         output_path = Path(inputs["output_path"])
         run_id = _safe_id(inputs.get("run_id") or output_path.stem or "panda-render")
-        audio_in: dict[str, Any] = inputs.get("audio") or {}
-        voice_tracks: list = list(audio_in.get("voice_tracks") or [])
 
         try:
             # --- 1) stage every media file into the run's media/ dir ----------
@@ -381,6 +468,9 @@ class PandaRender(BaseTool):
                 src = Path(sc["media_path"])
                 if not src.is_file():
                     return ToolResult(success=False, error=f"scene {i} media not found: {src}")
+                source_in = float(sc.get("source_in_s") or 0.0)
+                if source_in > 0:
+                    src = _trim_head(src, source_in, st.run_dir(run_id) / f"trim{i:03d}.mp4")
                 mid = f"s{i:03d}"
                 st.save_media(run_id, mid, src.suffix, src.read_bytes())
                 scene_models.append(Scene(

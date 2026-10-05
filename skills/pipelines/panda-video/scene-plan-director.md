@@ -44,7 +44,18 @@ Record the job's canvas on `scene_plan.metadata.aspect_ratio` from `options.aspe
 **Multi-voice shots:** several script sections (different `speaker`s) may share one scene's time
 window. Keep one visual scene; list a separate narration `required_assets` entry per speaking
 beat (see §7). Map `character_actions.dialogue` to the matching brand speaker
-(`customer` / `panda`; off-screen lines → `narrator`).
+(`customer` / `panda`; off-screen lines → `narrator`). Lines in one scene play one after another,
+never on top of each other: the assets stage splits the scene into one speaking subshot per
+on-screen line (with closed-mouth fills for narrator lines), so section timestamps set the
+order of lines and the scene's pacing weight, not exact clock positions.
+
+**Dialogue shots stay still.** A scene with an on-screen `customer`/`panda` line gets a static
+`movement`: the speaker faces camera and stays in place while talking, and the listener listens
+with a closed mouth. Do not put a line on a walking, exiting, turning or big-gesture shot, and
+do not direct an open-mouth grin or laugh in a dialogue scene (describe delight with eyes and
+brows). Give that action its own non-speaking scene, or put the line over a narrator/fill beat.
+Seedance turns the motion into a speaker who turns away mid-line and a listener who looks like
+it is talking.
 
 ### 3. The 5-aspect scene spec (MANDATORY — every scene, all five)
 Silent omission is the top failure mode — it produces brittle prompts and reviewer churn. For
@@ -99,9 +110,10 @@ If the video is narrated, the narration MUST fit the runtime:
 3. Budget **2.0–2.5 words/sec** (calm/reassuring) or **2.5–3.0 words/sec** (energetic).
 4. Allocate words per scene proportional to its seconds; keep opening/closing scenes light.
 Validate: total words within budget; no scene's narration overflows its slot. (Word budget is a
-**prior** only. In assets, measured ElevenLabs duration drives the full-scene allocation while
-the requested total stays within ±5% — see TTS-first in `asset-director.md`. A large overrun
-after TTS requires the bounded speed retry or a pacing revision; do not expect prompt-only lip sync.)
+**prior** only. In assets, measured ElevenLabs duration sets the runtime and the requested total
+is only a pacing weight — see TTS-first in `asset-director.md`. A scene whose VO exceeds the
+provider's longest clip after TTS requires the bounded speed retry or a narration trim; do not
+expect prompt-only lip sync.)
 
 ### 7. Declare `required_assets` per scene
 For each scene that needs a still, list **exactly one** `{type: "image", description: "...",

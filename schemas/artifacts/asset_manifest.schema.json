@@ -92,7 +92,16 @@
             },
             "scenes": {
               "type": "object",
+              "description": "Single-clip lip-sync scenes. Subshot scenes keep their per-speaker reviews under subshots instead.",
               "additionalProperties": { "$ref": "#/$defs/lipSyncSceneReview" }
+            },
+            "subshots": {
+              "type": "object",
+              "description": "scene_id -> section_id -> review of one speaking subshot against that speaker's own VO file. Counts and retry caps apply per subshot.",
+              "additionalProperties": {
+                "type": "object",
+                "additionalProperties": { "$ref": "#/$defs/lipSyncSceneReview" }
+              }
             },
             "unresolved_warnings": {
               "type": "array",
@@ -169,12 +178,26 @@
         "audio_start_seconds": { "type": "number", "minimum": 0 },
         "audio_end_seconds": { "type": "number", "minimum": 0 },
         "vo_seconds": { "type": "number", "minimum": 0 },
-        "i2v_duration": { "type": "integer", "minimum": 1 },
+        "i2v_duration": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "description": "Single-clip scenes only. Null for a subshot scene; each speaking subshot carries its own i2v_duration."
+        },
         "effective_duration_seconds": { "type": "number", "exclusiveMinimum": 0 },
         "effective_start_seconds": { "type": "number", "minimum": 0 },
         "effective_end_seconds": { "type": "number", "exclusiveMinimum": 0 },
         "tail_hold_seconds": { "type": "number", "minimum": 0 },
-        "safe_tail_seconds": { "type": "number", "minimum": 0 }
+        "safe_tail_seconds": { "type": "number", "minimum": 0 },
+        "subshot_content_seconds": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Sum of this scene's sequential speaker and fill subshots (build_scene_subshots)."
+        },
+        "tail_fill_seconds": {
+          "type": "number",
+          "minimum": 0,
+          "description": "Closed-mouth still or neutral motion after the last subshot."
+        }
       },
       "additionalProperties": false
     },
@@ -252,6 +275,12 @@
       "properties": {
         "eligible": { "type": "boolean" },
         "skip_reason": { "type": "string" },
+        "subshot_id": { "type": "string" },
+        "speaker": { "type": "string", "enum": ["customer", "panda", "narrator"] },
+        "audio_path": {
+          "type": "string",
+          "description": "The single VO file this subshot was reviewed against (its re-voiced line)."
+        },
         "status": {
           "type": "string",
           "enum": ["pass", "fail_timing", "fail_generation", "inconclusive", "skipped"]
@@ -270,7 +299,7 @@
           "type": ["number", "null"],
           "minimum": -2,
           "maximum": 2,
-          "description": "Signed scene-local VO offset applied by edit only when the QA result is fail_timing with concrete onset evidence."
+          "description": "Signed VO offset applied by edit only when the QA result is fail_timing with concrete onset evidence. For a subshot review it moves only that subshot's voice (positive) or trims only that clip's head (negative)."
         },
         "retry_job_id": { "type": ["string", "null"] },
         "retry_credits": { "type": "number", "minimum": 0 },
@@ -322,6 +351,10 @@
             "active_speech_samples": { "type": "integer", "minimum": 0 },
             "closed_mouth_active_samples": { "type": "integer", "minimum": 0 },
             "distinct_mouth_shapes": { "type": "integer", "minimum": 0 },
+            "tail_active_samples": { "type": "integer", "minimum": 0 },
+            "tail_closed_mouth_samples": { "type": "integer", "minimum": 0 },
+            "listener_visible_samples": { "type": "integer", "minimum": 0 },
+            "listener_open_mouth_samples": { "type": "integer", "minimum": 0 },
             "observed_mouth_onset_seconds": { "type": ["number", "null"], "minimum": 0 },
             "notes": { "type": "string" }
           },

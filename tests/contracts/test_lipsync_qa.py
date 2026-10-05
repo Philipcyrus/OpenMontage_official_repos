@@ -12,6 +12,7 @@ from tools.analysis.lipsync_qa import (
     LipSyncQA,
     build_sample_timestamps,
     classify_lipsync,
+    label_sample_phase,
     speech_intervals_from_silence,
 )
 
@@ -143,6 +144,65 @@ def test_bad_first_shot_calibration_is_generation_failure() -> None:
     assert result["status"] == "fail_generation"
 
 
+def test_job_cfb6_late_shot_failures_now_fail_generation() -> None:
+    # job_cfb6fd099504: these passed the old onset-only rubric but looked wrong in the master.
+    panda_quits_mid_line = classify_lipsync(
+        clip_duration=4, speech_end=2.58, expected_offset=0,
+        observation=_observation(
+            observed_mouth_onset_seconds=0.5,
+            tail_active_samples=4,
+            tail_closed_mouth_samples=3,
+        ),
+    )
+    assert panda_quits_mid_line["status"] == "fail_generation"
+    assert "before the line ends" in panda_quits_mid_line["reason"]
+
+    grinning_listener = classify_lipsync(
+        clip_duration=4, speech_end=1.88, expected_offset=0,
+        observation=_observation(
+            observed_mouth_onset_seconds=0.5,
+            listener_visible_samples=8,
+            listener_open_mouth_samples=8,
+        ),
+    )
+    assert grinning_listener["status"] == "fail_generation"
+    assert "listening character" in grinning_listener["reason"]
+
+    one_open_frame_listener = classify_lipsync(
+        clip_duration=4, speech_end=2.5, expected_offset=0,
+        observation=_observation(
+            listener_visible_samples=8,
+            listener_open_mouth_samples=1,
+            tail_active_samples=4,
+            tail_closed_mouth_samples=1,
+        ),
+    )
+    assert one_open_frame_listener["status"] == "pass"
+
+
+def test_onset_tolerance_is_point_two_seconds() -> None:
+    late = classify_lipsync(
+        clip_duration=4, speech_end=2.5, expected_offset=0,
+        observation=_observation(observed_mouth_onset_seconds=0.8),
+    )
+    assert late["status"] == "fail_timing"
+    assert late["recommended_audio_offset_seconds"] == pytest.approx(0.3)
+
+
+def test_sampling_reaches_the_last_word_and_labels_phases() -> None:
+    intervals = [(0.0, 0.55), (0.68, 2.19)]
+    samples = build_sample_timestamps(intervals, expected_offset=0, clip_duration=4.0)
+    assert 2.09 in samples
+    assert max(samples) == pytest.approx(2.34)
+    phases = {t: label_sample_phase(t, intervals, expected_offset=0) for t in samples}
+    assert phases[2.09] == "tail"
+    assert phases[2.34] == "post"
+    assert label_sample_phase(0.6, intervals, expected_offset=0) == "pause"
+    assert label_sample_phase(0.1, intervals, expected_offset=0) == "onset"
+    assert label_sample_phase(0.9, intervals, expected_offset=0) == "active"
+    assert label_sample_phase(0.2, intervals, expected_offset=0.5) == "pre"
+
+
 def test_missing_evidence_and_analysis_failure_are_inconclusive() -> None:
     result = classify_lipsync(
         clip_duration=4,
@@ -268,6 +328,47 @@ def test_runner_prompts_enforce_retry_cap_and_surface_scene_warning() -> None:
         assert "does not block delivery" in question
 
 
+def test_unresolved_subshot_warning_names_the_line_and_speaker() -> None:
+    artifacts = {
+        "asset_manifest": {
+            "metadata": {
+                "lip_sync_qa": {
+                    "unresolved_warnings": ["sc11/s23 customer remained flat"],
+                    "scenes": {},
+                    "subshots": {
+                        "sc11": {
+                            "s22": {"speaker": "panda", "unresolved_warning": None},
+                            "s23": {
+                                "speaker": "customer",
+                                "unresolved_warning": "Mouth remained flat after attempt 2.",
+                            },
+                        }
+                    },
+                }
+            }
+        }
+    }
+    question = runner_module._question_for_gate("approve_assets", artifacts=artifacts)
+    assert "sc11/s23 (customer)" in question
+    assert "s22" not in question
+
+
+def test_lipsync_qa_skips_narrator_and_reports_line_identity() -> None:
+    result = LipSyncQA().execute({
+        "video_path": "/missing/video.mp4",
+        "audio_path": "assets/audio/vo-s21-narrator.mp3",
+        "scene_id": "sc11",
+        "section_id": "s21",
+        "speaker": "narrator",
+    })
+    assert result.success
+    assert result.data["status"] == "skipped"
+    assert result.data["section_id"] == "s21"
+    props = LipSyncQA.input_schema["properties"]
+    assert {"section_id", "subshot_id", "speaker"} <= set(props)
+    assert "never a scene mix" in props["audio_path"]["description"].lower()
+
+
 def test_pipeline_and_directors_require_eligible_only_bounded_qa() -> None:
     manifest = (ROOT / "pipeline_defs/panda-video.yaml").read_text(encoding="utf-8")
     assets = (
@@ -280,10 +381,28 @@ def test_pipeline_and_directors_require_eligible_only_bounded_qa() -> None:
         ROOT / "skills/pipelines/panda-video/compose-director.md"
     ).read_text(encoding="utf-8")
 
+    flat_assets = " ".join(assets.split())
+    flat_edit = " ".join(edit.split())
     assert "lipsync_qa" in manifest
+    assert "lip_sync_qa.subshots.<scene_id>.<section_id>" in manifest
     assert "audio_lipsync:true" in assets
-    assert "Narrator, HOLD" in assets
+    assert "Narrator fills, HOLD" in flat_assets
+    assert "that speaker's own VO file" in flat_assets
+    assert "metadata.lip_sync_qa.subshots.<scene_id>.<section_id>" in flat_assets
+    assert "never shift a sibling line" in flat_assets
+    assert "exact scene-local VO bed" not in flat_assets
+    assert "validated_offsets[section_id]" in flat_edit
+    assert "Never shift a sibling line" in flat_edit
     assert "Never retry a `pass`" in assets
+    assert "speaking prompt overrides the scene plan's `movement`" in flat_assets
+    assert "listener_open_mouth_samples" in flat_assets
+    scene_plan = (
+        ROOT / "skills/pipelines/panda-video/scene-plan-director.md"
+    ).read_text(encoding="utf-8")
+    assert "Dialogue shots stay still" in scene_plan
+    runner_prompt = runner_module._audio_lipsync_line({})
+    assert "OVERRIDES the scene plan's movement" in runner_prompt
+    assert "listener's lips stay closed" in runner_prompt
     assert "never submit attempt 3" in assets
     assert "get_cost:true" in assets
     assert "validated_audio_offset_seconds" in edit

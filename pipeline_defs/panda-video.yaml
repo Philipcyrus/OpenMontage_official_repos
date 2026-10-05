@@ -121,6 +121,7 @@ stages:
     tools_available:
       - image_selector           # PHASE 0/1: stills per scene (still-gen via the Higgsfield MCP bridge)
       - elevenlabs_tts           # PHASE 2/3: TTS-FIRST — generate VO before i2v so clip duration can follow audio
+      - elevenlabs_voice_changer # PHASE 2/3: re-voice native-speech speaking clips into the cast voice + transcript check
       - audio_probe              # PHASE 2/3: probe all VO before full-timeline duration allocation
       - higgsfield_mcp_video     # PHASE 2/3: OUR MCP bridge (image_to_video); duration from audio-driven allocation
       - lipsync_qa               # PHASE 3: local timing analysis + mouth-frame evidence before approve_assets
@@ -133,7 +134,8 @@ stages:
       - "PHASE 1 (stills): one still per scene, on-brand (styles/panda.yaml) and character-consistent (panda Elements), before any video is generated"
       - "PAIR SCALE LOCK: whenever panda + customer share a frame, panda ground-to-ear-top is 0.58 ±0.05 of standing customer ground-to-head height; feet share one ground line; upright canonical postures persist through stills and clips"
       - "PHASE 2 (motion sample): one hero clip approves the motion/animation before the full batch (only if motion_sample:true; default off); narrated sample scenes TTS + duration snap before i2v"
-      - "PHASE 3 (media): TTS-first then full-timeline duration allocation — unequal scene lengths follow measured audio while final duration stays within ±5% of the user's request; when audio_lipsync on (default), customer/panda clips use seedance_2_0 + audio_references + generate_audio:false; every required asset on disk in asset_manifest (path + scene_id)"
+      - "PHASE 3 (media): TTS-first then full-timeline duration allocation — unequal scene lengths follow measured audio while final duration stays within ±5% of the user's request; when audio_lipsync on (default), every on-screen customer/panda line is its own speaking subshot (seedance_2_0 native speech: generate_audio:true with only that line quoted, brand words respelled, no audio_references), re-voiced into the cast voice with elevenlabs_voice_changer; narrator lines are closed-mouth fills, lines play in sequence and never overlap; every required asset on disk in asset_manifest (path + scene_id)"
+      - "LIP-SYNC QA: lipsync_qa runs once per speaking subshot against that speaker's own re-voiced VO file (metadata.lip_sync_qa.subshots.<scene_id>.<section_id>); every frame is reviewed, including the tail of the line and the listener's mouth; the re-voiced transcript matches the script line (brand words intact); a correction moves only that line; at most one retry per subshot"
       - "Budget: cumulative Higgsfield credits stay within max_higgsfield_credits (if set); overruns hard-block before spend, not after"
       - Narration covers all script sections; music (if any) sits under the VO
       - Reviewer can approve the set or request revision of specific scenes/shots (regenerate only those)

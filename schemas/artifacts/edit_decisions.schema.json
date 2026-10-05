@@ -32,6 +32,27 @@
             "minimum": 0,
             "description": "Final-frame hold after source motion ends; never used to cover active lip-synced speech."
           },
+          "scene_id": { "type": "string", "description": "Scene-plan beat this cut belongs to." },
+          "subshot_id": {
+            "type": "string",
+            "description": "Speaker or fill subshot from build_scene_subshots; one cut per subshot."
+          },
+          "subshot_kind": {
+            "type": "string",
+            "enum": ["speaking", "fill"],
+            "description": "speaking = Seedance clip where one speaker says one line (native speech, re-voiced); fill = closed-mouth still or neutral motion."
+          },
+          "section_id": { "type": "string", "description": "Script section a speaking or narrator subshot carries." },
+          "speaker": { "type": "string", "enum": ["customer", "panda", "narrator"] },
+          "audio_lipsync": {
+            "type": "boolean",
+            "description": "True for speaking subshots; compose passes it so no trim or hold cuts through speech."
+          },
+          "audio_end_seconds": {
+            "type": "number",
+            "minimum": 0,
+            "description": "Cut-local end of that one line, including any validated voice delay."
+          },
           "speed": { "type": "number", "minimum": 0.1, "default": 1.0 },
           "layer": {
             "type": "string",
@@ -128,8 +149,10 @@
                   },
                   "lip_sync_offset_applied_seconds": {
                     "type": "number",
-                    "description": "Signed delta applied to the original absolute script timestamp after a validated QA timing correction."
+                    "description": "Signed delta validated for this segment's own speaking subshot (legacy jobs: the original absolute script timestamp). Never applied to sibling lines."
                   },
+                  "section_id": { "type": "string" },
+                  "subshot_id": { "type": "string" },
                   "speaker": {
                     "type": "string",
                     "enum": ["customer", "panda", "narrator"],

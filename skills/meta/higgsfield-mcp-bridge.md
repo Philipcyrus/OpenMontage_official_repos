@@ -204,38 +204,55 @@ Higgsfield jobs**. If any submit returns a rate-limit / 429 response, lower the 
 to **2** for the rest of that agent leg. Do not change model, prompt, duration, or
 quality settings merely to gain concurrency.
 
-0. **TTS-first duration (panda-video)** — generate and probe all scene VO **before** preflight,
-   then call `lib.i2v_duration.allocate_scene_durations` once for the full timeline. Set each
-   `duration` from its allocation (allowed values from `models_explore`) so scene lengths follow
-   audio while the final cut remains within ±5% of the requested total. Preserve scene-local
-   audio offsets. See `skills/pipelines/panda-video/asset-director.md`.
+0. **TTS-first duration (panda-video)** — generate and probe narrator VO first, then split
+   multi-speaker scenes into sequential speaker subshots (`lib.i2v_duration.build_scene_subshots`).
+   Speaking subshots are generated and measured **before** `allocate_scene_durations` runs, because
+   a native-speech clip sets its own line length; fill and HOLD clips are sized from the
+   allocation afterwards (target `ceil(sum of measured VO seconds)`; the requested total is a
+   pacing weight only). See `skills/pipelines/panda-video/asset-director.md`.
 
 ### Audio lip-sync (panda-video)
 
-When job option `audio_lipsync` is on (**default**), on-screen `customer`/`panda` speaking clips
-use **`seedance_2_0`** with:
+When job option `audio_lipsync` is on (**default**), every on-screen `customer`/`panda` line is
+its own **speaking subshot**: one **`seedance_2_0`** clip that **speaks the line itself**:
 
-- `medias` role **`start_image`** = approved still
-- `medias` role **`audio_references`** = that scene’s timing-preserving ElevenLabs
-  VO bed (MCP-uploaded)
-- **`generate_audio: false`** — do not invent a second audio bed
-- Prompt: 2D + Element LOCK; animate mouth/jaw to lip-sync the attached audio (no mouth HOLD)
+- `medias` role **`start_image`** = approved still — nothing else. **No `audio_references`**:
+  an attached ElevenLabs line does not drive Seedance's mouth (job_cfb6fd099504 — generic mouth
+  motion, uncorrelated with the attached line).
+- **`generate_audio: true`** and the line quoted in the prompt — `<Speaker> says, in English:
+  "<line>"` — with brand words respelled from `script.pronunciation_guides`
+  (`tools.audio.elevenlabs_voice_changer.spoken_form`; "eSIM" → "e-sim", otherwise Seedance
+  spells it out). Always name the job language (Seedance otherwise may translate the line into
+  Mandarin) and add "says only this one sentence, word for word, then stops talking; silence
+  after the line" (otherwise it ad-libs). One line per clip, "no other voices, no music, no
+  sound effects".
+- `duration` = the subshot's `i2v_duration` from `lib.i2v_duration.build_scene_subshots`
+  (`speech_mode="native"` estimates Seedance's slower pacing: ≈0.25s + 2.6 words/s).
+- Prompt: 2D + Element LOCK; static camera; the speaker faces camera and speaks right away at a
+  brisk, natural pace; the listener's lips stay closed (no mouth HOLD on the speaker).
+- After ingest, **re-voice** the clip with `elevenlabs_voice_changer` (ElevenLabs
+  speech-to-speech into the VOICE CAST id; timing preserved exactly) with `expected_text` set, and
+  rebuild the scene's subshots from the generated length and the re-voiced `speech_end_s`.
+  `transcript_match.ok: false` is a `fail_generation`.
 
-For a scene with multiple dialogue files, build **one timing-preserving scene-local
-VO bed** before upload. Place every source at its script offset relative to scene start
-(`relative_at_s = section.start_seconds - scene.start_seconds`), retain leading and
-inter-line silence, and mix overlapping lines. Use the same `adelay` + `amix` semantics
-as `tools.video.panda_render._premix_voice_tracks`; never join files back-to-back. A
-customer line at 0–2s and panda line at 3–5s therefore produces a 5s bed with the
-2–3s pause intact.
+**One speaker per clip.** A scene with a customer line and a panda line produces two clips, each
+speaking only its own line — never a premixed bed, never narrator audio. Narrator lines and
+leading silence are closed-mouth **fill** subshots (approved still, or one closed-mouth reaction
+/ neutral-motion clip when the stretch is long enough) — a clip never speaks a narrator line.
 
-`kling3_0` has **no** audio input role — do not use it for lipsync shots. Narrator / text_card /
-lipsync-off jobs keep HOLD LOCK (mouth frozen) with duration-only alignment.
+Script timestamps give the order of lines and deliberate pauses only. After measuring, each line
+starts when the previous line's measured speech ends plus its real pause; a long line pushes the
+next one later instead of overlapping it.
 
-Compose still **mutes** native AAC (noop when silent) and lays the original ElevenLabs
-files at the same script offsets used to make the reference bed. This keeps picture and
-brand voice on one timeline. On `audio_references` failure: fall back to HOLD +
-duration-only and log it.
+`kling3_0` has no native-speech lip-sync path — do not use it for lipsync shots. Narrator-only
+scenes, text_card, and lipsync-off jobs keep HOLD LOCK (mouth frozen) with duration-only
+alignment.
+
+Compose **mutes** every clip's native AAC (it holds Seedance's raw voice), cuts each speaking
+clip to its line plus pause, and lays each re-voiced line at its subshot's start (the re-voiced
+file starts at clip time 0, so voice and mouth stay aligned). Voices never overlap;
+`panda_render` rejects overlapping `voice_tracks`. On generation failure: fall back to HOLD +
+the dialogue TTS file for that subshot and log it.
 
 1. **Preflight the whole pending batch** — call `generate_video` with
    `{model, prompt, duration, aspect_ratio, count:1, get_cost:true}` (plus medias when
@@ -244,8 +261,8 @@ duration-only and log it.
    Retain every clip's preflight credit number for its `asset_manifest` row.
 2. **Submit the first wave** — submit up to 4 independent `generate_video` calls in
    parallel (omit `get_cost`). Capture each returned `job_id` keyed by `scene_id`.
-   For image-to-video, register the approved still and optional audio bed first,
-   then pass those media ids in the model's declared roles.
+   For image-to-video, register the approved still first, then pass its media id as
+   `start_image` (speaking subshots attach no audio — they set `generate_audio:true`).
 3. **Checkpoint in-flight work immediately** — write an `assets` checkpoint with
    `status="in_progress"` and `metadata.partial_progress.motion_jobs`, mapping every
    `scene_id` to its `job_id`, creative parameters, credits, and output path. A timeout

@@ -241,6 +241,57 @@ def test_recover_prefers_on_disk_hero_over_scene_plan(monkeypatch, tmp_path) -> 
     assert recovered["stage"] == "assets"
 
 
+def test_scene_plan_leg_dying_without_checkpoint_reopens_script(monkeypatch, tmp_path) -> None:
+    """job_3a8dc799f000: the scene_plan leg died before writing anything; reopening
+    approve_scene_plan let approval mark the missing plan complete and skip to stills."""
+    import json
+    import lib.paths as paths
+
+    job_id = "job_scene_plan_died"
+    monkeypatch.setattr(paths, "PROJECTS_DIR", tmp_path)
+    (tmp_path / job_id).mkdir()
+    (tmp_path / job_id / "checkpoint_script.json").write_text(json.dumps({
+        "version": "1.0",
+        "project_id": job_id,
+        "pipeline_type": "panda-video",
+        "stage": "script",
+        "status": "completed",
+        "timestamp": "2026-10-05T00:00:00+00:00",
+        "artifacts": {},
+    }), encoding="utf-8")
+
+    original = {
+        "job_id": job_id,
+        "pipeline": "panda-video",
+        "status": "running",
+        "stage": "script",
+        "gate": None,
+        "_recovery_gate": "approve_scene_plan",
+        "_recovery_stage": "scene_plan",
+        "artifacts": {},
+    }
+    recovered = launcher._recover_worker_result(
+        original, original, "error: claude failed: Execution error"
+    )
+    assert recovered["status"] == "awaiting_human"
+    assert recovered["gate"] == "approve_script"
+    assert recovered["stage"] == "script"
+
+    (tmp_path / job_id / "checkpoint_scene_plan.json").write_text(json.dumps({
+        "version": "1.0",
+        "project_id": job_id,
+        "pipeline_type": "panda-video",
+        "stage": "scene_plan",
+        "status": "awaiting_human",
+        "timestamp": "2026-10-05T00:00:00+00:00",
+        "artifacts": {},
+    }), encoding="utf-8")
+    recovered = launcher._recover_worker_result(
+        original, original, "error: claude failed: Execution error"
+    )
+    assert recovered["gate"] == "approve_scene_plan"
+
+
 def test_recover_prefers_compose_awaiting_as_final(monkeypatch, tmp_path) -> None:
     import lib.paths as paths
 
