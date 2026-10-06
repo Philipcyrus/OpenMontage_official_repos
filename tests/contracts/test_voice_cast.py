@@ -188,7 +188,7 @@ def test_premix_voice_tracks_builds_adelay_amix(monkeypatch, tmp_path):
 
     calls: list[list[str]] = []
 
-    def fake_run(cmd, capture_output=True, text=True):
+    def fake_run(cmd, capture_output=True, text=True, timeout=None):
         calls.append(list(cmd))
 
         class R:

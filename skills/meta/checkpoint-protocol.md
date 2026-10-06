@@ -103,7 +103,8 @@ write_checkpoint(pipeline_dir, project_id, stage, status, artifacts, *,
                  review=None, cost_snapshot=None, error=None,
                  metadata=None, partial_progress=None) -> Path
 
-read_checkpoint(pipeline_dir, project_id, stage) -> dict | None
+read_checkpoint(pipeline_dir, project_id, stage, *, soft=False) -> dict | None
+    # soft=True is the launcher's recovery read; agents leave it False
 
 get_next_stage(pipeline_dir, project_id, pipeline_type=None) -> str | None
 ```

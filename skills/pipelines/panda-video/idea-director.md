@@ -44,7 +44,8 @@ target duration, language, and any cutdowns. Record the chosen aspect in `delive
 scene_plan / assets / compose use the same canvas.
 
 ### 3. Runtime & provider decisions (log them)
-- **Render runtime:** honor the `render_runtime` job option; if `auto`, note the intended lane per
+- **Render runtime:** honor the `render_runtime` job option (`ffmpeg`, `remotion` or
+  `hyperframes`); if `auto`, note the intended lane per
   `skills/pipelines/panda-video/compose-director.md` (default `ffmpeg`/`panda_render` for
   character-mascot clips). Log a `render_runtime_selection` decision in `decision_log`.
 - **Providers:** visuals via the Higgsfield MCP with locked Elements attached as media;
