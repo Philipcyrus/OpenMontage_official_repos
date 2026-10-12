@@ -1,4 +1,0 @@
-# Prefer deploy/install_healthcheck.sh: it writes this line with the right paths for the box
-# and user it runs as. Example for ec2-user on box 1, daily at 02:30 UTC (08:00 IST).
-# PATH is set on the line itself, not crontab-wide, so the user's other cron jobs are untouched.
-30 2 * * * PATH=/home/ec2-user/.nvm/versions/node/v22.23.2/bin:/home/ec2-user/.npm-global/bin:/usr/local/bin:/usr/bin:/bin /usr/bin/flock -n /tmp/panda-healthcheck-ec2-user.lock /usr/bin/python3 /home/ec2-user/OpenMontage-Repos/OpenMontage_official_repos/deploy/panda_healthcheck.py >> /home/ec2-user/panda-healthcheck.log 2>&1

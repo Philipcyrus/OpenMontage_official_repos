@@ -666,7 +666,7 @@ def test_config_defaults_and_off_switches(config, monkeypatch):
     assert config.expect_runner == "claude"
     assert config.claude_bin is None
     assert config.low_credits == 500.0 and config.elevenlabs_low_chars == 10_000
-    assert config.require_remotion is None and config.notify_success is False
+    assert config.require_remotion is None and config.notify_success is True
     monkeypatch.setenv("PANDA_HEALTH_EXPECT_RUNNER", "off")
     monkeypatch.setenv("PANDA_HEALTH_LOW_CREDITS", "off")
     monkeypatch.setenv("PANDA_HEALTH_REQUIRE_REMOTION", "true")
@@ -759,3 +759,83 @@ def test_one_crashing_check_does_not_hide_the_others(tmp_path, config, monkeypat
     results = {r["component"]: r for r in json.loads(capsys.readouterr().out)["results"]}
     assert results["disk"]["code"] == "CHECK_CRASHED"
     assert results["dify"]["ok"] is True and results["render"]["ok"] is True
+
+
+# ---------------------------------------------------------------------------
+# One file: settings from the launcher's .env, and the self-installed schedule
+# ---------------------------------------------------------------------------
+
+def test_settings_come_from_the_launcher_env_unless_overridden(tmp_path, config, monkeypatch):
+    for key in ("PANDA_HEALTH_PUBLIC_URL", "PANDA_HEALTH_BOX_NAME", "AWS_REGION"):
+        monkeypatch.setenv(key, "placeholder")      # registers cleanup of what load_settings sets
+        monkeypatch.delenv(key)
+    (tmp_path / ".env").write_text(
+        "PANDA_HEALTH_BOX_NAME=from-dotenv\nPANDA_HEALTH_PUBLIC_URL=https://a.example\n"
+        "ELEVENLABS_API_KEY=el-SECRET\nAWS_REGION=us-east-1\n", encoding="utf-8",
+    )
+    private = tmp_path / "private.env"
+    private.write_text("PANDA_HEALTH_PUBLIC_URL=https://b.example\n", encoding="utf-8")
+    health.load_settings(private)
+    assert os.environ["PANDA_HEALTH_PUBLIC_URL"] == "https://b.example"   # the private file wins
+    assert os.environ["PANDA_HEALTH_BOX_NAME"] == "from-dotenv"
+    assert os.environ["AWS_REGION"] == "us-east-1"
+    assert "ELEVENLABS_API_KEY" not in os.environ                         # only PANDA_HEALTH_*
+
+
+@pytest.fixture
+def crontab(tmp_path, monkeypatch):
+    box = {"current": "", "written": []}
+    monkeypatch.setattr(health, "_crontab_read", lambda: box["current"])
+    monkeypatch.setattr(health, "_crontab_write", box["written"].append)
+    monkeypatch.setattr(health, "__file__", str(tmp_path / "deploy" / "panda_healthcheck.py"))
+    monkeypatch.setattr(health.os, "geteuid", lambda: 1000, raising=False)
+    return box
+
+
+def test_install_adds_only_its_own_line_and_backs_up(config, crontab, capsys):
+    crontab["current"] = (
+        "SHELL=/bin/bash\n*/5 * * * * /home/u/other/poll.sh\n"
+        "0 6 * * * /usr/bin/python3 /old/deploy/panda_healthcheck.py >> /x 2>&1\n"
+        "@reboot /home/u/other/start.sh\n"
+    )
+    assert health.install_schedule(config, "40 2", health.DEFAULT_ENV_FILE) == 0
+    lines = crontab["written"][0].splitlines()
+    assert lines[:2] == ["SHELL=/bin/bash", "*/5 * * * * /home/u/other/poll.sh"]
+    assert "@reboot /home/u/other/start.sh" in lines
+    ours = [line for line in lines if health.CRON_MARKER in line]
+    assert len(ours) == 1 and ours[0].startswith("40 2 * * * PATH=")
+    assert ours[0].endswith(f">> {Path.home() / 'panda-healthcheck.log'} 2>&1")
+    backups = list(config.state_file.parent.glob("crontab.before.*"))
+    assert len(backups) == 1 and backups[0].read_text(encoding="utf-8") == crontab["current"]
+    assert json.loads(capsys.readouterr().out.split("\n\n")[0])["replaced_previous_line"] is True
+
+
+def test_install_twice_keeps_one_line_and_uninstall_removes_it(config, crontab):
+    crontab["current"] = "*/5 * * * * /home/u/other/poll.sh\n"
+    health.install_schedule(config, "30 2", health.DEFAULT_ENV_FILE)
+    crontab["current"] = crontab["written"][-1]
+    health.install_schedule(config, "30 2", health.DEFAULT_ENV_FILE)
+    assert crontab["written"][-1] == crontab["current"]
+    crontab["current"] = crontab["written"][-1]
+    health.install_schedule(config, None, health.DEFAULT_ENV_FILE)
+    assert crontab["written"][-1] == "*/5 * * * * /home/u/other/poll.sh\n"
+
+
+def test_install_refuses_bad_input_and_never_writes(config, crontab, monkeypatch):
+    for bad in ("60 2", "30 24", "every day"):
+        with pytest.raises(ValueError):
+            health.install_schedule(config, bad, health.DEFAULT_ENV_FILE)
+    monkeypatch.setattr(health.os, "geteuid", lambda: 0, raising=False)
+    with pytest.raises(ValueError):
+        health.install_schedule(config, "30 2", health.DEFAULT_ENV_FILE)
+    assert crontab["written"] == []
+
+
+def test_unreadable_crontab_is_never_overwritten(config, crontab, monkeypatch):
+    def unreadable():
+        raise OSError("could not read the current crontab, so it was not changed")
+
+    monkeypatch.setattr(health, "_crontab_read", unreadable)
+    with pytest.raises(OSError):
+        health.install_schedule(config, "30 2", health.DEFAULT_ENV_FILE)
+    assert crontab["written"] == []

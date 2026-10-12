@@ -231,26 +231,29 @@ subscription usage in the 2026-09-08 box verification (an observation, not a pri
 verifies the structured tool call and result, never the model's text. It reads secrets only
 from the launcher's `.env`, uses them in memory and never prints them.
 
-**Install once per box**, as the user that owns the Claude login (box 1 `ec2-user`, box 2
-`admin`), without `sudo`. Nothing here needs a launcher restart:
+**It is one file that schedules itself.** Set it up once per box, as the user that owns the
+Claude login (box 1 `ec2-user`, box 2 `admin`), without `sudo`. Nothing here needs a launcher
+restart:
 
 ```bash
 cd ~/OpenMontage-Repos/OpenMontage_official_repos    # box 2: cd ~/OpenMontage_official_repos
 git pull --ff-only
-deploy/install_healthcheck.sh          # daily 02:30 UTC (08:00 IST); box 2: deploy/install_healthcheck.sh "40 2"
+python3 deploy/panda_healthcheck.py --install        # daily 02:30 UTC (08:00 IST); box 2: --install "40 2"
 ```
 
-The installer creates `~/.config/panda-healthcheck.env` (mode 600; it never overwrites an
-existing one), backs up the crontab, and replaces only this check's own crontab line. Then edit
-that file and set:
+`--install` backs up the crontab and adds only this check's own line; run it again to change
+the time, or use `--uninstall` to remove it. Then add these lines to the launcher's `.env`. They
+do not affect the launcher, so no restart is needed:
 
-- an alert destination: `PANDA_HEALTH_WEBHOOK_URL` (Slack, Discord, or Google Chat with
-  `PANDA_HEALTH_WEBHOOK_KIND=generic`) or `PANDA_HEALTH_SNS_TOPIC_ARN` (needs boto3 and
-  `sns:Publish` on the instance role);
-- `PANDA_HEALTH_PUBLIC_URL`, Dify's BASE_URL for this box (box 1: `https://dev.om.mvnoc.ai`);
-- `PANDA_HEALTH_BOX_NAME`, a label for alerts such as `box1-prod`.
+```bash
+PANDA_HEALTH_WEBHOOK_URL=https://hooks.slack.com/services/...   # or Discord, or Google Chat + PANDA_HEALTH_WEBHOOK_KIND=generic
+PANDA_HEALTH_PUBLIC_URL=https://dev.om.mvnoc.ai                 # Dify's BASE_URL for this box
+PANDA_HEALTH_BOX_NAME=box1-prod
+```
 
-Then verify:
+Every other setting has a default; the full list is at the top of `deploy/panda_healthcheck.py`.
+That includes AWS SNS instead of a webhook (`PANDA_HEALTH_SNS_TOPIC_ARN`, which needs boto3 and
+`sns:Publish` on the instance role). Then verify:
 
 ```bash
 python3 deploy/panda_healthcheck.py --test-alert   # one test message to the alert channel
@@ -258,12 +261,11 @@ python3 deploy/panda_healthcheck.py --no-alert     # the full check now; prints 
 python3 deploy/panda_healthcheck.py --no-alert --skip higgsfield_mcp   # the same, without the Claude turn
 ```
 
-**Alerts.** The first failure alerts at once. So does any change in what is failing. An unchanged
-failure reminds every `PANDA_HEALTH_REMINDER_HOURS`, and the first healthy run sends a recovery.
-With `PANDA_HEALTH_NOTIFY_SUCCESS=true` (the template default) a short OK message arrives every
-day, so silence means the check itself stopped. Each alert names the failing layer, a code and
-the fix. The results also go to `~/panda-healthcheck.log`, and the exit code is non-zero when
-unhealthy.
+**Alerts.** A short OK message arrives every day (`PANDA_HEALTH_NOTIFY_SUCCESS=false` turns it
+off), so silence means the check itself stopped. The first failure alerts at once, and so does
+any change in what is failing. An unchanged failure reminds every `PANDA_HEALTH_REMINDER_HOURS`
+(default 24), and the first healthy run sends a recovery. Each alert names the box, the failing
+layer, a code and the fix. Every run also appends its JSON result to `~/panda-healthcheck.log`.
 
 **Notes.**
 - Higgsfield is a Claude.ai account connector, not a local MCP server. On
@@ -272,17 +274,15 @@ unhealthy.
 - `public_url` calls the box's own public URL from the box. If the security group admits only
   Dify on 443, allow the box's own public IP as well, or leave `PANDA_HEALTH_PUBLIC_URL` empty.
   `launcher_reach` still catches a loopback-only bind.
-- An older install's crontab-wide `SHELL=`/`HOME=`/`PATH=` lines are left in place; the new line
-  sets its own `PATH`.
+- An older install keeps working: `~/.config/panda-healthcheck.env`, if present, still wins over
+  the `.env` lines. `--install` replaces the old crontab line and leaves any crontab-wide
+  `SHELL=`/`HOME=`/`PATH=` lines alone, because the new line sets its own `PATH`.
 
 ## Files here
 | file | purpose |
 |---|---|
 | `install.sh` | system deps + venv + launcher deps + import/render smoke test |
 | `panda-launcher.service` | systemd unit (uvicorn on 8501, Node 22 + claude on PATH) |
-| `panda_healthcheck.py` | daily all-layers health check (launcher, Claude, Higgsfield, ElevenLabs, render, disk, Dify) + alerts |
-| `install_healthcheck.sh` | per-box, per-user installer for the daily check (env file + crontab line) |
-| `panda-healthcheck.env.example` | private health-check configuration template |
-| `panda-healthcheck.cron.example` | example crontab line (box 1, `ec2-user`) |
+| `panda_healthcheck.py` | daily all-layers health check (launcher, Claude, Higgsfield, ElevenLabs, render, disk, Dify) + alerts; `--install` schedules it |
 | `nginx-panda.conf` | reverse-proxy block (subpath or subdomain) |
 | `requirements-launcher.txt` | minimal deps for launcher + render |

@@ -26,6 +26,31 @@ credits, and the Claude turn is capped by turns, budget and wall time. Secrets a
 from the launcher's .env, used in memory and never printed. On a state change the script can
 publish to AWS SNS and/or a Slack, Discord or Google Chat webhook. It always prints one JSON
 summary and exits non-zero when unhealthy, so cron and people read the same result.
+
+SETUP (once per box, as the user that owns the Claude login; no launcher restart):
+  python3 deploy/panda_healthcheck.py --install          # daily 02:30 UTC (08:00 IST)
+  python3 deploy/panda_healthcheck.py --install "40 2"   # another time (MINUTE HOUR, UTC)
+  python3 deploy/panda_healthcheck.py --test-alert       # one test message
+  python3 deploy/panda_healthcheck.py --no-alert         # run every check now
+--install adds only this check's own line to the user's crontab (backing it up first).
+
+SETTINGS go in the launcher's .env (process env and ~/.config/panda-healthcheck.env win).
+Everything has a default; normally only the first three are set:
+  PANDA_HEALTH_WEBHOOK_URL       Slack/Discord/Google Chat webhook (a credential)
+  PANDA_HEALTH_PUBLIC_URL        Dify's BASE_URL for this box, e.g. https://dev.om.mvnoc.ai
+  PANDA_HEALTH_BOX_NAME          label for alerts (default: hostname)
+  PANDA_HEALTH_WEBHOOK_KIND      slack | discord | generic (Google Chat)       [slack]
+  PANDA_HEALTH_SNS_TOPIC_ARN     AWS SNS topic instead of / as well as the webhook
+  PANDA_HEALTH_NOTIFY_SUCCESS    a short OK message every day                  [true]
+  PANDA_HEALTH_REMINDER_HOURS    repeat an unchanged failure after N hours     [24]
+  PANDA_HEALTH_EXPECT_RUNNER     runner production must use; off disables      [claude]
+  PANDA_HEALTH_LOW_CREDITS       Higgsfield credit threshold; off disables     [500]
+  PANDA_HEALTH_ELEVENLABS_LOW_CHARS  ElevenLabs characters left; off disables  [10000]
+  PANDA_HEALTH_DISK_MIN_FREE_GB / _PCT   free-space thresholds                 [5 / 10]
+  PANDA_HEALTH_TLS_WARN_DAYS     warn this many days before the cert expires   [14]
+  PANDA_HEALTH_EXTRA_URLS        name=https://... list; any HTTP answer < 500 passes
+  PANDA_HEALTH_REQUIRE_REMOTION  auto (when DIFY_FILES_HOSTS is set) | true | false
+  PANDA_HEALTH_CLAUDE_BIN        default: the claude the running launcher resolves
 """
 
 from __future__ import annotations
@@ -246,7 +271,7 @@ def config_from_env() -> Config:
         webhook_kind=os.environ.get("PANDA_HEALTH_WEBHOOK_KIND", "slack").strip().lower(),
         sns_topic_arn=os.environ.get("PANDA_HEALTH_SNS_TOPIC_ARN", "").strip(),
         aws_region=os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION"),
-        notify_success=_env_bool("PANDA_HEALTH_NOTIFY_SUCCESS", False),
+        notify_success=_env_bool("PANDA_HEALTH_NOTIFY_SUCCESS", True),
     )
 
 
@@ -1600,14 +1625,131 @@ def parse_skip(raw: str) -> List[str]:
     return names
 
 
+# ---------------------------------------------------------------------------
+# Settings and the daily schedule (one file: no installer, no separate config)
+# ---------------------------------------------------------------------------
+
+DEFAULT_ENV_FILE = Path("~/.config/panda-healthcheck.env").expanduser()
+DEFAULT_SCHEDULE = "30 2"            # 02:30 UTC = 08:00 IST
+CRON_MARKER = "panda_healthcheck.py"     # also matches a pre-installer line
+
+
+def load_settings(env_file: Path) -> None:
+    """Process env wins, then the optional private file, then PANDA_HEALTH_* in the launcher's .env.
+
+    Keeping the settings in the .env the launcher already loads means the whole check is this
+    one file. The PANDA_HEALTH_* keys do not change the launcher, so editing them needs no
+    restart.
+    """
+    load_env_file(env_file)
+    repo = Path(os.environ.get("PANDA_HEALTH_REPO", str(DEFAULT_REPO))).expanduser()
+    launcher_env = Path(
+        os.environ.get("PANDA_HEALTH_LAUNCHER_ENV_FILE", "").strip() or str(repo / ".env")
+    ).expanduser()
+    try:
+        parsed = parse_env_text(launcher_env.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError):
+        return
+    for key, value in parsed.items():
+        if key.startswith("PANDA_HEALTH_") or key == "AWS_REGION":
+            os.environ.setdefault(key, value)
+
+
+def _crontab_read() -> str:
+    rc, stdout, stderr, _timed_out = _run(["crontab", "-l"], cwd=Path.home(), timeout_s=15)
+    if rc == 0:
+        return stdout
+    if "no crontab" in (stderr + stdout).lower():
+        return ""
+    raise OSError("could not read the current crontab, so it was not changed: "
+                  + _redacted_tail(stderr or stdout or f"exit code {rc}"))
+
+
+def _crontab_write(text: str) -> None:
+    proc = subprocess.run(["crontab", "-"], input=text, text=True, capture_output=True,
+                          timeout=15, check=False)
+    if proc.returncode != 0:
+        raise OSError("crontab rejected the update: "
+                      + _redacted_tail(proc.stderr or f"exit code {proc.returncode}"))
+
+
+def _fallback_path() -> str:
+    """cron's PATH: the start block's order (Node 22 from nvm, user-local claude, ffmpeg)."""
+    def version(path: Path) -> Tuple[int, ...]:
+        return tuple(int(part) for part in re.findall(r"\d+", path.parent.name))
+
+    home = Path.home()
+    node22 = sorted(home.glob(".nvm/versions/node/v22*/bin"), key=version)
+    parts = [str(node22[-1])] if node22 else []
+    parts += [str(home / ".npm-global" / "bin"), "/usr/local/bin", "/usr/bin", "/bin"]
+    return ":".join(parts)
+
+
+def cron_line(schedule: str, env_file: Path) -> str:
+    script = Path(__file__).resolve()
+    log = Path.home() / "panda-healthcheck.log"
+    flock = shutil.which("flock")
+    user = re.sub(r"[^A-Za-z0-9_.-]", "_", os.environ.get("USER") or "user")
+    lock = f"{flock} -n /tmp/panda-healthcheck-{user}.lock " if flock else ""
+    extra = "" if env_file == DEFAULT_ENV_FILE else f" --env-file {env_file}"
+    return (f"{schedule} * * * PATH={_fallback_path()} {lock}{sys.executable} {script}{extra}"
+            f" >> {log} 2>&1")
+
+
+def install_schedule(config: Config, schedule: Optional[str], env_file: Path) -> int:
+    """Add (or with schedule=None remove) this check's own crontab line; nothing else changes."""
+    if hasattr(os, "geteuid") and os.geteuid() == 0:
+        raise ValueError("install the schedule as the user that owns the Claude login, not root")
+    if schedule is not None:
+        match = re.fullmatch(r"(\d{1,2}) (\d{1,2})", schedule.strip())
+        if not match or int(match.group(1)) > 59 or int(match.group(2)) > 23:
+            raise ValueError('the schedule must be "MINUTE HOUR" in UTC, e.g. "30 2"')
+        schedule = f"{int(match.group(1))} {int(match.group(2))}"
+    for path in (Path(__file__).resolve(), Path.home(), Path(sys.executable)):
+        if " " in str(path):
+            raise ValueError(f"a cron line cannot hold a path with spaces: {path}")
+    current = _crontab_read()
+    config.state_file.parent.mkdir(parents=True, exist_ok=True)
+    backup = config.state_file.parent / (
+        "crontab.before." + utc_now().strftime("%Y%m%dT%H%M%SZ"))
+    backup.write_text(current, encoding="utf-8")
+    os.chmod(backup, 0o600)
+    kept = [line for line in current.splitlines() if CRON_MARKER not in line]
+    line = cron_line(schedule, env_file) if schedule is not None else None
+    if line:
+        kept.append(line)
+    _crontab_write("\n".join(kept) + "\n" if kept else "")
+    print(json.dumps({
+        "installed": line,
+        "replaced_previous_line": any(CRON_MARKER in old for old in current.splitlines()),
+        "crontab_backup": str(backup),
+    }, indent=2))
+    if line:
+        print("\nNext: put PANDA_HEALTH_WEBHOOK_URL (or PANDA_HEALTH_SNS_TOPIC_ARN), "
+              "PANDA_HEALTH_PUBLIC_URL and PANDA_HEALTH_BOX_NAME in "
+              f"{config.launcher_env_file}, then run:\n"
+              f"  {sys.executable} {Path(__file__).resolve()} --test-alert\n"
+              f"  {sys.executable} {Path(__file__).resolve()} --no-alert")
+    return 0
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        "--env-file", type=Path,
-        default=Path("~/.config/panda-healthcheck.env").expanduser(),
-        help="optional KEY=VALUE configuration file (default: %(default)s)",
+        "--env-file", type=Path, default=DEFAULT_ENV_FILE,
+        help="optional private KEY=VALUE settings that win over the launcher's .env "
+             "(default: %(default)s)",
+    )
+    parser.add_argument(
+        "--install", nargs="?", const=DEFAULT_SCHEDULE, metavar='"MINUTE HOUR"',
+        help="run this check every day from the user's crontab at MINUTE HOUR UTC "
+             f'(default "{DEFAULT_SCHEDULE}", 08:00 IST), then exit',
+    )
+    parser.add_argument(
+        "--uninstall", action="store_true",
+        help="remove this check's crontab line, then exit",
     )
     parser.add_argument(
         "--no-alert", action="store_true",
@@ -1624,8 +1766,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     args = parser.parse_args(argv)
     try:
-        load_env_file(args.env_file.expanduser())
+        env_file = args.env_file.expanduser()
+        load_settings(env_file)
         config = config_from_env()
+        if args.install is not None or args.uninstall:
+            return install_schedule(config, None if args.uninstall else args.install, env_file)
         if args.test_alert:
             return send_test_alert(config)
         return run(config, no_alert=args.no_alert, skip=parse_skip(args.skip))
