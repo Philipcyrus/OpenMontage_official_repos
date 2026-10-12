@@ -310,6 +310,25 @@ rev_paths = R._still_abs_paths(
 assert rev_paths and Path(rev_paths[0]).name == "still_sc1.png", rev_paths
 print("[ok] GET stills + revise shots skip rejected takes")
 
+# 2i) temporary DEBUG trailer never reaches Dify/OUI gate copy
+_gate_copy = ("GATE 1 — approve the script. 3 panda-narrated sections across 14.0s. "
+              "Approve the script, or request a revision.")
+_debug_q = (_gate_copy + "\n\n🔍 **DEBUG (temporary):**\n"
+            "- all_pending_images: `[]`\n"
+            "- door_files about to be sent: `[]`\n"
+            "- door target: `video`\n")
+assert R._strip_debug_trailer(_debug_q) == _gate_copy, R._strip_debug_trailer(_debug_q)
+assert R._strip_debug_trailer(
+    _gate_copy + " 🔍 DEBUG (temporary): all_pending_images: [] door target: video"
+) == _gate_copy
+assert R._strip_debug_trailer(_gate_copy) == _gate_copy
+assert R._strip_debug_trailer(None) is None
+assert R._safe_checkpoint_question(
+    {"question": _debug_q}, "Approve the script, or request a revision.") == _gate_copy
+pub_dbg = _public({"job_id": "job_dbg", "question": _debug_q, "artifacts": {}})
+assert pub_dbg["question"] == _gate_copy, pub_dbg["question"]
+print("[ok] DEBUG trailer stripped from stored and public gate questions")
+
 # 3) _sync: checkpoint status -> launcher state (stub the reads) -----------
 def _fake_latest(_pd, _jid):
     return _fake_latest.cp

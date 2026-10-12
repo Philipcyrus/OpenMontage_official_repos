@@ -49,6 +49,16 @@ def test_compound_brand_name_split_by_stt_still_matches():
                             guides)["guarded_missing"] == ["onepool"]
 
 
+def test_line_with_the_brand_words_also_spoken_separately_matches():
+    # job_32ef55725bea: "one pool" as ordinary words in the same line as "OnePool".
+    line = "One plan, one pool - works in the U.S. and China with OnePool."
+    guides = [{"word": "OnePool", "phonetic": "wun-pool"}]
+    heard = "One plan, one pool, works in the U.S. and China with one pool."
+    result = transcript_match(line, heard, guides)
+    assert result["ok"] is True
+    assert result["ratio"] == 1.0
+
+
 def test_dropped_words_fail():
     result = transcript_match(LINE, "No problem.", GUIDES)
     assert result["ok"] is False

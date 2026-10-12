@@ -89,8 +89,10 @@ def transcript_match(
         for field in ("word", "phonetic")
         for token in normalize_words(guide.get(field, ""))
     }
-    want = normalize_words(expected)
-    phonetic = normalize_words(_apply_guides(expected, pronunciation_guides))
+    want = _join_split_guards(normalize_words(expected), guarded)
+    phonetic = _join_split_guards(
+        normalize_words(_apply_guides(expected, pronunciation_guides)), guarded
+    )
     got = _join_split_guards(normalize_words(heard), guarded)
     best = max(
         (difflib.SequenceMatcher(a=ref, b=got, autojunk=False) for ref in (want, phonetic)),

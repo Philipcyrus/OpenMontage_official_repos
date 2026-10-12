@@ -363,6 +363,32 @@ def _lip_sync_warning_suffix(artifacts: Optional[dict[str, Any]]) -> str:
     )
 
 
+_DEBUG_HEADER_RE = re.compile(r"DEBUG\s*\(temporary\)", re.IGNORECASE)
+_DEBUG_LINE_RE = re.compile(
+    r"^\s*(?:[-*•]|\d+[.)])\s|pending_images|door_files|door target", re.IGNORECASE)
+
+
+def _strip_debug_trailer(text: Any) -> Any:
+    """Drop a ``DEBUG (temporary):`` block (and its bullet lines) from user-facing gate copy."""
+    if not isinstance(text, str) or not _DEBUG_HEADER_RE.search(text):
+        return text
+    out: list[str] = []
+    in_block = False
+    for line in text.splitlines():
+        m = _DEBUG_HEADER_RE.search(line)
+        if m:
+            in_block = True
+            prefix = re.sub(r"[^\w.!?)\]\"'。！？]+$", "", line[:m.start()])
+            if prefix.strip():
+                out.append(prefix)
+            continue
+        if in_block and (not line.strip() or _DEBUG_LINE_RE.search(line)):
+            continue
+        in_block = False
+        out.append(line)
+    return "\n".join(out).rstrip()
+
+
 def _safe_checkpoint_question(checkpoint: dict[str, Any], fallback: str) -> str:
     """Compose agent-authored gate copy onto the mandatory launcher question.
 
@@ -372,7 +398,7 @@ def _safe_checkpoint_question(checkpoint: dict[str, Any], fallback: str) -> str:
     raw = checkpoint.get("question")
     if not isinstance(raw, str):
         return fallback
-    custom = raw.replace("\x00", "").strip()
+    custom = _strip_debug_trailer(raw.replace("\x00", "")).strip()
     if not custom:
         return fallback
     # If the agent already included the mandatory wording, keep their text.
