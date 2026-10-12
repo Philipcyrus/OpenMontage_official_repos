@@ -128,56 +128,6 @@ tail -f ~/launcher.log
 ```
 Restart = stop then start. Switch runner: edit `DIFY_RUNNER` in `.env`, then restart.
 
-## Daily Claude + Higgsfield health check (cron)
-
-`deploy/panda_healthcheck.py` is a zero-generation morning canary for the full production path:
-
-1. launcher `GET /health`,
-2. `claude auth status --json`, and
-3. a bounded Claude Haiku session that discovers and calls the real Claude.ai Higgsfield
-   `balance` MCP tool exactly once.
-
-The checker verifies the structured MCP tool-use/result pair rather than trusting the model's
-text. It cannot call generation tools, disables Claude auto-memory and session persistence, and
-uses bounded turns, budget, retries, and wall time. `balance` consumes no Higgsfield credits; the
-Claude canary does consume a small amount of Claude usage (about $0.032 in the 2026-09-08 box
-verification; treat that as an observation, not a guaranteed price).
-
-Run it as **`ec2-user`**, not root: Claude OAuth and the Claude.ai Higgsfield connector belong to
-that Unix account. Configure alerts outside Git:
-
-```bash
-mkdir -p ~/.config ~/.local/state/panda-healthcheck
-cp deploy/panda-healthcheck.env.example ~/.config/panda-healthcheck.env
-chmod 600 ~/.config/panda-healthcheck.env
-
-# Edit the private file and set PANDA_HEALTH_SNS_TOPIC_ARN or PANDA_HEALTH_WEBHOOK_URL.
-# Safe manual verification: runs the real checks but sends no notification.
-/usr/bin/python3 deploy/panda_healthcheck.py --no-alert
-```
-
-Install the cron entry with `crontab -e` **without `sudo`**. This example runs daily at 06:00 UTC,
-prevents overlapping checks, and keeps a local audit log. The same entry is available as
-`deploy/panda-healthcheck.cron.example`:
-
-```cron
-SHELL=/bin/bash
-HOME=/home/ec2-user
-PATH=/home/ec2-user/.nvm/versions/node/v22.23.2/bin:/home/ec2-user/.npm-global/bin:/usr/local/bin:/usr/bin:/bin
-
-0 6 * * * /usr/bin/flock -n /tmp/panda-healthcheck.lock /usr/bin/python3 /home/ec2-user/OpenMontage-Repos/OpenMontage_official_repos/deploy/panda_healthcheck.py >> /home/ec2-user/panda-healthcheck.log 2>&1
-```
-
-Cron uses the server's UTC timezone unless `CRON_TZ` is supported and set. The script alerts on the
-first failure, reminds after `PANDA_HEALTH_REMINDER_HOURS`, and sends one recovery notification. A
-healthy daily run is logged but not alerted unless `PANDA_HEALTH_NOTIFY_SUCCESS=true`.
-
-Failure codes distinguish Claude logout/OAuth expiry, Claude overload/rate limit/timeout,
-Higgsfield discovery/auth/provider failure, low credits, and launcher failure. Reauthenticate
-Claude with `claude auth login`; because Higgsfield is a Claude.ai account connector rather than a
-locally configured MCP server, reconnect it in the Claude.ai connector settings when the checker
-reports `HIGGSFIELD_AUTH_FAILED` or `HIGGSFIELD_NOT_DISCOVERED`.
-
 > If you don't need the Remotion/HyperFrames lanes, you can skip the three Node lines — the
 > launcher runs fine on system Node 18 and the default `ffmpeg`/`panda_render` lane is unaffected.
 
@@ -257,13 +207,82 @@ The report files live at `data/jobs/<job_id>/artifacts/cost_report.{md,json}` (m
 engine project's `projects/<job_id>/artifacts/`). See `dify_launcher/DIFY_INTEGRATION.md` for the
 endpoint contract.
 
+## Daily health check (every layer, cron)
+
+`deploy/panda_healthcheck.py` runs once a day and tests every layer a Dify job crosses. It
+generates nothing:
+
+| Layer | What it proves | What it catches |
+|---|---|---|
+| `launcher` | `/health` is ok, the runner is `claude`, code is not stale, the loaded revision matches the checkout | a restart that skipped `.env` (mock runner); a pull without a restart |
+| `launcher_reach` | `/health` answers on the box's private IP, not only on 127.0.0.1 | a `--host 127.0.0.1` restart, which gives Dify 502 while on-box checks pass |
+| `public_url` | Dify's BASE_URL reaches this launcher (DNS, TLS, proxy), and the certificate is not about to expire | broken DNS, proxy or security group; an expiring certificate |
+| `launcher_env` | the running launcher finds `claude`, has no `ANTHROPIC_*` override, and its `.env` restarts into `claude` | API-key mode, which silently drops the Higgsfield connector |
+| `claude_auth` | the launcher's own `claude` binary is logged in | a logged-out or expired Claude login |
+| `higgsfield_mcp` | one real Claude → Higgsfield `balance` call works, and credits are above the threshold | a disconnected connector, the subscription usage limit, low credits |
+| `elevenlabs` | the API key authenticates, and enough characters are left | an expired key or a quota that is nearly used up |
+| `render` | ffmpeg encodes and reads back a 1 s libx264/aac clip; Remotion is ready when screenshot jobs are on | a broken ffmpeg; Node 18 or a missing `remotion-composer` |
+| `disk` | free space for jobs, projects, `~/.claude` and the repo | a filling disk |
+| `dify` | Dify's file server (screenshot downloads) and any extra URLs answer | Dify unreachable from the box |
+
+Higgsfield `balance` and the ElevenLabs quota read are free. The Claude turn uses Haiku, at most
+4 turns, `--max-budget-usd 0.10` and no session persistence. It cost about $0.032 of
+subscription usage in the 2026-09-08 box verification (an observation, not a price). The check
+verifies the structured tool call and result, never the model's text. It reads secrets only
+from the launcher's `.env`, uses them in memory and never prints them.
+
+**Install once per box**, as the user that owns the Claude login (box 1 `ec2-user`, box 2
+`admin`), without `sudo`. Nothing here needs a launcher restart:
+
+```bash
+cd ~/OpenMontage-Repos/OpenMontage_official_repos    # box 2: cd ~/OpenMontage_official_repos
+git pull --ff-only
+deploy/install_healthcheck.sh          # daily 02:30 UTC (08:00 IST); box 2: deploy/install_healthcheck.sh "40 2"
+```
+
+The installer creates `~/.config/panda-healthcheck.env` (mode 600; it never overwrites an
+existing one), backs up the crontab, and replaces only this check's own crontab line. Then edit
+that file and set:
+
+- an alert destination: `PANDA_HEALTH_WEBHOOK_URL` (Slack, Discord, or Google Chat with
+  `PANDA_HEALTH_WEBHOOK_KIND=generic`) or `PANDA_HEALTH_SNS_TOPIC_ARN` (needs boto3 and
+  `sns:Publish` on the instance role);
+- `PANDA_HEALTH_PUBLIC_URL`, Dify's BASE_URL for this box (box 1: `https://dev.om.mvnoc.ai`);
+- `PANDA_HEALTH_BOX_NAME`, a label for alerts such as `box1-prod`.
+
+Then verify:
+
+```bash
+python3 deploy/panda_healthcheck.py --test-alert   # one test message to the alert channel
+python3 deploy/panda_healthcheck.py --no-alert     # the full check now; prints the JSON summary
+python3 deploy/panda_healthcheck.py --no-alert --skip higgsfield_mcp   # the same, without the Claude turn
+```
+
+**Alerts.** The first failure alerts at once. So does any change in what is failing. An unchanged
+failure reminds every `PANDA_HEALTH_REMINDER_HOURS`, and the first healthy run sends a recovery.
+With `PANDA_HEALTH_NOTIFY_SUCCESS=true` (the template default) a short OK message arrives every
+day, so silence means the check itself stopped. Each alert names the failing layer, a code and
+the fix. The results also go to `~/panda-healthcheck.log`, and the exit code is non-zero when
+unhealthy.
+
+**Notes.**
+- Higgsfield is a Claude.ai account connector, not a local MCP server. On
+  `HIGGSFIELD_AUTH_FAILED` or `HIGGSFIELD_NOT_DISCOVERED`, reconnect it in the Claude.ai
+  connector settings. On `CLAUDE_LOGGED_OUT`, run `claude auth login` as the same user.
+- `public_url` calls the box's own public URL from the box. If the security group admits only
+  Dify on 443, allow the box's own public IP as well, or leave `PANDA_HEALTH_PUBLIC_URL` empty.
+  `launcher_reach` still catches a loopback-only bind.
+- An older install's crontab-wide `SHELL=`/`HOME=`/`PATH=` lines are left in place; the new line
+  sets its own `PATH`.
+
 ## Files here
 | file | purpose |
 |---|---|
 | `install.sh` | system deps + venv + launcher deps + import/render smoke test |
 | `panda-launcher.service` | systemd unit (uvicorn on 8501, Node 22 + claude on PATH) |
-| `panda_healthcheck.py` | cron-safe Claude/Higgsfield/launcher health canary + alerts |
+| `panda_healthcheck.py` | daily all-layers health check (launcher, Claude, Higgsfield, ElevenLabs, render, disk, Dify) + alerts |
+| `install_healthcheck.sh` | per-box, per-user installer for the daily check (env file + crontab line) |
 | `panda-healthcheck.env.example` | private health-check configuration template |
-| `panda-healthcheck.cron.example` | example entry for `ec2-user`'s crontab |
+| `panda-healthcheck.cron.example` | example crontab line (box 1, `ec2-user`) |
 | `nginx-panda.conf` | reverse-proxy block (subpath or subdomain) |
 | `requirements-launcher.txt` | minimal deps for launcher + render |
