@@ -247,10 +247,13 @@ def test_parse_env_text_follows_shell_assignment_rules():
         "E=val#kept",
         "# F=commented",
         "G=",
+        "H=   # a note, so the value is empty",
+        "I=#literal",
         "A=2",
     ])
     assert health.parse_env_text(text) == {
         "A": "2", "B": "two words", "C": "x # y", "D": "val", "E": "val#kept", "G": "",
+        "H": "", "I": "#literal",
     }
 
 
@@ -293,7 +296,7 @@ def test_find_launcher_process_reads_only_allowed_keys(tmp_path):
     fake_proc(100, [b"python", b"-m", b"uvicorn", b"dify_launcher.app:app",
                     b"--host", b"127.0.0.1", b"--port", b"8501"],
               b"PATH=/opt/node22/bin:/usr/bin\0ANTHROPIC_API_KEY=sk-ant-x\0"
-              b"DIFY_TOKEN=tok-SECRET\0CLAUDE_BIN=/opt/claude\0")
+              b"DIFY_TOKEN=tok-SECRET\0CLAUDE_BIN=/opt/claude\0ELEVENLABS_API_KEY=el-SECRET\0")
     (tmp_path / "self").mkdir()                                         # non-numeric entry
 
     process = health.find_launcher_process(8501, tmp_path)
@@ -301,6 +304,7 @@ def test_find_launcher_process_reads_only_allowed_keys(tmp_path):
     assert (process.pid, process.host, process.port) == (100, "127.0.0.1", 8501)
     assert process.env == {"PATH": "/opt/node22/bin:/usr/bin", "CLAUDE_BIN": "/opt/claude"}
     assert process.overrides["ANTHROPIC_API_KEY"] is True
+    assert process.elevenlabs_key == "el-SECRET"
     assert "SECRET" not in repr(process)
     assert health.find_launcher_process(8501, tmp_path / "missing") is None
 
@@ -509,7 +513,7 @@ def test_elevenlabs_low_quota_warns_and_never_echoes_the_key(tmp_path, config, m
     assert "el-test-key" not in json.dumps(dataclasses.asdict(result))
 
 
-def test_elevenlabs_key_without_user_permission_still_counts_as_valid(tmp_path, config, monkeypatch):
+def test_elevenlabs_key_without_user_permission_is_valid(tmp_path, config, monkeypatch):
     monkeypatch.setattr(health, "http_get", http_router({health.ELEVENLABS_SUBSCRIPTION_URL: (
         401, {"detail": {"status": "missing_permissions",
                          "message": "The API key you used is missing the permission "
@@ -839,3 +843,123 @@ def test_unreadable_crontab_is_never_overwritten(config, crontab, monkeypatch):
     with pytest.raises(OSError):
         health.install_schedule(config, "30 2", health.DEFAULT_ENV_FILE)
     assert crontab["written"] == []
+
+
+# ---------------------------------------------------------------------------
+# Regressions from the review
+# ---------------------------------------------------------------------------
+
+def realistic_stream(result_subtype="success", tokens=25295, duration_ms=4290):
+    """A connector-missing canary run shaped like Claude Code 2.1.x stream-json."""
+    return "\n".join([
+        _line({"type": "system", "subtype": "init", "session_id": "5d2c9a52-9b1e-4429-a529-0d3f",
+               "tools": ["ToolSearch"], "model": "claude-haiku"}),
+        _line({"type": "assistant", "uuid": "a529-429", "message": {
+            "id": "msg_01529429", "usage": {"cache_creation_input_tokens": tokens},
+            "content": [{"type": "text", "text": "HIGGSFIELD_FAIL: no balance tool"}]}}),
+        _line({"type": "result", "subtype": result_subtype,
+               "is_error": result_subtype != "success", "duration_ms": duration_ms,
+               "total_cost_usd": 0.0429, "usage": {"input_tokens": 529},
+               "result": "HIGGSFIELD_FAIL"}),
+    ])
+
+
+def test_ids_and_counters_in_the_json_are_not_read_as_http_errors():
+    result = health.parse_canary_stream(realistic_stream(), "", False)
+    assert result.code == "HIGGSFIELD_NOT_DISCOVERED" and result.severity == "critical"
+    stopped = health.parse_canary_stream(realistic_stream("error_max_turns", duration_ms=5291),
+                                         "", False)
+    assert stopped.code == "CLAUDE_CANARY_STOPPED"
+
+
+def test_a_real_overload_in_the_result_text_is_still_classified():
+    stdout = _line({"type": "result", "subtype": "success", "is_error": True,
+                    "result": 'API Error: 529 {"type":"overloaded_error"}'})
+    assert health.parse_canary_stream(stdout, "", False).code == "CLAUDE_OVERLOADED"
+    stdout = _line({"type": "result", "subtype": "success", "is_error": True,
+                    "result": "API Error: 429 rate_limit_error"})
+    assert health.parse_canary_stream(stdout, "", False).code == "CLAUDE_RATE_LIMITED"
+
+
+def test_elevenlabs_tests_the_key_the_launcher_holds(tmp_path, config, monkeypatch):
+    router = http_router({health.ELEVENLABS_SUBSCRIPTION_URL: (
+        401, {"detail": {"status": "invalid_api_key", "message": "Invalid API key"}})})
+    monkeypatch.setattr(health, "http_get", router)
+    ctx = make_ctx(tmp_path, process=launcher_process(elevenlabs_key="el-old-revoked"))
+    result = health.check_elevenlabs(config, ctx)          # .env holds a different, new key
+    assert router.calls[0]["headers"]["xi-api-key"] == "el-old-revoked"
+    assert result.code == "ELEVENLABS_AUTH_FAILED"
+    assert "NEXT_RESTART_ELEVENLABS_KEY" in result.metadata["codes"]
+    assert "el-old-revoked" not in json.dumps(dataclasses.asdict(result))
+
+
+def test_a_skip_run_neither_alerts_nor_moves_the_state(tmp_path, config, monkeypatch, capsys):
+    config = wire_healthy_box(tmp_path, config, monkeypatch)
+    config = dataclasses.replace(config, webhook_url="https://hooks.example.com/T")
+    sent = []
+    monkeypatch.setattr(health, "send_webhook", lambda url, kind, message: sent.append(message))
+    assert health.run(config, skip=["higgsfield_mcp"], proc_root=tmp_path / "no-proc") == 0
+    summary = json.loads(capsys.readouterr().out)
+    assert summary["partial"] is True and summary["notification"] is None
+    assert sent == [] and not config.state_file.exists()
+
+
+def test_blank_settings_use_defaults_and_off_disables_disk_and_tls_warnings(config, monkeypatch):
+    for key in ("PANDA_HEALTH_REMINDER_HOURS", "PANDA_HEALTH_LOW_CREDITS",
+                "PANDA_HEALTH_CLAUDE_TIMEOUT_S"):
+        monkeypatch.setenv(key, "")
+    for key in ("PANDA_HEALTH_DISK_MIN_FREE_GB", "PANDA_HEALTH_DISK_MIN_FREE_PCT",
+                "PANDA_HEALTH_TLS_WARN_DAYS"):
+        monkeypatch.setenv(key, "off")
+    changed = health.config_from_env()
+    assert changed.reminder_hours == 24 and changed.low_credits == 500.0
+    assert changed.claude_timeout_s == 90
+    assert changed.disk_min_free_gb is None and changed.disk_min_free_pct is None
+    assert changed.tls_warn_days is None
+
+
+def test_disk_off_keeps_the_critical_floor(tmp_path, config, monkeypatch):
+    config = dataclasses.replace(config, disk_min_free_gb=None, disk_min_free_pct=None)
+    monkeypatch.setattr(health.shutil, "disk_usage", lambda path: Usage(100 * GB, 96 * GB, 4 * GB))
+    assert health.check_disk(config, make_ctx(tmp_path)).ok
+    monkeypatch.setattr(health.shutil, "disk_usage",
+                        lambda path: Usage(1000 * GB, 999.5 * GB, 0.5 * GB))
+    assert health.check_disk(config, make_ctx(tmp_path)).code == "DISK_CRITICAL"
+
+
+def test_an_unwritable_job_folder_is_critical(tmp_path, config, monkeypatch):
+    monkeypatch.setattr(health.shutil, "disk_usage", lambda path: Usage(100 * GB, 40 * GB, 60 * GB))
+    monkeypatch.setattr(health.os, "access", lambda path, mode: False)
+    result = health.check_disk(config, make_ctx(tmp_path))
+    assert result.code == "JOBS_DIR_NOT_WRITABLE" and result.severity == "critical"
+    assert "PROJECTS_DIR_NOT_WRITABLE" in result.metadata["codes"]
+
+
+def test_a_pull_that_changed_no_launcher_code_needs_no_restart(tmp_path, config, monkeypatch):
+    body = dict(HEALTH_BODY, build_revision="b" * 40)
+    monkeypatch.setattr(health, "http_get", http_router({config.launcher_url: (200, body)}))
+    diff = {"out": "deploy/README.md\ndeploy/panda_healthcheck.py\ntests/test_x.py\ndocs/a.md\n"}
+    monkeypatch.setattr(health, "_run", lambda argv, *, cwd, timeout_s, env=None:
+                        (0, diff["out"], "", False))
+    result, _ = health.check_launcher(config, make_ctx(tmp_path))
+    assert result.ok
+
+    diff["out"] = "lib/checkpoint.py\nREADME.md\n"
+    result, _ = health.check_launcher(config, make_ctx(tmp_path))
+    assert result.code == "LAUNCHER_RESTART_PENDING" and "lib/checkpoint.py" in result.detail
+
+
+def test_unmapped_codes_get_a_neutral_hint_not_a_wrong_one():
+    results = [health.CheckResult("disk", False, "CHECK_CRASHED", "boom", severity="warning")]
+    _title, message = health.build_alert("failure", results,
+                                         datetime(2026, 10, 12, tzinfo=timezone.utc), "b1")
+    assert "CHECK_CRASHED: see the detail lines above" in message
+    assert "temporary" not in message
+
+
+def test_cron_line_uses_a_private_lock(tmp_path, monkeypatch):
+    monkeypatch.setattr(health, "__file__", str(tmp_path / "deploy" / "panda_healthcheck.py"))
+    line = health.cron_line("30 2", health.DEFAULT_ENV_FILE, tmp_path / "state")
+    assert "/tmp/" not in line
+    if health.shutil.which("flock"):
+        assert str(tmp_path / "state" / "run.lock") in line

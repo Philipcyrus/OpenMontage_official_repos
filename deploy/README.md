@@ -232,8 +232,10 @@ verifies the structured tool call and result, never the model's text. It reads s
 from the launcher's `.env`, uses them in memory and never prints them.
 
 **It is one file that schedules itself.** Set it up once per box, as the user that owns the
-Claude login (box 1 `ec2-user`, box 2 `admin`), without `sudo`. Nothing here needs a launcher
-restart:
+Claude login (box 1 `ec2-user`, box 2 `admin`), without `sudo`. Installing it needs no launcher
+restart. If the `git pull` also brings launcher code changes, the first run reports
+`LAUNCHER_RESTART_PENDING` (or `LAUNCHER_CODE_STALE`). In that case restart with the start block
+above when no job is running:
 
 ```bash
 cd ~/OpenMontage-Repos/OpenMontage_official_repos    # box 2: cd ~/OpenMontage_official_repos

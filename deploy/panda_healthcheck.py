@@ -56,6 +56,7 @@ Everything has a default; normally only the first three are set:
 from __future__ import annotations
 
 import argparse
+import hmac
 import http.client
 import json
 import os
@@ -104,6 +105,8 @@ NET_ERRORS = (urllib.error.URLError, OSError, http.client.HTTPException, ValueEr
 _USAGE_LIMIT_MARKERS = (
     "usage limit", "weekly limit", "5-hour limit", "hour limit reached", "hit your limit",
 )
+_OVERLOAD_RE = re.compile(r"\b529\b|overloaded")
+_RATE_LIMIT_RE = re.compile(r"\b429\b|rate[ _-]?limit")
 _SECRET_RE = re.compile(
     r"\b(sk-ant-|sk-or-|sk_|xox[abposr]-)[A-Za-z0-9_\-]+"
     r"|(?i:bearer)\s+[A-Za-z0-9._~+/=\-]{12,}"
@@ -132,7 +135,7 @@ class Config:
     launcher_env_file: Path
     expect_runner: str                  # "" disables the runner check
     public_url: str
-    tls_warn_days: int
+    tls_warn_days: Optional[int]                 # None = no expiry warning
     claude_model: str
     claude_timeout_s: int
     claude_max_budget_usd: float
@@ -142,8 +145,8 @@ class Config:
     elevenlabs_enabled: bool
     elevenlabs_low_chars: Optional[int]
     require_remotion: Optional[bool]    # None = needed when DIFY_FILES_HOSTS is set
-    disk_min_free_gb: float
-    disk_min_free_pct: float
+    disk_min_free_gb: Optional[float]            # None = no low-space warning
+    disk_min_free_pct: Optional[float]           # (the 1 GB / 3% critical floor stays)
     extra_urls: List[Tuple[str, str]]
     box_name: str
     state_file: Path
@@ -170,9 +173,14 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _env_raw(name: str, default: Any) -> str:
+    """A blank value means the default, so clearing a setting never breaks the run."""
+    return os.environ.get(name, "").strip() or str(default)
+
+
 def _env_int(name: str, default: int, minimum: int = 0) -> int:
     try:
-        value = int(os.environ.get(name, str(default)))
+        value = int(_env_raw(name, default))
     except ValueError as exc:
         raise ValueError(f"{name} must be an integer") from exc
     if value < minimum:
@@ -182,7 +190,7 @@ def _env_int(name: str, default: int, minimum: int = 0) -> int:
 
 def _env_float(name: str, default: float, minimum: float = 0.0) -> float:
     try:
-        value = float(os.environ.get(name, str(default)))
+        value = float(_env_raw(name, default))
     except ValueError as exc:
         raise ValueError(f"{name} must be a number") from exc
     if value < minimum:
@@ -191,8 +199,8 @@ def _env_float(name: str, default: float, minimum: float = 0.0) -> float:
 
 
 def _env_number_or_off(name: str, default: str, cast: Callable[[str], Any]) -> Optional[Any]:
-    raw = os.environ.get(name, default).strip()
-    if raw.lower() in {"", "off", "none"}:
+    raw = _env_raw(name, default)
+    if raw.lower() in {"off", "none"}:
         return None
     try:
         return cast(raw)
@@ -244,7 +252,7 @@ def config_from_env() -> Config:
         ).expanduser(),
         expect_runner="" if runner.lower() in {"", "off", "none"} else runner,
         public_url=os.environ.get("PANDA_HEALTH_PUBLIC_URL", "").strip(),
-        tls_warn_days=_env_int("PANDA_HEALTH_TLS_WARN_DAYS", 14, 0),
+        tls_warn_days=_env_number_or_off("PANDA_HEALTH_TLS_WARN_DAYS", "14", int),
         claude_model=os.environ.get("PANDA_HEALTH_CLAUDE_MODEL", "haiku"),
         claude_timeout_s=_env_int("PANDA_HEALTH_CLAUDE_TIMEOUT_S", 90, 10),
         claude_max_budget_usd=_env_float("PANDA_HEALTH_MAX_BUDGET_USD", 0.10, 0.01),
@@ -256,8 +264,8 @@ def config_from_env() -> Config:
             "PANDA_HEALTH_ELEVENLABS_LOW_CHARS", "10000", int
         ),
         require_remotion=_env_auto_bool("PANDA_HEALTH_REQUIRE_REMOTION"),
-        disk_min_free_gb=_env_float("PANDA_HEALTH_DISK_MIN_FREE_GB", 5.0, 0.0),
-        disk_min_free_pct=_env_float("PANDA_HEALTH_DISK_MIN_FREE_PCT", 10.0, 0.0),
+        disk_min_free_gb=_env_number_or_off("PANDA_HEALTH_DISK_MIN_FREE_GB", "5", float),
+        disk_min_free_pct=_env_number_or_off("PANDA_HEALTH_DISK_MIN_FREE_PCT", "10", float),
         extra_urls=parse_extra_urls(os.environ.get("PANDA_HEALTH_EXTRA_URLS", "")),
         box_name=os.environ.get("PANDA_HEALTH_BOX_NAME", "").strip() or socket.gethostname(),
         state_file=Path(
@@ -279,7 +287,7 @@ def config_from_env() -> Config:
 # Env files and the running launcher's environment
 # ---------------------------------------------------------------------------
 
-_ENV_LINE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$")
+_ENV_LINE = re.compile(r"^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=(.*)$")
 
 
 def parse_env_text(text: str) -> Dict[str, str]:
@@ -293,12 +301,15 @@ def parse_env_text(text: str) -> Dict[str, str]:
         match = _ENV_LINE.match(raw)
         if not match:
             continue
-        key, value = match.group(1), match.group(2).strip()
+        key, raw_value = match.group(1), match.group(2)
+        value = raw_value.strip()
         if value[:1] in {'"', "'"}:
             end = value.find(value[0], 1)
             value = value[1:end] if end > 0 else value[1:]
         else:
-            value = re.split(r"\s#", value, maxsplit=1)[0].strip()
+            # A # after whitespace starts a comment (KEY=   # note is empty); KEY=#x is literal.
+            comment = re.search(r"\s#", raw_value)
+            value = (raw_value[:comment.start()] if comment else raw_value).strip()
         values[key] = value
     return values
 
@@ -323,10 +334,10 @@ class DotEnv:
 
 def read_launcher_dotenv(path: Path) -> DotEnv:
     try:
-        text = path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8", errors="replace")
     except FileNotFoundError:
         return DotEnv(False, {}, {})
-    except (OSError, UnicodeDecodeError) as exc:
+    except OSError as exc:
         return DotEnv(False, {}, {}, error=_safe_error(exc))
     parsed = parse_env_text(text)
     return DotEnv(
@@ -344,6 +355,8 @@ class LauncherProcess:
     port: int
     env: Dict[str, str]                          # PATH and CONFIG_KEYS only
     overrides: Dict[str, bool]                   # ANTHROPIC_OVERRIDE_KEYS -> non-empty
+    # The key the legs really send (memory only): a rotated key in .env is not live yet.
+    elevenlabs_key: Optional[str] = field(default=None, repr=False)
 
 
 def _uvicorn_bind(args: Sequence[str]) -> Tuple[str, int]:
@@ -367,14 +380,20 @@ def _uvicorn_bind(args: Sequence[str]) -> Tuple[str, int]:
     return host, port
 
 
-def _read_process_env(path: Path) -> Optional[Tuple[Dict[str, str], Dict[str, bool]]]:
-    """PATH, CONFIG_KEYS and override presence from /proc/<pid>/environ, nothing else."""
+def _read_process_env(
+    path: Path,
+) -> Optional[Tuple[Dict[str, str], Dict[str, bool], Optional[str]]]:
+    """From /proc/<pid>/environ: PATH, CONFIG_KEYS, override presence, the ElevenLabs key.
+
+    Nothing else is kept. The key stays in memory for the one quota call; never printed.
+    """
     try:
         raw = path.read_bytes()
     except OSError:
         return None
     env: Dict[str, str] = {}
     overrides = {key: False for key in ANTHROPIC_OVERRIDE_KEYS}
+    elevenlabs_key: Optional[str] = None
     for item in raw.split(b"\0"):
         key, sep, value = item.partition(b"=")
         if not sep:
@@ -384,7 +403,9 @@ def _read_process_env(path: Path) -> Optional[Tuple[Dict[str, str], Dict[str, bo
             env[name] = value.decode("utf-8", "replace")
         elif name in overrides:
             overrides[name] = bool(value)
-    return env, overrides
+        elif name == "ELEVENLABS_API_KEY" and value:
+            elevenlabs_key = value.decode("utf-8", "replace")
+    return env, overrides, elevenlabs_key
 
 
 def find_launcher_process(
@@ -416,7 +437,8 @@ def find_launcher_process(
         env = _read_process_env(entry / "environ")
         if env is None:
             continue
-        return LauncherProcess(int(entry.name), host, proc_port, env[0], env[1])
+        return LauncherProcess(int(entry.name), host, proc_port, env[0], env[1],
+                               elevenlabs_key=env[2])
     return None
 
 
@@ -461,6 +483,25 @@ def git_head(repo: Path) -> Optional[str]:
     )
     head = stdout.strip()
     return head if rc == 0 and re.fullmatch(r"[0-9a-f]{40,64}", head) else None
+
+
+def launcher_code_changed(repo: Path, loaded: str, expected: str) -> Optional[List[str]]:
+    """Python files the running launcher may have imported that changed since it started.
+
+    None when git cannot tell (then a restart is assumed to be due). Docs, tests, deploy/
+    and data files do not count: the launcher reads those fresh or never imports them.
+    """
+    rc, stdout, _stderr, _timed_out = _run(
+        ["git", "-C", str(repo), "diff", "--name-only", loaded, expected],
+        cwd=repo, timeout_s=15,
+    )
+    if rc != 0:
+        return None
+    return [
+        name for name in (line.strip() for line in stdout.splitlines())
+        if name.endswith(".py") and not name.startswith(("tests/", "deploy/"))
+        and not Path(name).name.startswith("test_")
+    ]
 
 
 def gather_context(config: Config, proc_root: Path = Path("/proc")) -> Context:
@@ -669,11 +710,17 @@ def check_launcher(config: Config, ctx: Context) -> Tuple[CheckResult, Optional[
     loaded = str(body.get("build_revision") or "")
     expected = ctx.expected_revision
     if loaded and loaded != "unknown" and expected and loaded != expected:
-        problems.append((
-            "warning", "LAUNCHER_RESTART_PENDING",
-            f"the launcher loaded {loaded[:12]} but the checkout is at {expected[:12]}; "
-            "restart it when no job is running",
-        ))
+        changed = launcher_code_changed(config.repo, loaded, expected)
+        if changed is None or changed:
+            shown = ""
+            if changed:
+                more = ", ..." if len(changed) > 3 else ""
+                shown = f" ({', '.join(changed[:3])}{more})"
+            problems.append((
+                "warning", "LAUNCHER_RESTART_PENDING",
+                f"the launcher loaded {loaded[:12]} but the checkout is at {expected[:12]}"
+                f"{shown}; restart it when no job is running",
+            ))
     metadata = {
         "runner": runner,
         "async": body.get("async"),
@@ -790,7 +837,7 @@ def check_public_url(config: Config, local_body: Optional[Dict[str, Any]]) -> Ch
         try:
             days = tls_days_left(parsed.hostname, parsed.port or 443)
             metadata["tls_days_left"] = round(days, 1)
-            if days < config.tls_warn_days:
+            if config.tls_warn_days is not None and days < config.tls_warn_days:
                 problems.append((
                     "warning", "PUBLIC_TLS_EXPIRING",
                     f"the TLS certificate for {parsed.hostname} expires in {days:.0f} days",
@@ -957,6 +1004,31 @@ def _result_payload(content: Any) -> Optional[Dict[str, Any]]:
     return value if isinstance(value, dict) else None
 
 
+def _readable_text(stdout: str, stderr: str, records: Sequence[Dict[str, Any]]) -> str:
+    """stderr, non-JSON stdout lines, and the text fields of the stream-json records."""
+    parts = [stderr]
+    for line in stdout.splitlines():
+        try:
+            json.loads(line)
+        except json.JSONDecodeError:
+            parts.append(line)
+    for record in records:
+        for key in ("result", "error"):
+            if isinstance(record.get(key), str):
+                parts.append(record[key])
+        message = record.get("message")
+        if not isinstance(message, dict):
+            continue
+        for block in message.get("content") or []:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text" and isinstance(block.get("text"), str):
+                parts.append(block["text"])
+            elif block.get("type") == "tool_result":
+                parts.append(_result_text(block.get("content")) or "")
+    return "\n".join(parts).lower()
+
+
 def parse_canary_stream(stdout: str, stderr: str, timed_out: bool) -> CheckResult:
     """Classify the real MCP exchange from Claude's stream-json output."""
     records = list(_json_lines(stdout))
@@ -1008,7 +1080,9 @@ def parse_canary_stream(stdout: str, stderr: str, timed_out: bool) -> CheckResul
             severity="warning",
         )
 
-    combined = (stdout + "\n" + stderr).lower()
+    # Match error markers only in human-readable text: the raw JSON is full of ids, token
+    # counts and durations, and "cache_creation_input_tokens": 25295 is not an HTTP 529.
+    combined = _readable_text(stdout, stderr, records)
     if any(text in combined for text in (
         "oauth session expired", "failed to authenticate", "authentication_error",
     )):
@@ -1027,12 +1101,12 @@ def parse_canary_stream(stdout: str, stderr: str, timed_out: bool) -> CheckResul
             "higgsfield_mcp", False, "CLAUDE_TIMEOUT",
             "Claude/Higgsfield canary exceeded its wall-time limit", severity="warning",
         )
-    if "529" in combined or "overloaded" in combined:
+    if _OVERLOAD_RE.search(combined):
         return CheckResult(
             "higgsfield_mcp", False, "CLAUDE_OVERLOADED",
             "Claude returned a temporary overload response", severity="warning",
         )
-    if "429" in combined or "rate limit" in combined:
+    if _RATE_LIMIT_RE.search(combined):
         return CheckResult(
             "higgsfield_mcp", False, "CLAUDE_RATE_LIMITED",
             "Claude returned a rate-limit response", severity="warning",
@@ -1123,13 +1197,23 @@ def check_elevenlabs(config: Config, ctx: Context) -> CheckResult:
     if not config.elevenlabs_enabled:
         return CheckResult("elevenlabs", True, "ELEVENLABS_NOT_CHECKED",
                            "disabled by PANDA_HEALTH_ELEVENLABS", severity="info")
-    key = os.environ.get("ELEVENLABS_API_KEY") or ctx.dotenv.elevenlabs_key
+    # Test the key the running launcher's legs send; .env only takes effect at a restart.
+    live = ctx.process.elevenlabs_key if ctx.process else None
+    planned = ctx.dotenv.elevenlabs_key
+    key = os.environ.get("ELEVENLABS_API_KEY") or live or planned
     if not key:
         return CheckResult(
             "elevenlabs", False, "ELEVENLABS_KEY_MISSING",
             f"ELEVENLABS_API_KEY is empty in {config.launcher_env_file}: narration, voice "
             "matching and music would fail",
         )
+    pending: List[Problem] = []
+    if live and ctx.dotenv.found and not hmac.compare_digest(live, planned or ""):
+        pending.append((
+            "warning", "NEXT_RESTART_ELEVENLABS_KEY",
+            ".env has a different ELEVENLABS_API_KEY than the running launcher; the legs use "
+            "the running one until the launcher is restarted",
+        ))
     try:
         status, raw = http_get(
             ELEVENLABS_SUBSCRIPTION_URL,
@@ -1149,7 +1233,7 @@ def check_elevenlabs(config: Config, ctx: Context) -> CheckResult:
         reset = data.get("next_character_count_reset_unix")
         if isinstance(reset, (int, float)) and not isinstance(reset, bool):
             metadata["resets_at"] = datetime.fromtimestamp(reset, timezone.utc).isoformat()
-        problems: List[Problem] = []
+        problems: List[Problem] = list(pending)
         summary = "key valid"
         if (isinstance(count, int) and isinstance(limit, int)
                 and not isinstance(count, bool) and not isinstance(limit, bool)):
@@ -1172,16 +1256,16 @@ def check_elevenlabs(config: Config, ctx: Context) -> CheckResult:
         if "missing_permission" in detail_status.lower() or "permission" in (
             detail_message.lower()
         ):
-            return CheckResult(
-                "elevenlabs", True, "ELEVENLABS_OK_NO_QUOTA",
+            return summarize(
+                "elevenlabs", pending, "ELEVENLABS_OK_NO_QUOTA",
                 "key authenticates, but it lacks the User permission, so the quota cannot be "
-                "read; grant User access on the key to track it", severity="info",
+                "read; grant User access on the key to track it",
             )
-        return CheckResult(
-            "elevenlabs", False, "ELEVENLABS_AUTH_FAILED",
-            f"ElevenLabs rejected the API key (HTTP {status}"
+        return summarize("elevenlabs", [(
+            "critical", "ELEVENLABS_AUTH_FAILED",
+            f"ElevenLabs rejected the API key the launcher uses (HTTP {status}"
             f"{', ' + detail_status if detail_status else ''})",
-        )
+        )] + pending, "", "")
     return CheckResult("elevenlabs", False, "ELEVENLABS_UNAVAILABLE",
                        f"ElevenLabs answered HTTP {status}", severity="warning")
 
@@ -1271,6 +1355,16 @@ def check_disk(config: Config, ctx: Context) -> CheckResult:
         return CheckResult("disk", False, "DISK_UNKNOWN", "could not read any volume",
                            severity="warning")
     problems: List[Problem] = []
+    # Free space is useless if the launcher cannot create a job folder. It mkdirs with
+    # parents=True, so the nearest existing folder must be writable (nothing is written here).
+    for code, label, target in (("JOBS_DIR_NOT_WRITABLE", "jobs", ctx.data_dir / "jobs"),
+                                ("PROJECTS_DIR_NOT_WRITABLE", "projects", ctx.projects_dir)):
+        existing = _existing_ancestor(target.expanduser())
+        if (existing is None or not existing.is_dir()
+                or not os.access(str(existing), os.W_OK | os.X_OK)):
+            problems.append(("critical", code,
+                             f"{label} folder {target} is not writable by this user (at "
+                             f"{existing}); every new job would fail"))
     lines = []
     for volume in volumes.values():
         where = f"{'/'.join(volume['labels'])} ({volume['path']})"
@@ -1279,8 +1373,10 @@ def check_disk(config: Config, ctx: Context) -> CheckResult:
         if volume["free_gb"] < 1 or volume["free_pct"] < 3:
             problems.append(("critical", "DISK_CRITICAL",
                              f"{where}: only {free}; renders and checkpoints will fail"))
-        elif (volume["free_gb"] < config.disk_min_free_gb
-              or volume["free_pct"] < config.disk_min_free_pct):
+        elif ((config.disk_min_free_gb is not None
+               and volume["free_gb"] < config.disk_min_free_gb)
+              or (config.disk_min_free_pct is not None
+                  and volume["free_pct"] < config.disk_min_free_pct)):
             problems.append(("warning", "DISK_LOW", f"{where}: {free}"))
     return summarize("disk", problems, "DISK_OK", "; ".join(lines),
                      {"volumes": list(volumes.values())})
@@ -1382,6 +1478,15 @@ _ACTIONS: Tuple[Tuple[Tuple[str, ...], str], ...] = (
      "Run `claude auth login` as this Unix user, then rerun the check."),
     (("CLAUDE_USAGE_LIMIT",),
      "The Claude subscription is at its usage limit; jobs stall until it resets."),
+    (("CLAUDE_BINARY_MISSING", "HEALTHCHECK_CLAUDE_DIFFERS"),
+     "Remove PANDA_HEALTH_CLAUDE_BIN from ~/.config/panda-healthcheck.env (an older install "
+     "pinned a Node path) so the check uses the launcher's claude."),
+    (("CLAUDE_AUTH_CHECK_FAILED", "CLAUDE_AUTH_TIMEOUT"),
+     "Run `claude auth status --json` as this user and fix the error it prints."),
+    (("CLAUDE_TIMEOUT", "CLAUDE_OVERLOADED", "CLAUDE_RATE_LIMITED", "CLAUDE_API_UNREACHABLE",
+      "CLAUDE_CANARY_STOPPED", "HIGGSFIELD_UNAVAILABLE"),
+     "Likely a temporary Claude or Higgsfield incident; if it repeats tomorrow, run "
+     "`claude -p hello` as this user and check status.anthropic.com."),
     (("HIGGSFIELD_AUTH_FAILED", "HIGGSFIELD_NOT_DISCOVERED"),
      "Reconnect Higgsfield in the Claude.ai connector settings, then rerun the check."),
     (("HIGGSFIELD_LOW_CREDITS",), "Top up Higgsfield credits."),
@@ -1396,20 +1501,38 @@ _ACTIONS: Tuple[Tuple[Tuple[str, ...], str], ...] = (
     (("NEXT_RESTART_API_KEY_MODE", "NEXT_RESTART_WRONG_RUNNER"),
      "Fix the launcher's .env before the next restart (ANTHROPIC_* blank, "
      "DIFY_RUNNER=claude)."),
+    (("LAUNCHER_ENV_UNREADABLE",),
+     "Make the launcher's .env readable by this user, or set PANDA_HEALTH_LAUNCHER_ENV_FILE."),
+    (("LAUNCHER_PRIVATE_UNREACHABLE", "LAUNCHER_PRIVATE_UNHEALTHY",
+      "LAUNCHER_REACH_OTHER_PROCESS"),
+     "Check which process listens on port 8501 (`sudo ss -lntp | grep 8501`); there should "
+     "be one launcher, bound to 0.0.0.0."),
     (("PUBLIC_DNS_FAILED", "PUBLIC_TLS_FAILED", "PUBLIC_TIMEOUT", "PUBLIC_UNREACHABLE",
       "PUBLIC_HTTP_ERROR", "PUBLIC_URL_OTHER_LAUNCHER", "PUBLIC_WRONG_RUNNER"),
      "Dify cannot reach this launcher: check DNS, the reverse proxy and the security group."),
     (("PUBLIC_TLS_EXPIRING",), "Renew the TLS certificate for the public URL."),
     (("ELEVENLABS_KEY_MISSING", "ELEVENLABS_AUTH_FAILED"),
      "Put a valid ELEVENLABS_API_KEY in the launcher's .env, then restart the launcher."),
+    (("ELEVENLABS_UNREACHABLE", "ELEVENLABS_UNAVAILABLE"),
+     "ElevenLabs did not answer; if it repeats, check status.elevenlabs.io and this box's "
+     "outbound network."),
+    (("NEXT_RESTART_ELEVENLABS_KEY",),
+     "Restart the launcher when no job is running so it picks up the new ElevenLabs key."),
     (("ELEVENLABS_LOW_CHARACTERS", "ELEVENLABS_BILLING"),
      "Top up or fix billing on the ElevenLabs account."),
     (("RENDER_FFMPEG_MISSING", "RENDER_FFMPEG_FAILED", "RENDER_PROBE_FAILED"),
-     "Repair ffmpeg on this box (deploy/install.sh installs the static build)."),
+     "Repair ffmpeg/ffprobe: on Amazon Linux reinstall the static build in /usr/local/bin "
+     "(there is no dnf package); on Debian `sudo apt-get install ffmpeg`. If FFMPEG_BIN or "
+     "FFPROBE_BIN is set in .env, point it at a working binary."),
     (("RENDER_REMOTION_NOT_READY",),
      "Run `npm ci && npx remotion browser ensure` in remotion-composer with Node 22."),
     (("DISK_LOW", "DISK_CRITICAL"),
      "Free disk space: old job folders, renders and ~/.claude transcripts."),
+    (("JOBS_DIR_NOT_WRITABLE", "PROJECTS_DIR_NOT_WRITABLE"),
+     "Give this user write access to the jobs/projects folder (check DIFY_DATA_DIR and "
+     "OPENMONTAGE_PROJECTS_DIR in .env)."),
+    (("DIFY_UNREACHABLE", "DIFY_SERVER_ERROR"),
+     "Check that the Dify server is up and reachable from this box."),
 )
 
 
@@ -1435,12 +1558,15 @@ def build_alert(
         lines.append(f"{result.component}: {symbol} - {result.code} - {result.detail}")
     failed = {code for result in results if not result.ok for code in result_codes(result)}
     actions = [action for codes, action in _ACTIONS if failed.intersection(codes)]
+    mapped = {code for codes, _action in _ACTIONS for code in codes}
+    # HIGGSFIELD_NOT_TESTED only follows a claude_auth failure, whose action already applies.
+    unmapped = failed - mapped - {"HIGGSFIELD_NOT_TESTED"}
     if failed:
         lines.extend(["", "Suggested action:"])
         lines.extend(f"- {action}" for action in actions)
-        if not actions:
-            lines.append("- Inspect ~/panda-healthcheck.log; this may be a temporary "
-                         "provider or network incident.")
+        if unmapped:
+            lines.append(f"- {', '.join(sorted(unmapped))}: see the detail lines above and "
+                         "~/panda-healthcheck.log.")
     return title, "\n".join(lines)
 
 
@@ -1573,7 +1699,10 @@ def run(
         code for result in results if not result.ok for code in result_codes(result)
     })
     previous = read_state(config.state_file)
-    kind = notification_kind(
+    # A --skip run is a manual test: it neither alerts nor moves the alert state, so a skipped
+    # layer that is still down cannot be announced as "recovered".
+    partial = bool(skipped)
+    kind = None if partial else notification_kind(
         previous, healthy, now, config.reminder_hours, config.notify_success,
         failed_codes=failed_codes,
     )
@@ -1598,10 +1727,12 @@ def run(
         "codes": [result.code for result in results],
         "failed_codes": failed_codes,
     }
-    write_state(config.state_file, state)
+    if not partial:
+        write_state(config.state_file, state)
 
     summary = {
         "healthy": healthy,
+        "partial": partial,
         "box": config.box_name,
         "checked_at": now.isoformat(),
         "duration_s": round(time.monotonic() - started, 1),
@@ -1656,21 +1787,24 @@ def load_settings(env_file: Path) -> None:
 
 
 def _crontab_read() -> str:
-    rc, stdout, stderr, _timed_out = _run(["crontab", "-l"], cwd=Path.home(), timeout_s=15)
-    if rc == 0:
+    """The user's crontab. Bytes that are not UTF-8 survive the round trip unchanged."""
+    proc = subprocess.run(["crontab", "-l"], capture_output=True, timeout=15, check=False)
+    stdout = proc.stdout.decode("utf-8", "surrogateescape")
+    stderr = proc.stderr.decode("utf-8", "replace")
+    if proc.returncode == 0:
         return stdout
     if "no crontab" in (stderr + stdout).lower():
         return ""
     raise OSError("could not read the current crontab, so it was not changed: "
-                  + _redacted_tail(stderr or stdout or f"exit code {rc}"))
+                  + _redacted_tail(stderr or f"exit code {proc.returncode}"))
 
 
 def _crontab_write(text: str) -> None:
-    proc = subprocess.run(["crontab", "-"], input=text, text=True, capture_output=True,
-                          timeout=15, check=False)
+    proc = subprocess.run(["crontab", "-"], input=text.encode("utf-8", "surrogateescape"),
+                          capture_output=True, timeout=15, check=False)
     if proc.returncode != 0:
-        raise OSError("crontab rejected the update: "
-                      + _redacted_tail(proc.stderr or f"exit code {proc.returncode}"))
+        raise OSError("crontab rejected the update: " + _redacted_tail(
+            proc.stderr.decode("utf-8", "replace") or f"exit code {proc.returncode}"))
 
 
 def _fallback_path() -> str:
@@ -1685,14 +1819,22 @@ def _fallback_path() -> str:
     return ":".join(parts)
 
 
-def cron_line(schedule: str, env_file: Path) -> str:
+def _system_python() -> str:
+    """The OS python3, not a venv one: a venv can vanish, and only the OS one has boto3."""
+    for candidate in ("/usr/bin/python3", "/usr/local/bin/python3"):
+        if os.access(candidate, os.X_OK):
+            return candidate
+    return sys.executable
+
+
+def cron_line(schedule: str, env_file: Path, state_dir: Path) -> str:
     script = Path(__file__).resolve()
     log = Path.home() / "panda-healthcheck.log"
-    flock = shutil.which("flock")
-    user = re.sub(r"[^A-Za-z0-9_.-]", "_", os.environ.get("USER") or "user")
-    lock = f"{flock} -n /tmp/panda-healthcheck-{user}.lock " if flock else ""
+    flock = shutil.which("flock", path="/usr/bin:/bin:/usr/local/bin") or shutil.which("flock")
+    # The lock lives in this user's own state folder: a /tmp path could be taken by any account.
+    lock = f"{flock} -n {state_dir / 'run.lock'} " if flock else ""
     extra = "" if env_file == DEFAULT_ENV_FILE else f" --env-file {env_file}"
-    return (f"{schedule} * * * PATH={_fallback_path()} {lock}{sys.executable} {script}{extra}"
+    return (f"{schedule} * * * PATH={_fallback_path()} {lock}{_system_python()} {script}{extra}"
             f" >> {log} 2>&1")
 
 
@@ -1705,17 +1847,19 @@ def install_schedule(config: Config, schedule: Optional[str], env_file: Path) ->
         if not match or int(match.group(1)) > 59 or int(match.group(2)) > 23:
             raise ValueError('the schedule must be "MINUTE HOUR" in UTC, e.g. "30 2"')
         schedule = f"{int(match.group(1))} {int(match.group(2))}"
-    for path in (Path(__file__).resolve(), Path.home(), Path(sys.executable)):
+    for path in (Path(__file__).resolve(), Path.home(), Path(_system_python()),
+                 config.state_file.parent):
         if " " in str(path):
             raise ValueError(f"a cron line cannot hold a path with spaces: {path}")
     current = _crontab_read()
     config.state_file.parent.mkdir(parents=True, exist_ok=True)
     backup = config.state_file.parent / (
         "crontab.before." + utc_now().strftime("%Y%m%dT%H%M%SZ"))
-    backup.write_text(current, encoding="utf-8")
+    backup.write_text(current, encoding="utf-8", errors="surrogateescape")
     os.chmod(backup, 0o600)
     kept = [line for line in current.splitlines() if CRON_MARKER not in line]
-    line = cron_line(schedule, env_file) if schedule is not None else None
+    line = None if schedule is None else cron_line(schedule, env_file,
+                                                   config.state_file.parent)
     if line:
         kept.append(line)
     _crontab_write("\n".join(kept) + "\n" if kept else "")
@@ -1728,9 +1872,26 @@ def install_schedule(config: Config, schedule: Optional[str], env_file: Path) ->
         print("\nNext: put PANDA_HEALTH_WEBHOOK_URL (or PANDA_HEALTH_SNS_TOPIC_ARN), "
               "PANDA_HEALTH_PUBLIC_URL and PANDA_HEALTH_BOX_NAME in "
               f"{config.launcher_env_file}, then run:\n"
-              f"  {sys.executable} {Path(__file__).resolve()} --test-alert\n"
-              f"  {sys.executable} {Path(__file__).resolve()} --no-alert")
+              f"  {_system_python()} {Path(__file__).resolve()} --test-alert\n"
+              f"  {_system_python()} {Path(__file__).resolve()} --no-alert")
+        _warn_about_old_settings(env_file)
     return 0
+
+
+def _warn_about_old_settings(env_file: Path) -> None:
+    """The first canary's template set values that now fight the new defaults."""
+    try:
+        old = parse_env_text(env_file.read_text(encoding="utf-8", errors="replace"))
+    except OSError:
+        return
+    stale = []
+    if old.get("PANDA_HEALTH_CLAUDE_BIN"):
+        stale.append("PANDA_HEALTH_CLAUDE_BIN (tests a pinned claude, not the launcher's)")
+    if old.get("PANDA_HEALTH_NOTIFY_SUCCESS", "").strip().lower() in {"false", "0", "no", "off"}:
+        stale.append("PANDA_HEALTH_NOTIFY_SUCCESS=false (no daily OK message)")
+    if stale:
+        print(f"\nNote: {env_file} still sets {'; '.join(stale)}. That file wins over the "
+              "launcher's .env; delete those lines, or the file once its settings are in .env.")
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -1758,7 +1919,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument(
         "--skip", default="",
         help="comma-separated components to skip, e.g. higgsfield_mcp to test without "
-             "the Claude turn",
+             "the Claude turn; a skipped run neither alerts nor updates the saved state",
     )
     parser.add_argument(
         "--test-alert", action="store_true",
@@ -1775,11 +1936,21 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return send_test_alert(config)
         return run(config, no_alert=args.no_alert, skip=parse_skip(args.skip))
     except (ValueError, OSError) as exc:
+        detail = _safe_error(exc)
         print(json.dumps({
             "healthy": False,
             "code": "HEALTHCHECK_CONFIGURATION_ERROR",
-            "detail": _safe_error(exc),
+            "detail": detail,
         }), file=sys.stderr)
+        webhook = os.environ.get("PANDA_HEALTH_WEBHOOK_URL", "").strip()
+        if webhook and args.install is None and not args.uninstall:
+            try:   # best effort: one broken setting must not silence every alert
+                send_webhook(
+                    webhook, os.environ.get("PANDA_HEALTH_WEBHOOK_KIND", "slack").strip().lower(),
+                    f"Panda health check cannot run ({socket.gethostname()}): {detail}",
+                )
+            except Exception:  # noqa: BLE001 — the stderr line above is the fallback
+                pass
         return 2
 
 
