@@ -467,7 +467,7 @@ def _public(state: dict[str, Any]) -> dict[str, Any]:
         "status": state.get("status"),
         "stage": state.get("stage"),
         "gate": state.get("gate"),
-        "question": state.get("question"),
+        "question": _runner._strip_debug_trailer(state.get("question")),
         "worker_active": _job_is_active(job_id),
         "processing_started_at": state.get("processing_started_at"),
         "processing_finished_at": state.get("processing_finished_at"),
