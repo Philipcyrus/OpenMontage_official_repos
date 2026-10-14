@@ -280,11 +280,142 @@ layer, a code and the fix. Every run also appends its JSON result to `~/panda-he
   the `.env` lines. `--install` replaces the old crontab line and leaves any crontab-wide
   `SHELL=`/`HOME=`/`PATH=` lines alone, because the new line sets its own `PATH`.
 
+## Job history in PostgreSQL (forensic trail)
+
+Every job's trail goes into PostgreSQL within minutes, while the job runs and again when it
+ends. That covers the launcher state, checkpoints and their history, approvals, every Claude
+message and tool call with sanitized arguments and results, Higgsfield submissions and polls,
+local tool runs, costs, QA results and the gaps between legs. A job can then be investigated,
+or picked up again, from one query instead of reading JSONL files. Nothing in the launcher
+changes, and no launcher restart is needed.
+
+It has two parts, so that the launcher and its `claude` legs never see a database credential:
+
+| part | runs as | does |
+|---|---|---|
+| `panda_ingest.py` (exporter) | the launcher's user (`ec2-user` / `admin`), cron every 5 min, low CPU/IO priority | reads the job folders, `~/.claude/projects/<repo>/` transcripts and MCP logs; redacts; writes gzip batches to the spool |
+| `panda_ingest_loader.py` (loader) | a separate `panda-ingest` OS user, cron every 5 min | the only code with the DSN; checks each batch and loads it in one transaction |
+
+**What is stored.** Codex's phase-1 history tables (`postgres/V001__phase1.sql`), plus the
+forensic tables in `postgres/V002__forensics.sql`: `llm_inferences`, `llm_blocks`,
+`trace_spans`, `span_links` and `runtime_events`. V002 also fixes V001 defects; its header
+lists them. Rows have deterministic ids, so a replayed batch adds nothing.
+
+**What is never stored:**
+- credentials, API keys, environment dumps, `.env` contents;
+- URL query strings and fragments, where signed links carry their signatures (a file name
+  that contains one is stored with the query replaced by a hash);
+- media and base64 bytes (hash and size only);
+- hidden reasoning text;
+- file contents a leg read or wrote: `Read`/`Write`/`Edit` bodies, the output of successful
+  `Bash` and `Grep` calls (`cat`, `sed`, `jq` ...) and heredoc bodies in commands are stored
+  as size and hash only. A failed command keeps a clipped, redacted excerpt of its output;
+- Claude Code attachments other than MCP connector status.
+
+Approvals inferred from files are labelled `legacy_inferred`, never "verified". A session
+someone starts by hand that names a job is stored as `interactive`, never as a leg attempt.
+
+**Set up, once per box.** Every command runs as the stated user. Replace `ec2-user` with
+`admin` on box 2. No password is ever typed on a command line: `bash` keeps command lines in
+`~/.bash_history`, which the launcher's `claude` legs can read.
+```bash
+# 1) PostgreSQL: an existing server, RDS, or local. Local on box 1 (AL2023):
+#      sudo dnf install -y postgresql16-server && sudo postgresql-setup --initdb
+#      sudo systemctl enable --now postgresql
+#    then in /var/lib/pgsql/data/pg_hba.conf use scram-sha-256 for 127.0.0.1/32 and
+#    sudo systemctl reload postgresql. Box 2 (Debian): sudo apt install -y postgresql.
+#    As the database owner, create the database and apply both migrations in order
+#    (shown for a local server; for RDS use psql -h <host> -U <owner role> instead):
+sudo -u postgres createdb openmontage
+sudo -u postgres psql -v ON_ERROR_STOP=1 -d openmontage < deploy/postgres/V001__phase1.sql
+sudo -u postgres psql -v ON_ERROR_STOP=1 -d openmontage < deploy/postgres/V002__forensics.sql
+sudo -u postgres psql -d openmontage
+#    at the psql prompt (\password asks twice and sends only a hash):
+#      CREATE ROLE om_ingest LOGIN;
+#      GRANT om_phase1_writer TO om_ingest;
+#      \password om_ingest
+#    People who investigate get om_phase1_reader (read-only, sanitized data incl. prompts).
+
+# 2) The loader's OS user and the spool (root, once):
+sudo useradd --system --create-home --shell /usr/sbin/nologin panda-ingest
+sudo chmod 700 /home/panda-ingest
+sudo install -d -o ec2-user -g panda-ingest -m 2770 /var/spool/panda-ingest
+sudo install -d -m 0755 /usr/local/lib/panda-ingest
+sudo install -m 0644 deploy/panda_ingest_loader.py /usr/local/lib/panda-ingest/
+sudo -u panda-ingest python3 -m venv /home/panda-ingest/venv
+sudo -u panda-ingest /home/panda-ingest/venv/bin/pip install "psycopg[binary]"
+sudo -u panda-ingest mkdir -p /home/panda-ingest/.config/panda-ingest
+#    The DSN goes in through stdin: run this, paste ONE line, press Enter then Ctrl-D.
+sudo -u panda-ingest sh -c 'umask 077; cat > /home/panda-ingest/.config/panda-ingest/dsn'
+#      host=<host> port=5432 dbname=openmontage user=om_ingest password=<password> sslmode=require
+#    (keyword form: no URL-encoding needed; quote a password with spaces as password='...'.
+#     A local server without SSL: host=127.0.0.1 ... sslmode=disable.)
+sudo -u panda-ingest /home/panda-ingest/venv/bin/python \
+  /usr/local/lib/panda-ingest/panda_ingest_loader.py --install
+
+# 3) The exporter, as the launcher's user (no sudo):
+python3 deploy/panda_ingest.py --install
+```
+The loader's `--install` refuses to schedule a copy the launcher's user could edit: run it
+from `/usr/local/lib/panda-ingest/`, as above.
+
+**Verify.**
+```bash
+python3 deploy/panda_ingest.py --status          # last run, pending/failed batches
+tail -3 ~/panda-ingest.log                       # exporter: one JSON line per run
+sudo tail -3 /home/panda-ingest/panda-ingest-loader.log
+```
+
+The first exporter run backfills every job folder, and every transcript Claude Code has not
+yet deleted (it deletes them after `cleanupPeriodDays`, 30 days by default). After that a job
+is re-read only when one of its files changes, or while a leg is still running. A transcript
+Claude Code deletes later changes nothing in the database.
+
+**Querying.** Useful views:
+- `tool_calls_v`: every call with its arguments and result.
+- `failed_interactions_v`: errors, preset recommendations, malformed arguments.
+- `provider_job_history_v`: each Higgsfield job's submission and every poll, with that job's
+  own status in each poll.
+- `context_reads_v`: files each leg read, and how often.
+- `job_time_breakdown_v`: leg, gate-wait, model and Higgsfield time.
+- `job_forensic_timeline_v`: everything in time order.
+- `checkpoint_approval_status`: each stage's latest checkpoint and the decision behind it.
+- `get_job_resume_context(job_id)`: the whole job as one JSON document.
+
+**When something goes wrong.** The loader log says what happened; nothing is dropped silently.
+
+| situation | what the loader does | what to do |
+|---|---|---|
+| database down, read-only, full, or a migration or grant missing | stops; every batch stays in `spool/pending/` | fix the database; the next run loads everything in order |
+| PostgreSQL refuses a row | loads the rest of the batch; keeps the batch in `spool/failed/<job>/` with `<batch>.rejected.json` (table, id, reason) | after a fix, move the batch back to `spool/pending/<job>/`; rows already loaded are skipped |
+| a file that is not a valid batch | moves it to `spool/failed/<job>/` with `<batch>.reason.json` | re-send the job: `python3 deploy/panda_ingest.py --job <job_id> --full` |
+
+**Operating notes.**
+- A `git pull` that changes `panda_ingest_loader.py` needs the `sudo install` line in step 2
+  again. Apply a new migration before (or right after) pulling an exporter that needs it;
+  batches wait in `pending/` until then.
+- Loaded batches are kept in `spool/done/` for 30 days; `spool/failed/` is kept until you
+  clear it.
+- `SELECT openmontage.purge_job('<job_id>')`, as the database owner, deletes one job's rows.
+  For an erasure request also delete `/var/spool/panda-ingest/{pending,done,failed}/<job_id>`,
+  the exporter's `~/.local/state/panda-ingest/jobs/<job_id>.ids`, and the job's folders and
+  transcripts on the box; while the job folder exists the exporter sends the job again.
+  Nothing else can delete rows.
+- The spool is writable by the launcher's user, so a `claude` leg could drop a fake batch
+  there. The loader refuses what a real exporter never writes (rows for another job than the
+  batch's, approvals claiming a launcher receipt, state versions from the future, tables it
+  does not export), but it cannot tell a forged row for that job from a real one. Running the
+  exporter as its own OS user would close that; it is not set up here.
+- Health check integration and Graylog export are not wired yet.
+
 ## Files here
 | file | purpose |
 |---|---|
 | `install.sh` | system deps + venv + launcher deps + import/render smoke test |
 | `panda-launcher.service` | systemd unit (uvicorn on 8501, Node 22 + claude on PATH) |
 | `panda_healthcheck.py` | daily all-layers health check (launcher, Claude, Higgsfield, ElevenLabs, render, disk, Dify) + alerts; `--install` schedules it |
+| `panda_ingest.py` | job-history exporter: job folders + Claude transcripts → sanitized batches in the spool; `--install` schedules it |
+| `panda_ingest_loader.py` | job-history loader (separate OS user, holds the DSN): spool batches → PostgreSQL |
+| `postgres/V001__phase1.sql`, `postgres/V002__forensics.sql` | PostgreSQL schema: job history (V001) and the forensic trail plus V001 fixes (V002) |
 | `nginx-panda.conf` | reverse-proxy block (subpath or subdomain) |
 | `requirements-launcher.txt` | minimal deps for launcher + render |
