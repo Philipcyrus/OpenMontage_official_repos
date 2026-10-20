@@ -124,13 +124,24 @@ export function resolveTheme(props: Record<string, unknown>): ThemeConfig {
 const calculateMetadata: CalculateMetadataFunction<ExplainerProps> = async ({
   props,
 }) => {
+  const fps = 30;
+  // Overlay-only track: duration comes from underlay length (or max overlay out).
+  if (props.overlay_only) {
+    const fromProp = Number(props.duration_seconds) || 0;
+    const overlays = props.overlays || [];
+    const fromOverlays = overlays.length
+      ? Math.max(...overlays.map((o) => o.out_seconds || 0))
+      : 0;
+    const seconds = Math.max(fromProp, fromOverlays, 1);
+    return { durationInFrames: Math.ceil(seconds * fps) };
+  }
   const cuts = props.cuts || [];
   if (cuts.length === 0) {
     return { durationInFrames: 30 * 60 };
   }
   const lastEnd = Math.max(...cuts.map((c) => c.out_seconds || 0));
   // Add 1 second padding for final fade
-  return { durationInFrames: Math.ceil((lastEnd + 1) * 30) };
+  return { durationInFrames: Math.ceil((lastEnd + 1) * fps) };
 };
 
 export const Root: React.FC = () => {

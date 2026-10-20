@@ -1302,12 +1302,16 @@ assert not _agent_calls, _agent_calls
 print("[ok] approve_brand resume: no agent; revise stays; skip → done")
 
 # 6) carousel/image start prompts are stills-only; video prompt is unchanged --
+_hf_ids = _json.load(open(_ENGINE_ROOT / "config" / "panda-elements.json", encoding="utf-8"))["higgsfield"]
+_CUST_EL = _hf_ids["customer_reference_element_id"]
+_PANDA_EL = _hf_ids["panda_reference_element_id"]
+_OLD_PANDA_EL = _hf_ids.get("previous_panda_reference_element_id")
 cv = run._start_prompt("jC", "6-slide carousel", {"aspect_ratio": "4:5"}, "panda-carousel")
 assert "STILLS-ONLY" in cv and "NOT a video" in cv
 assert "Do NOT generate motion clips" in cv
 assert "4:5" in cv
-assert "089ddcec-c375-4299-8a65-6d8b757dd81a" in cv
-assert "4c01c8f9-6cfb-4d8c-9eb9-74cb61462103" in cv
+assert _CUST_EL in cv
+assert _PANDA_EL in cv
 assert "2D flat" in cv or "2D" in cv
 assert "Max 2 paid" in cv
 wide = run._start_prompt("jW", "story stills", {"aspect_ratio": "9:16"}, "panda-carousel")
@@ -1317,14 +1321,16 @@ img = run._start_prompt("jI", "one still", {}, "panda-image")
 assert "ONE STILLS-ONLY" in img and "NO script" in img
 assert "1:1" in img
 assert "NOT a carousel" in img
-assert "089ddcec-c375-4299-8a65-6d8b757dd81a" in img
+assert _CUST_EL in img and _PANDA_EL in img
 assert "Max 2 paid" in img
 vid = run._start_prompt("jV", "a video", {}, "panda-video")
 assert "produce a video" in vid
 assert "aspect_ratio: 9:16" in vid
 assert "STILLS-ONLY" not in vid
-assert "089ddcec-c375-4299-8a65-6d8b757dd81a" in vid
-assert "4c01c8f9-6cfb-4d8c-9eb9-74cb61462103" in vid
+assert _CUST_EL in vid
+assert _PANDA_EL in vid
+if _OLD_PANDA_EL and _OLD_PANDA_EL != _PANDA_EL:
+    assert all(_OLD_PANDA_EL not in p for p in (cv, img, vid)), "retired panda Element in a start prompt"
 assert "STILLS 2-TAKE" in vid
 assert "2D flat" in vid or "2D MEDIUM" in vid
 assert "PHASE 2 (motion sample)" not in vid, "default motion_sample=off must skip sample phase"

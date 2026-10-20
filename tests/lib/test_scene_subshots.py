@@ -59,7 +59,7 @@ def test_overrunning_lines_are_laid_end_to_end():
     assert rows["s23"]["relative_start_seconds"] == pytest.approx(7.8)
     assert rows["s22"]["script_overrun_seconds"] == pytest.approx(1.2)
     assert plan["content_duration_seconds"] == pytest.approx(11.05)
-    assert plan["speaking_subshot_count"] == 2
+    assert plan["speaking_subshot_count"] == 1  # customer only; panda is a fill
 
 
 def test_narrator_line_is_a_closed_mouth_fill_never_an_audio_reference():
@@ -73,14 +73,18 @@ def test_narrator_line_is_a_closed_mouth_fill_never_an_audio_reference():
     assert narrator["vo_path"].endswith("vo-s21-narrator.mp3")
 
 
-def test_speaking_subshot_references_only_its_own_line_at_minimum_length():
+def test_panda_line_is_a_no_mouth_fill_never_a_speaking_subshot():
     rows = {row["section_id"]: row for row in _sc11()["subshots"]}
     panda = rows["s22"]
-    assert panda["kind"] == "speaking"
-    assert panda["audio_reference_path"] == "assets/audio/vo-s22-panda.mp3"
-    assert panda["i2v_duration"] == 5
+    assert panda["kind"] == "fill"
+    assert panda["lipsync"] is False
+    assert panda["audio_reference_path"] is None
+    assert panda["i2v_duration"] is None
+    assert panda["vo_path"].endswith("vo-s22-panda.mp3")
     assert panda["duration_seconds"] == pytest.approx(4.45)
+    assert panda["fill_treatment"] == "still"
     customer = rows["s23"]
+    assert customer["kind"] == "speaking"
     assert customer["audio_reference_path"] == "assets/audio/vo-s23-customer.mp3"
     assert customer["i2v_duration"] == 5
     assert customer["duration_seconds"] == pytest.approx(3.25)
@@ -99,7 +103,7 @@ def test_real_script_pause_and_leading_silence_are_kept():
         speech_mode="audio_reference",
     )
     kinds = [(row["subshot_id"], row["kind"]) for row in plan["subshots"]]
-    assert kinds == [("sc2-lead_in", "fill"), ("sc2-a", "speaking"), ("sc2-b", "speaking")]
+    assert kinds == [("sc2-lead_in", "fill"), ("sc2-a", "fill"), ("sc2-b", "speaking")]
     assert plan["subshots"][0]["duration_seconds"] == pytest.approx(1.0)
     assert plan["subshots"][1]["duration_seconds"] == pytest.approx(3.0)
     assert plan["subshots"][2]["relative_start_seconds"] == pytest.approx(4.0)
@@ -121,16 +125,21 @@ def _native_sections(**panda_extra) -> list[dict]:
 def test_native_speech_is_the_default_and_sized_for_seedance_pacing():
     plan = build_scene_subshots("sc02", _native_sections(), allowed_durations=range(4, 16))
     customer, panda = plan["subshots"]
-    # job_cfb6fd099504 measured 4.50s and 3.72s for these lines; ElevenLabs read them in ~2.2s.
+    # job_cfb6fd099504 measured 4.50s for the customer line; ElevenLabs read it in ~2.2s.
+    assert customer["kind"] == "speaking"
     assert customer["vo_seconds"] == pytest.approx(4.481, abs=0.01)
     assert customer["i2v_duration"] == 5
-    assert panda["vo_seconds"] == pytest.approx(3.712, abs=0.01)
-    assert panda["i2v_duration"] == 4
-    for row in (customer, panda):
-        assert row["speech_mode"] == "native"
-        assert row["native_speech_estimated"] is True
-        assert row["audio_reference_path"] is None
-    assert panda["dialogue_text"] == "No problem, let's get you a Panda Mobile eSIM."
+    assert customer["speech_mode"] == "native"
+    assert customer["native_speech_estimated"] is True
+    assert customer["audio_reference_path"] is None
+    # Panda is never a speaking subshot — VO still plays over a fill.
+    assert panda["kind"] == "fill"
+    assert panda["lipsync"] is False
+    assert panda["vo_seconds"] == pytest.approx(2.251)
+    assert panda["i2v_duration"] is None
+    assert panda["vo_path"].endswith("vo-s03-panda.mp3")
+    assert "speech_mode" not in panda
+    assert "dialogue_text" not in panda
 
 
 def test_native_estimate_counts_mandarin_characters_not_spaces():
@@ -147,32 +156,30 @@ def test_native_estimate_falls_back_to_tts_length_without_text():
 
 
 def test_generated_native_clip_keeps_its_length_and_measured_speech():
-    plan = build_scene_subshots(
-        "sc02",
-        _native_sections(
-            measured_seconds=3.72,
-            path="assets/audio/native/s03.panda_voice.mp3",
-            generated_i2v_duration=4,
-        ),
-        allowed_durations=range(4, 16),
-    )
-    panda = plan["subshots"][1]
-    assert panda["native_speech_estimated"] is False
-    assert panda["i2v_duration"] == 4
-    assert panda["vo_seconds"] == pytest.approx(3.72)
-    assert panda["duration_seconds"] == pytest.approx(3.97)
-    assert panda["vo_path"].endswith("s03.panda_voice.mp3")
+    sections = _native_sections()
+    # Customer speaking subshot with measured native clip length.
+    sections[0] = {
+        **sections[0],
+        "measured_seconds": 4.50,
+        "path": "assets/audio/native/s02.customer_voice.mp3",
+        "generated_i2v_duration": 5,
+    }
+    plan = build_scene_subshots("sc02", sections, allowed_durations=range(4, 16))
+    customer = plan["subshots"][0]
+    assert customer["kind"] == "speaking"
+    assert customer["native_speech_estimated"] is False
+    assert customer["i2v_duration"] == 5
+    assert customer["vo_seconds"] == pytest.approx(4.50)
+    assert customer["vo_path"].endswith("s02.customer_voice.mp3")
     placed = place_scene_subshots(plan, effective_scene_start_seconds=0.0)
     assert find_voice_overlaps(placed["voice_tracks"]) == []
 
 
 def test_generated_native_clip_shorter_than_its_speech_is_rejected():
+    sections = _native_sections()
+    sections[0] = {**sections[0], "measured_seconds": 5.3, "generated_i2v_duration": 5}
     with pytest.raises(DurationAllocationError, match="generated clip"):
-        build_scene_subshots(
-            "sc02",
-            _native_sections(measured_seconds=4.3, generated_i2v_duration=4),
-            allowed_durations=range(4, 16),
-        )
+        build_scene_subshots("sc02", sections, allowed_durations=range(4, 16))
 
 
 def test_unknown_speech_mode_is_rejected():
@@ -184,7 +191,7 @@ def test_line_beyond_provider_max_is_a_pacing_error():
     with pytest.raises(DurationAllocationError):
         build_scene_subshots(
             "sc3",
-            [{"section_id": "x", "speaker": "panda", "measured_seconds": 11.0,
+            [{"section_id": "x", "speaker": "customer", "measured_seconds": 11.0,
               "script_start_seconds": 0.0, "script_end_seconds": 9.0}],
             allowed_durations=[5, 10],
         )
@@ -205,18 +212,19 @@ def test_placement_feeds_sequential_voice_tracks_and_a_tail_fill():
 
 
 def test_positive_offset_delays_only_that_voice_and_pushes_later_lines():
+    # Offset applies only to customer speaking subshots (panda fills refuse offsets).
     placed = place_scene_subshots(
         _sc11(), effective_scene_start_seconds=100.0, effective_duration_seconds=12.0,
-        validated_offsets={"s22": 0.3},
+        validated_offsets={"s23": 0.3},
     )
     tracks = {t["section_id"]: t["at_s"] for t in placed["voice_tracks"]}
     assert tracks["s21"] == 100.0
-    assert tracks["s22"] == pytest.approx(103.65)
-    assert tracks["s23"] == pytest.approx(107.85)
+    assert tracks["s22"] == pytest.approx(103.35)
+    assert tracks["s23"] == pytest.approx(108.1)
     rows = {row["subshot_id"]: row for row in placed["subshots"]}
-    assert rows["sc11-s22"]["lip_sync_offset_applied_seconds"] == pytest.approx(0.3)
+    assert rows["sc11-s23"]["lip_sync_offset_applied_seconds"] == pytest.approx(0.3)
     assert rows["sc11-s21"]["lip_sync_offset_applied_seconds"] is None
-    assert rows["sc11-s23"]["lip_sync_offset_applied_seconds"] is None
+    assert rows["sc11-s22"]["lip_sync_offset_applied_seconds"] is None
     assert find_voice_overlaps(placed["voice_tracks"]) == []
 
 
@@ -236,9 +244,13 @@ def test_offset_cannot_target_a_fill_or_trim_through_the_line():
         place_scene_subshots(
             _sc11(), effective_scene_start_seconds=0.0, validated_offsets={"s21": 0.2},
         )
+    with pytest.raises(ValueError, match="fill"):
+        place_scene_subshots(
+            _sc11(), effective_scene_start_seconds=0.0, validated_offsets={"s22": 0.2},
+        )
     with pytest.raises(ValueError, match="lip-sync trim"):
         place_scene_subshots(
-            _sc11(), effective_scene_start_seconds=0.0, validated_offsets={"s22": -0.6},
+            _sc11(), effective_scene_start_seconds=0.0, validated_offsets={"s23": -2.0},
         )
 
 

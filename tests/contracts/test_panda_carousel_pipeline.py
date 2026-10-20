@@ -1,5 +1,6 @@
 """panda-carousel is a truncated sibling of panda-video: stills-only, no compose."""
 
+import json
 from pathlib import Path
 
 from lib.pipeline_loader import get_stage_order, get_stage_skill, load_pipeline
@@ -36,8 +37,10 @@ def test_carousel_idea_is_ungated():
     assert idea["human_approval_default"] is False
 
 
-_CUSTOMER_ELEMENT = "089ddcec-c375-4299-8a65-6d8b757dd81a"
-_PANDA_ELEMENT = "4c01c8f9-6cfb-4d8c-9eb9-74cb61462103"
+_HIGGSFIELD = json.loads((ROOT / "config/panda-elements.json").read_text(encoding="utf-8"))["higgsfield"]
+_CUSTOMER_ELEMENT = _HIGGSFIELD["customer_reference_element_id"]
+_PANDA_ELEMENT = _HIGGSFIELD["panda_reference_element_id"]
+_PREVIOUS_PANDA_ELEMENT = _HIGGSFIELD.get("previous_panda_reference_element_id")
 
 
 def test_carousel_asset_director_locks_2take_2d_and_elements():
@@ -56,4 +59,6 @@ def test_higgsfield_bridge_locks_2take_2d_and_elements():
     assert "2D MEDIUM LOCK" in text
     assert _CUSTOMER_ELEMENT in text
     assert _PANDA_ELEMENT in text
+    if _PREVIOUS_PANDA_ELEMENT and _PREVIOUS_PANDA_ELEMENT != _PANDA_ELEMENT:
+        assert _PREVIOUS_PANDA_ELEMENT not in text
     assert "never invent" in text.lower() or "Never invent" in text

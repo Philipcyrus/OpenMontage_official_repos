@@ -158,45 +158,100 @@ def draw_bubble(img: Image.Image, profile: dict, text: str, subtext: str | None,
     The repo original also drew a tail pointing at the phone in frame. That
     needs per-shot handset coordinates, which no stateless request carries, so
     the tail is dropped here (see EXTRACTION_NOTES.md).
+
+    Long strings wrap / shrink-to-fit so text never clips past the card or frame
+    (e.g. PHILIPPINES must not become PHILIPPIN).
     """
     W, H = img.size
     cfg = profile["bubble"]
     d = ImageDraw.Draw(img)
-    accent = ACCENTS.get(accent_name or "", _rgba(cfg["accent"], (216, 50, 50, 255)))
-
-    f_val = _font(profile, "latin", int(cfg["value_size"]))
-    f_sub = _font(profile, "cjk", int(cfg["title_size"]))
-
-    vw, vh, _ = _measure(d, text, f_val)
-    sw, sh, _ = (_measure(d, subtext, f_sub) if subtext else (0, 0, None))
+    # Neutral / missing accent → red default outline, but DO NOT invent a green
+    # checkmark for promo copy. Only draw a check when accent is explicitly green.
+    accent_key = (accent_name or "").strip().lower()
+    accent = ACCENTS.get(accent_key, _rgba(cfg["accent"], (216, 50, 50, 255)))
 
     pad, gap, disc_r, icon_gap = 26, 6, 30, 22
-    text_w = max(vw, sw)
-    text_h = vh + (sh + gap if subtext else 0)
-    card_w = min(W - 80, disc_r * 2 + icon_gap + text_w + pad * 2)
+    max_card_w = W - 80
+    # Text column width inside the card (after disc + padding).
+    max_text_w = max(80, max_card_w - (disc_r * 2 + icon_gap + pad * 2))
+
+    value_size = int(cfg["value_size"])
+    title_size = int(cfg["title_size"])
+    f_val = _font(profile, "latin", value_size)
+    f_sub = _font(profile, "cjk", title_size)
+
+    # Shrink fonts until the longest single word fits, then wrap paragraphs.
+    for _ in range(8):
+        value_lines = _wrap(d, text, f_val, max_text_w) if text else [""]
+        sub_lines = _wrap(d, subtext, f_sub, max_text_w) if subtext else []
+        longest = 0
+        for line in value_lines + sub_lines:
+            longest = max(longest, _measure(d, line, f_val if line in value_lines else f_sub)[0])
+        # Also ensure no single word overflows even if wrap failed on spaces.
+        words_ok = True
+        for raw, font in ((text, f_val), (subtext or "", f_sub)):
+            for word in raw.split():
+                if _measure(d, word, font)[0] > max_text_w:
+                    words_ok = False
+                    break
+            if not words_ok:
+                break
+        if longest <= max_text_w and words_ok:
+            break
+        value_size = max(18, int(value_size * 0.85))
+        title_size = max(16, int(title_size * 0.85))
+        f_val = _font(profile, "latin", value_size)
+        f_sub = _font(profile, "cjk", title_size)
+
+    value_lines = _wrap(d, text, f_val, max_text_w) if text else [""]
+    sub_lines = _wrap(d, subtext, f_sub, max_text_w) if subtext else []
+
+    line_gap = 4
+    vh = sum(_measure(d, ln, f_val)[1] for ln in value_lines) + line_gap * max(0, len(value_lines) - 1)
+    sh = (
+        sum(_measure(d, ln, f_sub)[1] for ln in sub_lines) + line_gap * max(0, len(sub_lines) - 1)
+        if sub_lines else 0
+    )
+    text_w = 0
+    for ln in value_lines:
+        text_w = max(text_w, _measure(d, ln, f_val)[0])
+    for ln in sub_lines:
+        text_w = max(text_w, _measure(d, ln, f_sub)[0])
+
+    text_h = vh + (sh + gap if sub_lines else 0)
+    card_w = min(max_card_w, disc_r * 2 + icon_gap + text_w + pad * 2)
     card_h = max(text_h, disc_r * 2) + pad * 2
     x0 = (W - card_w) / 2
     y0 = _y_for(position, H) - card_h / 2
+    # Keep card on-frame vertically.
+    y0 = max(16, min(y0, H - card_h - 16))
 
     d.rounded_rectangle([x0, y0, x0 + card_w, y0 + card_h], radius=26,
                         fill=_rgba(cfg["card"]), outline=accent, width=4)
 
     dcx, dcy = x0 + pad + disc_r, y0 + card_h / 2
     d.ellipse([dcx - disc_r, dcy - disc_r, dcx + disc_r, dcy + disc_r], fill=accent)
-    # A check for the positive accents, a cross for the negative ones.
-    if accent == ACCENTS["green"]:
+    # Check only for explicit green; otherwise a neutral cross / dash for callouts.
+    if accent_key == "green" and accent == ACCENTS["green"]:
         d.line([dcx - 13, dcy + 1, dcx - 3, dcy + 12], fill=(255, 255, 255, 255), width=6)
         d.line([dcx - 3, dcy + 12, dcx + 15, dcy - 12], fill=(255, 255, 255, 255), width=6)
-    else:
+    elif accent_key in {"red", "error", "bad"}:
         d.line([dcx - 12, dcy - 12, dcx + 12, dcy + 12], fill=(255, 255, 255, 255), width=6)
         d.line([dcx - 12, dcy + 12, dcx + 12, dcy - 12], fill=(255, 255, 255, 255), width=6)
+    else:
+        # Neutral promo: small dash — not a checklist checkmark.
+        d.line([dcx - 10, dcy, dcx + 10, dcy], fill=(255, 255, 255, 255), width=5)
 
     tx = dcx + disc_r + icon_gap
     ty = y0 + (card_h - text_h) / 2
-    if subtext:
-        d.text((tx, ty), subtext, font=f_sub, fill=_rgba(cfg["title_color"]))
-        ty += sh + gap
-    d.text((tx, ty), text, font=f_val, fill=_rgba(cfg["value_color"]))
+    if sub_lines:
+        for ln in sub_lines:
+            d.text((tx, ty), ln, font=f_sub, fill=_rgba(cfg["title_color"]))
+            ty += _measure(d, ln, f_sub)[1] + line_gap
+        ty += gap - line_gap
+    for ln in value_lines:
+        d.text((tx, ty), ln, font=f_val, fill=_rgba(cfg["value_color"]))
+        ty += _measure(d, ln, f_val)[1] + line_gap
 
 
 def draw_callout(img: Image.Image, profile: dict, text: str, position: str) -> None:

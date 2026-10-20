@@ -23,6 +23,11 @@ import { CaptionOverlay, WordCaption } from "./components/CaptionOverlay";
 import { SectionTitle } from "./components/SectionTitle";
 import { StatReveal } from "./components/StatReveal";
 import { HeroTitle } from "./components/HeroTitle";
+import { PromoHero } from "./components/PromoHero";
+import { PromoBadge } from "./components/PromoBadge";
+import { PromoCaption } from "./components/PromoCaption";
+import { PromoPrice } from "./components/PromoPrice";
+import { MapPin } from "./components/MapPin";
 import { AnimeScene } from "./components/AnimeScene";
 import type { CameraMotion } from "./components/AnimeScene";
 import { TerminalScene } from "./components/TerminalScene";
@@ -257,7 +262,16 @@ interface Cut {
 }
 
 interface Overlay {
-  type: "section_title" | "stat_reveal" | "hero_title" | "provider_chip";
+  type:
+    | "section_title"
+    | "stat_reveal"
+    | "hero_title"
+    | "provider_chip"
+    | "promo_hero"
+    | "promo_badge"
+    | "promo_caption"
+    | "promo_price"
+    | "map_pin";
   in_seconds: number;
   out_seconds: number;
   text?: string;
@@ -268,6 +282,18 @@ interface Overlay {
   providers?: string[];
   cycleSeconds?: number;
   label?: string;
+  // promo_badge
+  brand?: string;
+  lines?: string[];
+  variant?: "white" | "black";
+  tiltDeg?: number;
+  showTm?: boolean;
+  // promo_caption / promo_price
+  color?: string;
+  pill?: string;
+  // map_pin — normalized 0–1 placement on the frame
+  x?: number;
+  y?: number;
 }
 
 interface AudioLayer {
@@ -294,6 +320,14 @@ export interface ExplainerProps {
   overlays?: Overlay[];
   captions?: WordCaption[];
   audio?: AudioConfig;
+  /**
+   * When true, skip scene media (no OffthreadVideo / Img of job clips) and
+   * render a transparent overlay track only. Used with underlay_plus_overlays
+   * compose: panda_render builds the master, Remotion draws captions, ffmpeg merges.
+   */
+  overlay_only?: boolean;
+  /** Absolute timeline length in seconds (required when overlay_only and cuts are empty). */
+  duration_seconds?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -787,6 +821,58 @@ const OverlayRenderer: React.FC<{ overlay: Overlay }> = ({ overlay }) => {
       />
     );
   }
+  if (overlay.type === "promo_hero") {
+    return (
+      <PromoHero
+        text={overlay.text ?? ""}
+        subtitle={overlay.subtitle}
+        accentColor={overlay.accentColor}
+        position={overlay.position || "mid-right"}
+      />
+    );
+  }
+  if (overlay.type === "promo_badge") {
+    return (
+      <PromoBadge
+        text={overlay.text ?? ""}
+        subtitle={overlay.subtitle}
+        lines={overlay.lines}
+        brand={overlay.brand}
+        variant={overlay.variant}
+        tiltDeg={overlay.tiltDeg}
+        showTm={overlay.showTm}
+      />
+    );
+  }
+  if (overlay.type === "promo_caption") {
+    return (
+      <PromoCaption
+        text={overlay.text ?? ""}
+        color={overlay.color || overlay.accentColor}
+        position={overlay.position || "bottom"}
+      />
+    );
+  }
+  if (overlay.type === "promo_price") {
+    return (
+      <PromoPrice
+        text={overlay.text ?? ""}
+        subtitle={overlay.subtitle}
+        pill={overlay.pill}
+        tiltDeg={overlay.tiltDeg}
+      />
+    );
+  }
+  if (overlay.type === "map_pin") {
+    return (
+      <MapPin
+        text={overlay.text ?? ""}
+        x={overlay.x}
+        y={overlay.y}
+        accentColor={overlay.accentColor}
+      />
+    );
+  }
   return null;
 };
 
@@ -795,11 +881,49 @@ const OverlayRenderer: React.FC<{ overlay: Overlay }> = ({ overlay }) => {
 // ---------------------------------------------------------------------------
 
 export const Explainer: React.FC<ExplainerProps> = (props) => {
-  const { cuts, overlays, captions, audio } = props;
+  const { cuts, overlays, captions, audio, overlay_only } = props;
   const { fps, durationInFrames } = useVideoConfig();
 
   // Resolve theme from props — playbook name, theme name, or custom themeConfig
   const theme = resolveTheme(props as Record<string, unknown>);
+
+  // Overlay-only: chroma-green clear (not transparent→black). Remotion's vp8 webm
+  // often drops alpha; ffmpeg colorkeys this green so black brand type/discs survive.
+  // No OffthreadVideo — avoids Remotion compositor SIGSEGV on musl hosts.
+  if (overlay_only) {
+    return (
+      <AbsoluteFill
+        style={{
+          backgroundColor: "#00FF00",
+          fontFamily: theme.headingFont || fontFamily,
+        }}
+      >
+        {overlays?.map((overlay, i) => {
+          const from = Math.round(overlay.in_seconds * fps);
+          const duration = Math.max(
+            1,
+            Math.round((overlay.out_seconds - overlay.in_seconds) * fps),
+          );
+
+          return (
+            <Sequence key={`overlay-${i}`} from={from} durationInFrames={duration}>
+              <OverlayRenderer overlay={overlay} />
+            </Sequence>
+          );
+        })}
+
+        {captions && captions.length > 0 && (
+          <CaptionOverlay
+            words={captions}
+            wordsPerPage={6}
+            fontSize={42}
+            highlightColor={theme.captionHighlightColor}
+            backgroundColor={theme.captionBackgroundColor}
+          />
+        )}
+      </AbsoluteFill>
+    );
+  }
 
   return (
     <AbsoluteFill style={{ background: theme.backgroundColor, fontFamily: theme.headingFont || fontFamily }}>
@@ -818,7 +942,7 @@ export const Explainer: React.FC<ExplainerProps> = (props) => {
         );
       })}
 
-      {/* Layer 2: Overlays (section titles, stat reveals, hero titles) */}
+      {/* Layer 2: Overlays (section titles, stat reveals, hero titles, promo) */}
       {overlays?.map((overlay, i) => {
         const from = Math.round(overlay.in_seconds * fps);
         const duration = Math.round(

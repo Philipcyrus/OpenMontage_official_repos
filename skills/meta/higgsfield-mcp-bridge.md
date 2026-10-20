@@ -98,7 +98,14 @@ Any mention of a human or the panda is the locked brand pair from
 | Role | Higgsfield Element | Local sheet (style only — do NOT bake the turnaround grid into the still) |
 |------|--------------------|----------------------------------------------------------------------------|
 | Human / customer | `089ddcec-c375-4299-8a65-6d8b757dd81a` (`customer_reference_element_id`) | `brand/panda-mobile/customer/Customer-V3-Hero-Turnaround-v1.png` |
-| Panda / mascot | `4c01c8f9-6cfb-4d8c-9eb9-74cb61462103` (`panda_reference_element_id`) | `brand/panda-mobile/mascot/Panda-Mobile-Smiling-Hero-Turnaround-v1.png` |
+| Panda / mascot | `1fdb4b3b-b395-49d2-9cc8-35f74c748451` (`panda_reference_element_id`) | `brand/panda-mobile/mascot/Panda-Mobile-Flat-Turnaround-v2.png` (per-view: `brand/panda-mobile/mascot/views_v2/`) |
+
+**PANDA NO MOUTH (binding — every still and clip):** The panda has no mouth: smooth
+unmarked muzzle, eyes only, no lips, no teeth, no tongue. Bake that sentence into every
+panda prompt (T2I, i2i, i2v). Never write "closed mouth", "lips closed", "smiling mouth",
+or lip-sync language for the panda — those phrases still draw a mouth. Show delight with
+eyes, brows, ears, hands, signs, or body motion. See also `styles/panda.yaml`
+`image_prompt_prefix` / `image_negative_prompt`.
 
 Do **not** use `student_ugc_element_id` (still TODO).
 
@@ -213,8 +220,14 @@ quality settings merely to gain concurrency.
 
 ### Audio lip-sync (panda-video)
 
-When job option `audio_lipsync` is on (**default**), every on-screen `customer`/`panda` line is
-its own **speaking subshot**: one **`seedance_2_0`** clip that **speaks the line itself**:
+When job option `audio_lipsync` is on (**default**), every on-screen **`customer`** line is
+its own **speaking subshot**: one **`seedance_2_0`** clip that **speaks the line itself**.
+**Panda lines are never lip-synced** (`LIPSYNC_SPEAKERS` is `customer` only): the panda voice
+still plays from ElevenLabs, but the picture is a **fill** (handheld sign with the line, a
+walk, or a body action) with **PANDA NO MOUTH** above — never `generate_audio:true`, never
+"the panda says", never mouth / lip language for the panda.
+
+Customer speaking subshots:
 
 - `medias` role **`start_image`** = approved still — nothing else. **No `audio_references`**:
   an attached ElevenLabs line does not drive Seedance's mouth (job_cfb6fd099504 — generic mouth
@@ -228,17 +241,20 @@ its own **speaking subshot**: one **`seedance_2_0`** clip that **speaks the line
   sound effects".
 - `duration` = the subshot's `i2v_duration` from `lib.i2v_duration.build_scene_subshots`
   (`speech_mode="native"` estimates Seedance's slower pacing: ≈0.25s + 2.6 words/s).
-- Prompt: 2D + Element LOCK; static camera; the speaker faces camera and speaks right away at a
-  brisk, natural pace; the listener's lips stay closed (no mouth HOLD on the speaker).
+- Prompt: 2D + Element LOCK; static camera; the customer faces camera and speaks right away at a
+  brisk, natural pace; if the panda is in frame as listener, apply PANDA NO MOUTH (smooth
+  unmarked muzzle — never "listener's lips stay closed" for the panda).
 - After ingest, **re-voice** the clip with `elevenlabs_voice_changer` (ElevenLabs
   speech-to-speech into the VOICE CAST id; timing preserved exactly) with `expected_text` set, and
   rebuild the scene's subshots from the generated length and the re-voiced `speech_end_s`.
   `transcript_match.ok: false` is a `fail_generation`.
 
-**One speaker per clip.** A scene with a customer line and a panda line produces two clips, each
-speaking only its own line — never a premixed bed, never narrator audio. Narrator lines and
-leading silence are closed-mouth **fill** subshots (approved still, or one closed-mouth reaction
-/ neutral-motion clip when the stretch is long enough) — a clip never speaks a narrator line.
+**One customer speaking clip per customer line.** A scene with a customer line and a panda line
+produces one customer speaking clip plus a panda action/sign/walk **fill** (panda VO laid on
+the timeline) — never a premixed bed, never narrator audio, never a panda lip-sync clip.
+Narrator lines and leading silence are **fill** subshots (approved still, or one no-mouth
+panda / closed-mouth customer reaction when the stretch is long enough) — a clip never speaks a
+narrator line.
 
 Script timestamps give the order of lines and deliberate pauses only. After measuring, each line
 starts when the previous line's measured speech ends plus its real pause; a long line pushes the

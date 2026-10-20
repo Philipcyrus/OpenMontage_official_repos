@@ -20,16 +20,19 @@ brand + character consistency, recording everything in `asset_manifest`. Phases:
 - **PHASE 3 (GATE 4 — approve_assets):** after the motion sample is approved (or straight after
   the stills when `motion_sample` is off), **TTS-first** then duration-driven i2v for remaining
   scenes (+ music), then STOP. When **AUDIO LIPSYNC** is on (default), every on-screen
-  customer/panda line is its own **speaking subshot** — a Seedance clip that **speaks the quoted
+  **`customer`** line is its own **speaking subshot** — a Seedance clip that **speaks the quoted
   line itself** (`generate_audio:true`, native lip-sync), re-voiced into the cast voice with
-  `elevenlabs_voice_changer` — and narrator lines are closed-mouth fills; narrator-only scenes
-  and text_card stay HOLD/static. Compose lays each re-voiced line (and each narrator ElevenLabs
-  file) at its subshot.
+  `elevenlabs_voice_changer`. **Panda lines are never lip-synced** (`LIPSYNC_SPEAKERS` =
+  `customer` only): panda VO still plays from ElevenLabs, but the picture is a **fill**
+  (handheld sign, walk, or body action) with **PANDA NO MOUTH** from
+  `skills/meta/higgsfield-mcp-bridge.md` / `styles/panda.yaml`. Narrator lines are fills;
+  narrator-only scenes and text_card stay HOLD/static. Compose lays each re-voiced customer
+  line and each panda/narrator ElevenLabs file at its subshot.
 
   Seedance `audio_references` does **not** drive the mouth (job_cfb6fd099504: the mouth moved
   generically, uncorrelated with the attached line). Native speech is the only path that has
-  produced real lip-sync, and speech-to-speech keeps its timing exactly while swapping in the
-  brand voice.
+  produced real lip-sync for the **customer**, and speech-to-speech keeps its timing exactly
+  while swapping in the brand voice.
 
 ## Prerequisites
 
@@ -131,12 +134,15 @@ If the sample scene has **no** narration, use the scene-plan slot length snapped
 Then animate the hero still into a **single** sample clip via the Higgsfield MCP bridge.
 **Motion path depends on AUDIO LIPSYNC** (job option `audio_lipsync`, default **on**):
 
-- **Eligible sample** (speaker `customer`|`panda`, video clip, not `text_card`): generate it
+- **Eligible sample** (speaker `customer` only, video clip, not `text_card`): generate it
   exactly as a PHASE 3 **speaking subshot** (native speech, below) — for a multi-speaker scene,
-  its first speaking subshot only — then re-voice it with `elevenlabs_voice_changer`. Do **not**
-  mouth-freeze. On failure: fall back to HOLD LOCK i2v (below), log in `decision_log`.
-- **Ineligible / lipsync off:** HOLD LOCK the 2D still — mouth/face frozen; tiny idle only —
-  same locked characters; do not invent a new person or make the clip 3D / photoreal.
+  its first **customer** speaking subshot only — then re-voice it with
+  `elevenlabs_voice_changer`. Do **not** mouth-freeze the customer. On failure: fall back to
+  HOLD LOCK i2v (below), log in `decision_log`. A panda-led sample uses the panda fill path
+  (sign / walk / action + PANDA NO MOUTH), never native speech.
+- **Ineligible / lipsync off / panda line:** HOLD LOCK or closed-mouth-customer / no-mouth-panda
+  motion — tiny idle only; same locked characters; do not invent a new person or make the clip
+  3D / photoreal. Never draw a mouth on the panda.
 
 If both characters appear, the motion prompt must preserve the approved still's exact PAIR SCALE
 LOCK, postures, body proportions, and shared ground plane through the final frame. Any apparent
@@ -171,32 +177,35 @@ sets its own line length, so nothing downstream of it is allocated until it has 
    per section, e.g. `vo-{section_id}-{speaker}.mp3`. Do not merge multi-speaker dialogue into a
    single TTS call. Skip sections already generated for the motion-sample scene unless revising.
    Narration generated with any id not in the cast map is a defect; do not ship it.
-   On-screen dialogue TTS is kept as the HOLD fallback only; with native speech it never plays.
+   On-screen **customer** dialogue TTS is kept as the HOLD fallback only; with native speech it
+   never plays. **Panda** dialogue TTS **does** play over the panda fill (sign / walk / action).
 2. **Probe, split into subshots, generate speaking clips, then allocate the effective timeline:**
    probe every VO (`audio_probe` / `ffprobe`). For every scene with an on-screen
-   `customer`/`panda` line (when `audio_lipsync` is on), call
+   `customer` line (when `audio_lipsync` is on), call
    `lib.i2v_duration.build_scene_subshots(scene_id, sections,
    scene_script_start_seconds=scene.start_seconds, allowed_durations=<models_explore list>)` with
    one entry per section (`section_id`, `speaker`, `measured_seconds`, `script_start_seconds`,
-   `script_end_seconds`, `path`, **`text`** = the script line). It lays the lines end to end: each
-   starts after the previous line's **measured** end plus the script's pause when that pause is
-   ≥ 0.4s (otherwise a 0.25s breath), so a long line pushes the next one later instead of playing
-   on top of it. Script timestamps are the order of lines, not their clocks.
+   `script_end_seconds`, `path`, **`text`** = the script line). Panda sections become **fills**
+   (`LIPSYNC_SPEAKERS` = `customer` only) with their VO path still attached. It lays the lines
+   end to end: each starts after the previous line's **measured** end plus the script's pause
+   when that pause is ≥ 0.4s (otherwise a 0.25s breath), so a long line pushes the next one
+   later instead of playing on top of it. Script timestamps are the order of lines, not their
+   clocks.
 
-   Speaking subshots default to `speech_mode="native"`: their `vo_seconds` / `i2v_duration` are
-   an **estimate** of Seedance's own pacing (≈0.25s lead-in + 2.6 words/s — far slower than the
-   ElevenLabs reading; `native_speech_estimated: true`). Generate every speaking subshot now
-   (step 3, first wave), re-voice each one, then **rebuild** each scene with, per speaking
-   section, `generated_i2v_duration` = the clip length actually generated, `measured_seconds` =
-   the re-voiced `speech_end_s`, and `path` = the re-voiced file. Persist the rebuilt result
-   unchanged under `asset_manifest.metadata.scene_subshots.<scene_id>`.
+   Customer speaking subshots default to `speech_mode="native"`: their `vo_seconds` /
+   `i2v_duration` are an **estimate** of Seedance's own pacing (≈0.25s lead-in + 2.6 words/s —
+   far slower than the ElevenLabs reading; `native_speech_estimated: true`). Generate every
+   speaking subshot now (step 3, first wave), re-voice each one, then **rebuild** each scene
+   with, per speaking section, `generated_i2v_duration` = the clip length actually generated,
+   `measured_seconds` = the re-voiced `speech_end_s`, and `path` = the re-voiced file. Persist
+   the rebuilt result unchanged under `asset_manifest.metadata.scene_subshots.<scene_id>`.
 
-   After ALL VO is measured (narrator TTS + re-voiced dialogue), call
+   After ALL VO is measured (narrator + panda TTS + re-voiced customer dialogue), call
    `lib.i2v_duration.allocate_scene_durations` once for the full
    scene set. For a subshot scene pass `subshot_content_seconds=<content_duration_seconds>` (it
-   is several cuts, so it gets an exact length plus a closed-mouth `tail_fill_seconds`, and its
-   `i2v_duration` is null). Single-clip scenes (narrator-only HOLD, text_card) keep
-   `audio_end_seconds` + `allowed_durations` as before. Call it with:
+   is several cuts, so it gets an exact length plus a closed-mouth / no-mouth-panda
+   `tail_fill_seconds`, and its `i2v_duration` is null). Single-clip scenes (narrator-only HOLD,
+   text_card) keep `audio_end_seconds` + `allowed_durations` as before. Call it with:
    - `target_duration_seconds=ceil(sum of measured VO seconds)` — measured dialogue is the
      runtime; the user's requested total is not a candidate;
    - `tolerance_fraction=0.05`;
@@ -235,46 +244,46 @@ sets its own line length, so nothing downstream of it is allocated until it has 
    if the sample was HOLD-only.
 
    **Speaking subshot** (`audio_lipsync` on — default — and `kind: "speaking"`, i.e. an
-   on-screen `customer`|`panda` line in a video scene, not `text_card`). Generate **only the
-   speaking portion**, one clip per line, with **native speech**:
+   on-screen **`customer`** line in a video scene, not `text_card`). **Never** for `speaker:
+   panda`. Generate **only the speaking portion**, one clip per customer line, with **native
+   speech**:
    - MCP-upload the approved still only. **No `audio_references`** — an attached ElevenLabs line
-     does not drive the mouth. Never a scene bed, never narrator audio, never another speaker.
+     does not drive the mouth. Never a scene bed, never narrator audio, never another speaker,
+     never a panda line.
    - `generate_video`: model `seedance_2_0`, `start_image`, **`generate_audio:true`**, the
      subshot's `i2v_duration`, and **`aspect_ratio` from `scene_plan.metadata.aspect_ratio` /
      `options.aspect_ratio`** (default `9:16`). Never silently switch to another canvas; confirm
      the model supports it via `models_explore`. Compose cuts the clip to `duration_seconds`; the
      unused tail is discarded, never held over the next line.
-   - Prompt: 2D + Element LOCK; static locked-off camera; the speaker "speaks right away **in
-     English** at a brisk, natural conversational pace" (name the job language — without it
-     Seedance translated an English line into Mandarin) with a voice description fitting the
-     speaker (young woman for `customer`; warm, friendly for `panda`); then **`<Speaker> says,
-     in English: "<line>"`** with the line quoted exactly as
+   - Prompt: 2D + Element LOCK; static locked-off camera; the **customer** "speaks right away
+     **in English** at a brisk, natural conversational pace" (name the job language — without it
+     Seedance translated an English line into Mandarin) with a young-woman voice description;
+     then **`The customer says, in English: "<line>"`** with the line quoted exactly as
      `tools.audio.elevenlabs_voice_changer.spoken_form(text, script.pronunciation_guides)`
      returns it; "**says only this one sentence, word for word, then stops talking; silence
      after the line**" (without it Seedance ad-libbed a second sentence); "the mouth forms every
-     word in sync with the speech and closes when the line ends"; the listener "listens with
-     lips closed, small blink only"; and "no other voices, no music, no sound effects, no text".
-     One line per clip.
+     word in sync with the speech and closes when the line ends"; if the panda is in frame,
+     bake **PANDA NO MOUTH** ("smooth unmarked muzzle, eyes only, no lips, no teeth, no tongue"
+     — never "lips closed" for the panda); and "no other voices, no music, no sound effects, no
+     text". One customer line per clip.
    - **Brand words must be respelled in the quote.** Seedance spells capitalised tokens letter
      by letter ("eSIM" was heard as "E-S-I-M"). Every brand token the narrator or a character
      says goes into `script.pronunciation_guides` (`{"word": "eSIM", "phonetic": "e-sim"}`); if
      the script lacks one for a mixed-case or all-caps token, add it and log it in
      `decision_log`. Captions keep the written form.
    - **Re-voice immediately after ingest:** `elevenlabs_voice_changer.execute({source_path:
-     <clip>, voice_id: <VOICE CAST id for that speaker>, output_path:
-     "assets/audio/native/<subshot_id>.<speaker>_voice.mp3", expected_text: <script line>,
+     <clip>, voice_id: <VOICE CAST id for customer>, output_path:
+     "assets/audio/native/<subshot_id>.customer_voice.mp3", expected_text: <script line>,
      pronunciation_guides: <script guides>})`. It keeps Seedance's timing exactly (so the mouth
      still matches) and returns `speech_start_s`, `speech_end_s` and `transcript_match`. A
      `transcript_match.ok: false` (dropped words or a garbled brand word in
      `guarded_missing`) is a **`fail_generation`** for that subshot.
    - **The speaking prompt overrides the scene plan's `movement` and mood.** Do not paste the
-     scene's action into it. For the whole clip: the speaker faces camera (front or 3/4, both
+     scene's action into it. For the whole clip: the customer faces camera (front or 3/4, both
      eyes and the mouth visible) and stays in place — no walking, turning away, exits, nodding,
-     laughing or sweeping gestures; the listener's lips stay **closed** (a closed-lip smile at
-     most — never an open grin, laugh or talking shape). Show delight/surprise with eyes, brows
-     and small hand motion, not an open-mouth expression. Walking, exits and big gestures belong
-     in a closed-mouth fill before or after the line. A cheerful scene is where this goes wrong:
-     an open-mouth grin on both characters reads as both talking and swamps the word shapes.
+     laughing or sweeping gestures. The panda (if present) keeps **no mouth**. Walking, exits
+     and big gestures belong on panda fills or non-speaking fills. Never ask Seedance to draw a
+     mouth on the panda.
    - Manifest rows: the clip (`id` = the `subshot_id`, `scene_id` = the scene, `model:
      seedance_2_0`, `duration_seconds` = the generated length,
      `voice_performance.source_section_id` = the line's section, `[audio_lipsync:true]
@@ -286,13 +295,15 @@ sets its own line length, so nothing downstream of it is allocated until it has 
    - On generation failure: HOLD LOCK fallback for that subshot only, using the dialogue TTS
      file; log in `decision_log`.
 
-   **Fill subshot** (`kind: "fill"` — narrator lines inside a dialogue scene, leading silence,
-   and the scene's `tail_fill_seconds`). The mouth stays closed and no fill ever speaks:
+   **Fill subshot** (`kind: "fill"` — **panda** lines, narrator lines inside a dialogue scene,
+   leading silence, and the scene's `tail_fill_seconds`). No fill ever lip-syncs or runs
+   `generate_audio:true`. Panda fills keep **PANDA NO MOUTH** and show a handheld sign with the
+   line, a walk, or a body action while the panda ElevenLabs VO plays:
    - `fill_treatment: "still"` (shorter than one provider duration): use the approved still.
      No generation.
    - `fill_treatment: "still_or_closed_mouth_motion"`: prefer the still; spend one HOLD LOCK
-     closed-mouth reaction or neutral-motion clip only when the beat needs visible listening.
-     Never a lipsync generation.
+     no-mouth panda action / closed-mouth customer reaction or neutral-motion clip only when
+     the beat needs visible motion. Never a lipsync generation; never a mouth on the panda.
 
    **HOLD / single-clip** (narrator-only scene, `text_card`, non-speaking, or
    `audio_lipsync:false`):
@@ -469,20 +480,22 @@ Branding is a separate, on-demand `panda_brand` step applied only after final ap
 ## Success criteria
 - Every required asset exists on disk and appears in `asset_manifest` with `path` + `scene_id`
 - Stills/clips on-brand and character-consistent (panda Elements attached as media)
-- For speaking scenes: narration exists **before** i2v; every on-screen line is its own
-  speaking subshot whose clip `duration_seconds` covers that one line; no two lines overlap on
-  the scene timeline
+- For speaking scenes: narration exists **before** i2v; every on-screen **customer** line is its
+  own speaking subshot whose clip `duration_seconds` covers that one line; panda lines are
+  no-mouth fills with panda VO laid on the timeline; no two lines overlap on the scene timeline
+- Every panda still/clip has **no mouth** (smooth unmarked muzzle); never shipped with lips /
+  teeth / tongue or "closed mouth" / "lips closed" panda prompt language
 - `asset_manifest.metadata.timeline_contract` is schema-valid and within the requested ±5% band
   (or the assets checkpoint clearly requests a pacing revision before compose)
 - Narration covers all script sections; music (if any) sits under the VO
 - Checkpoint left in `awaiting_human` for the gate
-- When AUDIO LIPSYNC is on: each speaking subshot used `seedance_2_0` + `generate_audio:true`
-  with only its own quoted line (brand words respelled), was re-voiced into its VOICE CAST id
-  with `elevenlabs_voice_changer`, and passed `transcript_match` (or a logged HOLD fallback);
-  lipsync noted in `generation_summary` and under
-  `metadata.lip_sync_qa.subshots.<scene_id>.<section_id>` (never an illegal per-row
-  `audio_lipsync` field); no narrator line was ever spoken by a clip
+- When AUDIO LIPSYNC is on: each **customer** speaking subshot used `seedance_2_0` +
+  `generate_audio:true` with only its own quoted line (brand words respelled), was re-voiced
+  into the customer VOICE CAST id with `elevenlabs_voice_changer`, and passed
+  `transcript_match` (or a logged HOLD fallback); lipsync noted in `generation_summary` and
+  under `metadata.lip_sync_qa.subshots.<scene_id>.<section_id>` (never an illegal per-row
+  `audio_lipsync` field); no narrator or panda line was ever spoken by a clip
 - Every two-character still and clip passes the 0.58 ±0.05 pair-scale, shared-ground-plane, and
   posture check, or its scene-specific warning is persisted and surfaced at GATE 4
-- No Kling/Wav2Lip post-hoc; `generate_audio:true` only on speaking subshots, and that native
-  speech never ships un-converted (narrator lines are always ElevenLabs TTS)
+- No Kling/Wav2Lip post-hoc; `generate_audio:true` only on customer speaking subshots, and that
+  native speech never ships un-converted (narrator and panda lines are always ElevenLabs TTS)

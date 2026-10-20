@@ -16,7 +16,10 @@ class DurationAllocationError(ValueError):
     """Raised when measured audio cannot fit a provider-supported scene."""
 
 
-LIPSYNC_SPEAKERS = frozenset({"customer", "panda"})
+# Customer only — the panda mascot never gets a mouth. Panda dialogue is a
+# fill (sign / walk / action) with ElevenLabs VO; see PANDA NO MOUTH in
+# skills/meta/higgsfield-mcp-bridge.md and styles/panda.yaml.
+LIPSYNC_SPEAKERS = frozenset({"customer"})
 DEFAULT_BREATH_SECONDS = 0.25
 DEFAULT_MIN_GAP_SECONDS = 0.4
 MAX_LIPSYNC_DELTA_SECONDS = 2.0

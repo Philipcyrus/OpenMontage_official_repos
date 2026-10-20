@@ -6,11 +6,13 @@
     "notes": "See memory: panda-mobile-brand-assets for exact logo/mascot paths, fonts."
   },
   "character_references": {
-    "_note": "Local hero turnaround sheets (multi-view) used as the master references for character consistency across stills/clips. 6336x2688 RGB.",
+    "_note": "Local hero turnaround sheets (multi-view) used as the master references for character consistency across stills/clips. Panda: flat v2 sheet 5120x2880 black/white line art + seven 1024x1536 per-view PNGs (feet on a shared baseline). Customer: 6336x2688 RGB.",
     "panda_mascot": {
-      "turnaround": "brand/panda-mobile/mascot/Panda-Mobile-Smiling-Hero-Turnaround-v1.png",
-      "also": "brand/panda-mobile/mascot/Panda Mascot.png",
-      "views_dir": "brand/panda-mobile/mascot/views/"
+      "turnaround": "brand/panda-mobile/mascot/Panda-Mobile-Flat-Turnaround-v2.png",
+      "also": "brand/panda-mobile/mascot/views_v2/front.png",
+      "views_dir": "brand/panda-mobile/mascot/views_v2/",
+      "previous_turnaround": "brand/panda-mobile/mascot/Panda-Mobile-Smiling-Hero-Turnaround-v1.png",
+      "previous_views_dir": "brand/panda-mobile/mascot/views/"
     },
     "customer": {
       "turnaround": "brand/panda-mobile/customer/Customer-V3-Hero-Turnaround-v1.png"
@@ -29,7 +31,9 @@
   },
   "higgsfield": {
     "_note": "Reference Element ids keep the panda + customer consistent across stills and clips. These are the LOCKED brand elements (created on Higgsfield from the turnaround sheets above). Confirm live via MCP show_reference_elements. Use the panda element for every panda shot, the customer element for the customer. Attach as MCP media / image_references — NEVER put the UUID in the prompt sentence (draws the turnaround sheet). Do not use student_ugc_element_id (TODO).",
-    "panda_reference_element_id": "4c01c8f9-6cfb-4d8c-9eb9-74cb61462103",
+    "panda_reference_element_id": "1fdb4b3b-b395-49d2-9cc8-35f74c748451",
+    "previous_panda_reference_element_id": "4c01c8f9-6cfb-4d8c-9eb9-74cb61462103",
+    "_previous_note": "Rollback only — the v1 smiling-hero panda Element, still live on Higgsfield. Never attach it to new work; to roll back, swap it into panda_reference_element_id.",
     "customer_reference_element_id": "089ddcec-c375-4299-8a65-6d8b757dd81a",
     "student_ugc_element_id": "TODO — reusable id noted in memory panda-airport-arrival-ugc",
     "default_model_identity": "seedance_2_0",

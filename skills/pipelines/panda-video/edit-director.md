@@ -140,8 +140,23 @@ on-screen mouth should still be articulating.
 ### 4. Captions and overlays
 
 Carry burned captions / promo overlays from `scene_plan` `overlay_notes` / `captions` into
-`edit_decisions` so `panda_render` can apply them at compose. Do not bake new text into
-clips here.
+`edit_decisions`. Do not bake new text into clips here.
+
+**Promo / kinetic captions (Remotion-locked jobs):** write timed overlays under
+`edit_decisions.metadata.remotion_overlays` (and mirror top-level `overlays` when useful).
+Vary treatments — do **not** map every line to one green checklist bubble:
+
+| `type` | Use for |
+|---|---|
+| `promo_hero` | Flat `#fdc50d` ExtraBlack punch (YES / 50% OFF) mid-right beside mascot; optional `split` for two-letter pumps |
+| `promo_badge` | White/black disc + **black** brand pill + heavy body lines (OnePool™); slight tilt |
+| `promo_price` | Tilted price sticker (`$12.50` + `/MO` + yellow-on-black pill) |
+| `promo_caption` | Quiet bottom-center (or top) line — no cyan chrome |
+| `map_pin` | One destination per beat; black label + yellow ExtraBlack type (`x`/`y` optional) |
+
+Brand grammar: Montserrat Black / flat yellow / black-white discs — not Space Grotesk cyan
+rules or blue pills. Map scenes: **one `map_pin` per destination** — never one truncated
+country-list banner. Absolute timeline seconds on every overlay.
 
 ### 5. Checkpoint and continue
 

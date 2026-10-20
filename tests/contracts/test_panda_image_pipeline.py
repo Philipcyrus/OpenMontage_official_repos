@@ -55,3 +55,12 @@ def test_panda_playbook_is_2d_and_valid():
     assert "2d" in prefix or "flat" in prefix
     assert "3d" in neg or "cgi" in neg or "pixar" in neg
     assert "photoreal" in neg
+    assert "no mouth" in prefix
+    assert "panda mouth" in neg or "mouth" in neg
+
+
+def test_lipsync_speakers_exclude_panda():
+    from lib.i2v_duration import LIPSYNC_SPEAKERS
+
+    assert LIPSYNC_SPEAKERS == frozenset({"customer"})
+    assert "panda" not in LIPSYNC_SPEAKERS

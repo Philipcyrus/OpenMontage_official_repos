@@ -31,9 +31,10 @@ the agent to re-ask the user rather than substituting a different engine.
 from __future__ import annotations
 
 import contextlib
-import json
 import hashlib
+import json
 import logging
+import os
 import secrets
 import shutil
 import subprocess
@@ -201,6 +202,30 @@ class VideoCompose(BaseTool):
                     "`--timeout` (governs headless-browser setup and delayRender). "
                     "Raise this when the browser is slow to start (e.g. restricted "
                     "networks). The subprocess timeout is widened to match."
+                ),
+            },
+            "binaries_directory": {
+                "type": "string",
+                "description": (
+                    "Override directory for Remotion's compositor/ffmpeg/ffprobe "
+                    "binaries, passed through as `--binaries-directory`. Use this "
+                    "when the bundled @remotion/compositor-linux-x64-gnu binary "
+                    "needs a newer glibc than the host provides (surfaces as "
+                    "'version GLIBC_2.xx not found'): point this at a directory "
+                    "containing the statically-linked musl compositor binary "
+                    "alongside working ffmpeg/ffprobe (e.g. the system ffmpeg)."
+                ),
+            },
+            "compose_strategy": {
+                "type": "string",
+                "enum": ["single_pass", "underlay_plus_overlays", "auto"],
+                "description": (
+                    "Remotion compose strategy. `underlay_plus_overlays` builds a "
+                    "clean master (no OffthreadVideo) then renders a transparent "
+                    "Remotion overlay track and ffmpeg-merges — required when the "
+                    "Remotion compositor SIGSEGVs on video decode. `auto` (default) "
+                    "picks underlay_plus_overlays when video cuts + remotion_overlays "
+                    "are present. Also accepted via edit_decisions.metadata.compose_strategy."
                 ),
             },
         },
@@ -1587,20 +1612,43 @@ class VideoCompose(BaseTool):
         output_path = Path(inputs.get("output_path", "renders/output.mp4"))
         output_path.parent.mkdir(parents=True, exist_ok=True)
 
-        # Build asset lookup: id -> asset info
-        asset_lookup = {a["id"]: a for a in asset_manifest.get("assets", [])}
+        # Build asset lookup: id -> asset info. Prefer video over still when
+        # both share an id (common in panda manifests: sc-01.png + sc-01.mp4).
+        asset_lookup: dict[str, dict] = {}
+        for a in asset_manifest.get("assets", []):
+            aid = a.get("id")
+            if not aid:
+                continue
+            prev = asset_lookup.get(aid)
+            if prev is None:
+                asset_lookup[aid] = a
+                continue
+            prev_video = self._is_video_source(prev.get("path"))
+            new_video = self._is_video_source(a.get("path"))
+            if new_video and not prev_video:
+                asset_lookup[aid] = a
+            elif new_video == prev_video:
+                asset_lookup[aid] = a  # last wins among same kind
 
         cuts = edit_decisions.get("cuts", [])
         if not cuts:
             return ToolResult(success=False, error="No cuts in edit_decisions")
 
-        # Resolve asset IDs in cuts to file paths
+        # Project root for relative manifest paths (…/job_*/renders/out.mp4 → job_*).
+        project_root = output_path.resolve().parent
+        if project_root.name == "renders":
+            project_root = project_root.parent
+
+        # Resolve asset IDs in cuts to absolute file paths
         resolved_cuts = []
         for cut in cuts:
             source_id = cut.get("source", "")
             resolved_cut = dict(cut)
             if source_id in asset_lookup:
-                resolved_cut["source"] = asset_lookup[source_id]["path"]
+                p = Path(asset_lookup[source_id]["path"])
+                if not p.is_absolute():
+                    p = project_root / p
+                resolved_cut["source"] = str(p.resolve()) if p.exists() else str(p)
             resolved_cuts.append(resolved_cut)
 
         # --- Pre-compose validation gate ---
@@ -1632,43 +1680,74 @@ class VideoCompose(BaseTool):
             )
         # --- Explicit Remotion path (render_runtime == 'remotion') ---
         if self._needs_remotion(resolved_cuts):
-            remotion_inputs: dict[str, Any] = {
-                "edit_decisions": dict(edit_decisions, cuts=resolved_cuts),
-                "output_path": str(output_path),
-            }
-            if profile:
-                remotion_inputs["profile"] = profile
-            # Forward the creator-facing render timeout through the high-level
-            # render path (execute(operation="render") -> _render), otherwise it
-            # would only take effect on a direct _remotion_render() call.
-            if inputs.get("remotion_timeout_ms") is not None:
-                remotion_inputs["remotion_timeout_ms"] = inputs["remotion_timeout_ms"]
-            if inputs.get("public_dir") is not None:
-                remotion_inputs["public_dir"] = inputs["public_dir"]
-            render_result = self._remotion_render(remotion_inputs)
-
-            # Governance: NEVER silently fall back to FFmpeg when Remotion fails.
-            # The agent must decide the fallback path, not the tool.
-            if not render_result.success:
-                renderer_family = edit_decisions.get("renderer_family", "unknown")
-                return ToolResult(
-                    success=False,
-                    error=(
-                        f"Remotion render failed for renderer_family={renderer_family!r}. "
-                        f"Underlying error: {render_result.error}\n\n"
-                        f"This composition requires Remotion (images, text cards, animations). "
-                        f"Options:\n"
-                        f"  1. Fix Remotion setup (cd remotion-composer && npm install)\n"
-                        f"  2. Re-run with operation='compose' for FFmpeg-only (video cuts only)\n"
-                        f"  3. Approve a degraded FFmpeg render (still images → Ken Burns)\n\n"
-                        f"Per governance: renderer downgrade requires user approval."
-                    ),
+            if self._use_underlay_plus_overlays(inputs, edit_decisions, resolved_cuts):
+                render_result = self._render_remotion_underlay_plus_overlays(
+                    inputs=inputs,
+                    edit_decisions=edit_decisions,
+                    asset_manifest=asset_manifest,
+                    resolved_cuts=resolved_cuts,
+                    output_path=output_path,
+                    profile=profile,
                 )
-            if inputs.get("audio_path"):
-                mux_result = self._mux_external_audio(output_path, inputs["audio_path"])
-                if not mux_result.success:
-                    return mux_result
-                render_result.data["has_mixed_audio"] = True
+                if not render_result.success:
+                    renderer_family = edit_decisions.get("renderer_family", "unknown")
+                    return ToolResult(
+                        success=False,
+                        error=(
+                            f"Remotion underlay_plus_overlays failed for "
+                            f"renderer_family={renderer_family!r}. "
+                            f"Underlying error: {render_result.error}\n\n"
+                            f"Do NOT silently substitute a bubble-only master. "
+                            f"Escalate per compose-director / governance."
+                        ),
+                        data=render_result.data,
+                    )
+            else:
+                remotion_inputs: dict[str, Any] = {
+                    "edit_decisions": dict(edit_decisions, cuts=resolved_cuts),
+                    "output_path": str(output_path),
+                }
+                if profile:
+                    remotion_inputs["profile"] = profile
+                # Forward the creator-facing render timeout through the high-level
+                # render path (execute(operation="render") -> _render), otherwise it
+                # would only take effect on a direct _remotion_render() call.
+                if inputs.get("remotion_timeout_ms") is not None:
+                    remotion_inputs["remotion_timeout_ms"] = inputs["remotion_timeout_ms"]
+                if inputs.get("public_dir") is not None:
+                    remotion_inputs["public_dir"] = inputs["public_dir"]
+                if inputs.get("binaries_directory") is not None:
+                    remotion_inputs["binaries_directory"] = inputs["binaries_directory"]
+                # Lift metadata.remotion_overlays onto top-level overlays for Explainer.
+                remotion_inputs["edit_decisions"] = self._with_lifted_remotion_overlays(
+                    remotion_inputs["edit_decisions"]
+                )
+                render_result = self._remotion_render(remotion_inputs)
+
+                # Governance: NEVER silently fall back to FFmpeg when Remotion fails.
+                # The agent must decide the fallback path, not the tool.
+                if not render_result.success:
+                    renderer_family = edit_decisions.get("renderer_family", "unknown")
+                    return ToolResult(
+                        success=False,
+                        error=(
+                            f"Remotion render failed for renderer_family={renderer_family!r}. "
+                            f"Underlying error: {render_result.error}\n\n"
+                            f"This composition requires Remotion (images, text cards, animations). "
+                            f"Options:\n"
+                            f"  1. Fix Remotion setup (cd remotion-composer && npm install)\n"
+                            f"  2. Retry with compose_strategy='underlay_plus_overlays' "
+                            f"(avoids OffthreadVideo compositor crashes)\n"
+                            f"  3. Re-run with operation='compose' for FFmpeg-only (video cuts only)\n"
+                            f"  4. Approve a degraded FFmpeg render (still images → Ken Burns)\n\n"
+                            f"Per governance: renderer downgrade requires user approval."
+                        ),
+                    )
+                if inputs.get("audio_path"):
+                    mux_result = self._mux_external_audio(output_path, inputs["audio_path"])
+                    if not mux_result.success:
+                        return mux_result
+                    render_result.data["has_mixed_audio"] = True
         else:
             # --- FFmpeg fallback: only when Remotion is unavailable ---
             options = inputs.get("options", {})
@@ -1907,6 +1986,446 @@ class VideoCompose(BaseTool):
 
         return render_result
 
+    _VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm", ".avi", ".mkv", ".m4v"}
+
+    @classmethod
+    def _is_video_source(cls, source: str | None) -> bool:
+        if not source:
+            return False
+        return Path(str(source)).suffix.lower() in cls._VIDEO_EXTENSIONS
+
+    @staticmethod
+    def _extract_remotion_overlays(edit_decisions: dict[str, Any]) -> list[dict]:
+        """Prefer top-level overlays; else lift metadata.remotion_overlays."""
+        top = edit_decisions.get("overlays")
+        if isinstance(top, list) and top:
+            return top
+        meta = edit_decisions.get("metadata") or {}
+        lifted = meta.get("remotion_overlays")
+        return list(lifted) if isinstance(lifted, list) else []
+
+    @classmethod
+    def _with_lifted_remotion_overlays(cls, edit_decisions: dict[str, Any]) -> dict[str, Any]:
+        ed = dict(edit_decisions)
+        overlays = cls._extract_remotion_overlays(ed)
+        if overlays and not ed.get("overlays"):
+            ed["overlays"] = overlays
+        return ed
+
+    @classmethod
+    def _use_underlay_plus_overlays(
+        cls,
+        inputs: dict[str, Any],
+        edit_decisions: dict[str, Any],
+        resolved_cuts: list[dict],
+    ) -> bool:
+        """Choose underlay+Remotion-overlay when OffthreadVideo would decode job clips.
+
+        Explicit compose_strategy wins; otherwise auto when video cuts + kinetic
+        overlays are present (the path that SIGSEGVs Remotion's compositor here).
+        """
+        meta = edit_decisions.get("metadata") or {}
+        strategy = (
+            inputs.get("compose_strategy")
+            or meta.get("compose_strategy")
+            or "auto"
+        )
+        strategy = str(strategy).strip().lower()
+        if strategy == "underlay_plus_overlays":
+            return True
+        if strategy == "single_pass":
+            return False
+        # auto
+        has_video = any(cls._is_video_source(c.get("source")) for c in resolved_cuts)
+        overlays = cls._extract_remotion_overlays(edit_decisions)
+        return bool(has_video and overlays)
+
+    @staticmethod
+    def _default_musl_binaries_directory() -> str | None:
+        """Remotion musl compositor package — avoids GLIBC mismatch on Amazon Linux."""
+        musl = (
+            Path(__file__).resolve().parent.parent.parent
+            / "remotion-composer"
+            / "node_modules"
+            / "@remotion"
+            / "compositor-linux-x64-musl"
+        )
+        if (musl / "remotion").is_file() or (musl / "ffmpeg").is_file():
+            return str(musl)
+        return None
+
+    def _probe_duration_seconds(self, path: Path) -> float:
+        try:
+            out = subprocess.check_output(
+                [
+                    "ffprobe", "-v", "error",
+                    "-show_entries", "format=duration",
+                    "-of", "default=nw=1:nk=1",
+                    str(path),
+                ],
+                text=True,
+            ).strip()
+            return float(out)
+        except Exception:
+            return 0.0
+
+    def _build_panda_underlay(
+        self,
+        *,
+        edit_decisions: dict[str, Any],
+        asset_manifest: dict[str, Any],
+        resolved_cuts: list[dict],
+        underlay_path: Path,
+        profile: Optional[str],
+        inputs: dict[str, Any],
+    ) -> ToolResult:
+        """Clean master of clips + VO + music with no bubble overlays."""
+        from tools.video.panda_render import PandaRender
+
+        project_root = underlay_path.resolve().parent
+        if project_root.name in {".tmp", "tmp"} or project_root.name.startswith(".underlay"):
+            project_root = project_root.parent
+        if project_root.name == "renders":
+            project_root = project_root.parent
+
+        asset_lookup: dict[str, dict] = {}
+        for a in asset_manifest.get("assets", []):
+            aid = a.get("id")
+            if not aid:
+                continue
+            prev = asset_lookup.get(aid)
+            if prev is None or (self._is_video_source(a.get("path")) and not self._is_video_source((prev or {}).get("path"))):
+                asset_lookup[aid] = a
+            elif self._is_video_source(a.get("path")) == self._is_video_source((prev or {}).get("path")):
+                asset_lookup[aid] = a
+
+        def _abs(path: str | Path) -> Path:
+            p = Path(path)
+            if not p.is_absolute():
+                p = project_root / p
+            return p.resolve()
+
+        scenes: list[dict[str, Any]] = []
+        for cut in resolved_cuts:
+            src = cut.get("source") or ""
+            src_path = _abs(src) if src else None
+            if not src_path or not src_path.is_file():
+                return ToolResult(
+                    success=False,
+                    error=f"underlay cut missing media: {cut.get('id')} -> {src!r}",
+                )
+            dur = cut.get("effective_duration_seconds")
+            if dur is None:
+                in_s = float(cut.get("in_seconds") or 0)
+                out_s = float(cut.get("out_seconds") or 0)
+                dur = max(0.01, out_s - in_s) if out_s > in_s else None
+            if dur is None:
+                return ToolResult(
+                    success=False,
+                    error=f"underlay cut missing duration: {cut.get('id')}",
+                )
+            scenes.append({
+                "media_path": str(src_path),
+                "duration_s": float(dur),
+                "source_in_s": float(cut.get("in_seconds") or 0) if float(cut.get("in_seconds") or 0) > 0 else 0.0,
+                "overlays": [],  # never draw ffmpeg bubbles on Remotion-locked jobs
+                "scene_id": cut.get("scene_id") or cut.get("id"),
+            })
+
+        audio_in: dict[str, Any] = {}
+        narration = (edit_decisions.get("audio") or {}).get("narration") or {}
+        segments = narration.get("segments") or []
+        voice_tracks: list[dict[str, Any]] = []
+        for seg in segments:
+            aid = seg.get("asset_id")
+            apath = (asset_lookup.get(aid) or {}).get("path")
+            if not apath:
+                return ToolResult(
+                    success=False,
+                    error=f"underlay VO asset not in manifest: {aid!r}",
+                )
+            start = float(seg["start_seconds"])
+            end = float(seg["end_seconds"])
+            voice_tracks.append({
+                "path": str(_abs(apath)),
+                "at_s": start,
+                "duration_s": max(0.01, end - start),
+                "section_id": seg.get("section_id"),
+            })
+        if voice_tracks:
+            audio_in["voice_tracks"] = voice_tracks
+        elif inputs.get("audio_path"):
+            audio_in["voice_path"] = str(_abs(inputs["audio_path"]))
+
+        music = (edit_decisions.get("audio") or {}).get("music") or {}
+        mid = music.get("asset_id")
+        if mid and mid in asset_lookup:
+            audio_in["music_path"] = str(_abs(asset_lookup[mid]["path"]))
+        elif music.get("path"):
+            audio_in["music_path"] = str(_abs(music["path"]))
+        # styles/panda.yaml music_volume ~0.08 ≈ −22 dB relative to full scale
+        if music.get("volume") is not None:
+            try:
+                import math
+                vol = float(music["volume"])
+                if vol > 0:
+                    audio_in["music_db"] = max(-40.0, min(0.0, 20.0 * math.log10(vol)))
+            except (TypeError, ValueError):
+                pass
+
+        # Resolution from profile / metadata / prior render (this job is 1920x1080)
+        resolution = inputs.get("resolution") or (edit_decisions.get("metadata") or {}).get("resolution")
+        if not resolution:
+            aspect = (edit_decisions.get("metadata") or {}).get("aspect_ratio") or "16:9"
+            resolution = "1920x1080" if "16" in str(aspect) else "1080x1920"
+
+        transition = edit_decisions.get("transition") or {"type": "cut", "duration_s": 0}
+        target_duration = sum(float(s["duration_s"]) for s in scenes)
+
+        panda_inputs: dict[str, Any] = {
+            "scenes": scenes,
+            "audio": audio_in,
+            "output_path": str(underlay_path),
+            "profile": "ugc",
+            "fps": int(inputs.get("fps") or edit_decisions.get("fps") or 30),
+            "resolution": resolution,
+            "transition": transition,
+            "target_duration_s": target_duration,
+            "duration_tolerance_fraction": float(
+                inputs.get("duration_tolerance_fraction")
+                or (edit_decisions.get("metadata") or {}).get("duration_tolerance_fraction")
+                or 0.08
+            ),
+            "run_id": underlay_path.stem,
+        }
+        # Music volume: panda_render uses AudioSpec; pass via audio if supported
+        result = PandaRender().execute(panda_inputs)
+        if not result.success:
+            return result
+        if not underlay_path.is_file():
+            return ToolResult(
+                success=False,
+                error=f"panda_render underlay missing output: {underlay_path}",
+            )
+        return ToolResult(
+            success=True,
+            data={
+                "underlay": str(underlay_path),
+                "duration_seconds": self._probe_duration_seconds(underlay_path) or target_duration,
+                "resolution": resolution,
+            },
+            artifacts=[str(underlay_path)],
+        )
+
+    def _overlay_has_alpha(self, overlay_path: Path) -> bool:
+        """True if ffprobe reports an alpha-capable pixel format."""
+        try:
+            out = subprocess.check_output(
+                [
+                    "ffprobe", "-v", "error",
+                    "-select_streams", "v:0",
+                    "-show_entries", "stream=pix_fmt",
+                    "-of", "default=nw=1:nk=1",
+                    str(overlay_path),
+                ],
+                text=True,
+            ).strip().lower()
+            return any(tok in out for tok in ("yuva", "rgba", "argb", "bgra", "gbra", "ya"))
+        except Exception:
+            return False
+
+    def _ffmpeg_merge_overlay_track(
+        self,
+        *,
+        underlay_path: Path,
+        overlay_path: Path,
+        output_path: Path,
+    ) -> ToolResult:
+        """Composite transparent Remotion track onto underlay; keep underlay audio.
+
+        Remotion's vp8 webm often drops alpha to opaque black on this host. When
+        the overlay has no alpha plane, colorkey black so captions composite.
+        """
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        temp_output = output_path.with_name(
+            f".{output_path.stem}.merge-{time.time_ns()}{output_path.suffix}"
+        )
+        has_alpha = self._overlay_has_alpha(overlay_path)
+        if has_alpha:
+            filter_complex = "[0:v][1:v]overlay=0:0:format=auto:shortest=1[v]"
+        else:
+            # Explainer overlay_only clears with #00FF00 so black brand type/discs
+            # survive (black-colorkey was punching holes in promo_badge/price).
+            filter_complex = (
+                "[1:v]colorkey=0x00FF00:0.3:0.1[ov];"
+                "[0:v][ov]overlay=0:0:shortest=1[v]"
+            )
+        try:
+            self.run_command([
+                "ffmpeg", "-y",
+                "-i", str(underlay_path),
+                "-i", str(overlay_path),
+                "-filter_complex", filter_complex,
+                "-map", "[v]",
+                "-map", "0:a?",
+                "-c:v", "libx264",
+                "-crf", "18",
+                "-preset", "medium",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "copy",
+                "-movflags", "+faststart",
+                str(temp_output),
+            ])
+            if not temp_output.is_file():
+                return ToolResult(
+                    success=False,
+                    error=f"overlay merge produced no file: {temp_output}",
+                )
+            temp_output.replace(output_path)
+        except Exception as exc:
+            return ToolResult(success=False, error=f"ffmpeg overlay merge failed: {exc}")
+        finally:
+            if temp_output.exists():
+                temp_output.unlink(missing_ok=True)
+        return ToolResult(
+            success=True,
+            data={
+                "output": str(output_path),
+                "overlay_had_alpha": has_alpha,
+                "merge_filter": "overlay_alpha" if has_alpha else "colorkey_black",
+            },
+            artifacts=[str(output_path)],
+        )
+
+    def _render_remotion_underlay_plus_overlays(
+        self,
+        *,
+        inputs: dict[str, Any],
+        edit_decisions: dict[str, Any],
+        asset_manifest: dict[str, Any],
+        resolved_cuts: list[dict],
+        output_path: Path,
+        profile: Optional[str],
+    ) -> ToolResult:
+        """Underlay (panda_render) + transparent Remotion overlays + ffmpeg merge.
+
+        Avoids OffthreadVideo so Remotion never asks the compositor to decode
+        job mp4s (the musl SIGSEGV path on this host).
+        """
+        work_dir = output_path.parent / f".underlay-overlays-{output_path.stem}-{secrets.token_hex(3)}"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        underlay_path = work_dir / "underlay.mp4"
+        overlay_path = work_dir / "overlays.webm"
+
+        try:
+            underlay = self._build_panda_underlay(
+                edit_decisions=edit_decisions,
+                asset_manifest=asset_manifest,
+                resolved_cuts=resolved_cuts,
+                underlay_path=underlay_path,
+                profile=profile,
+                inputs=inputs,
+            )
+            if not underlay.success:
+                return underlay
+
+            duration_s = float(
+                (underlay.data or {}).get("duration_seconds")
+                or self._probe_duration_seconds(underlay_path)
+            )
+            overlays = self._extract_remotion_overlays(edit_decisions)
+            if not overlays:
+                return ToolResult(
+                    success=False,
+                    error=(
+                        "underlay_plus_overlays requires remotion_overlays "
+                        "(edit_decisions.overlays or metadata.remotion_overlays)"
+                    ),
+                )
+
+            overlay_props: dict[str, Any] = {
+                "overlay_only": True,
+                "duration_seconds": duration_s,
+                "cuts": [],
+                "overlays": overlays,
+                "captions": edit_decisions.get("captions") or [],
+                "renderer_family": edit_decisions.get("renderer_family", "explainer-data"),
+            }
+            # Carry theme hints if present
+            for key in ("theme", "themeConfig", "playbook"):
+                if key in edit_decisions:
+                    overlay_props[key] = edit_decisions[key]
+                elif key in (edit_decisions.get("metadata") or {}):
+                    overlay_props[key] = edit_decisions["metadata"][key]
+
+            remotion_inputs: dict[str, Any] = {
+                "edit_decisions": overlay_props,
+                "output_path": str(overlay_path),
+                "overlay_only": True,
+                "pixel_format": "yuva420p",
+                "codec": "vp8",
+                "image_format": "png",
+            }
+            if profile:
+                remotion_inputs["profile"] = profile
+            if inputs.get("remotion_timeout_ms") is not None:
+                remotion_inputs["remotion_timeout_ms"] = inputs["remotion_timeout_ms"]
+            # Overlay-only: Chrome renders React frames; do NOT force the musl
+            # binaries_directory — that package's ffmpeg is musl-linked and
+            # fails with ENOENT on glibc hosts (no ld-musl). Caller may still
+            # pass binaries_directory for a hybrid dir (system ffmpeg + compositor).
+            if inputs.get("binaries_directory"):
+                remotion_inputs["binaries_directory"] = inputs["binaries_directory"]
+
+            # Match underlay canvas when profile not set
+            resolution = (underlay.data or {}).get("resolution")
+            if resolution and "x" in str(resolution) and not profile:
+                try:
+                    w, h = str(resolution).lower().split("x", 1)
+                    remotion_inputs["width"] = int(w)
+                    remotion_inputs["height"] = int(h)
+                except ValueError:
+                    pass
+
+            overlay_result = self._remotion_render(remotion_inputs)
+            if not overlay_result.success:
+                return ToolResult(
+                    success=False,
+                    error=f"Remotion overlay track failed: {overlay_result.error}",
+                    data={"underlay": str(underlay_path), **(overlay_result.data or {})},
+                )
+
+            merge = self._ffmpeg_merge_overlay_track(
+                underlay_path=underlay_path,
+                overlay_path=overlay_path,
+                output_path=output_path,
+            )
+            if not merge.success:
+                return merge
+
+            if inputs.get("audio_path"):
+                mux = self._mux_external_audio(output_path, inputs["audio_path"])
+                if not mux.success:
+                    return mux
+
+            return ToolResult(
+                success=True,
+                data={
+                    "operation": "render",
+                    "compose_strategy": "underlay_plus_overlays",
+                    "output": str(output_path),
+                    "underlay": str(underlay_path),
+                    "overlay_track": str(overlay_path),
+                    "overlay_count": len(overlays),
+                    "duration_seconds": self._probe_duration_seconds(output_path) or duration_s,
+                },
+                artifacts=[str(output_path)],
+            )
+        finally:
+            # Keep work_dir for debugging when MERGE_KEEP_WORK=1; else clean
+            if os.environ.get("OPENMONTAGE_KEEP_UNDERLAY_WORK") != "1":
+                shutil.rmtree(work_dir, ignore_errors=True)
+
     def _remotion_render(self, inputs: dict[str, Any]) -> ToolResult:
         """Render via Remotion (requires Node.js + npx).
 
@@ -1997,17 +2516,29 @@ class VideoCompose(BaseTool):
         props_path = output_path.parent / ".remotion_props.json"
         staged_count = 0
         profile_name = inputs.get("profile")
+        overlay_only = bool(inputs.get("overlay_only") or props.get("overlay_only"))
         try:
-            staged_count = self._stage_remotion_media(props, public_dir)
-            if not staged_count and cleanup_public_dir:
-                public_dir = None
-            elif cleanup_public_dir:
-                # We are about to override Remotion's public dir with our own, so
-                # mirror the real one in — otherwise assets already staged into
-                # remotion-composer/public/ by earlier pipeline stages 404.
-                # Only for the dir we created and will delete; a caller-supplied
-                # public_dir is their contract to populate, so leave it untouched.
-                self._mirror_public_dir(composer_dir / "public", public_dir)
+            # Overlay-only: transparent track — no scene media / audio staging needed.
+            if overlay_only:
+                props["overlay_only"] = True
+                props["cuts"] = []
+                props.pop("audio", None)
+                if not props.get("overlays"):
+                    props["overlays"] = self._extract_remotion_overlays(composition_data)
+                if cleanup_public_dir:
+                    public_dir = None
+                staged_count = 0
+            else:
+                staged_count = self._stage_remotion_media(props, public_dir)
+                if not staged_count and cleanup_public_dir:
+                    public_dir = None
+                elif cleanup_public_dir:
+                    # We are about to override Remotion's public dir with our own, so
+                    # mirror the real one in — otherwise assets already staged into
+                    # remotion-composer/public/ by earlier pipeline stages 404.
+                    # Only for the dir we created and will delete; a caller-supplied
+                    # public_dir is their contract to populate, so leave it untouched.
+                    self._mirror_public_dir(composer_dir / "public", public_dir)
 
             # Write the fully adapted/staged props, never the original cut payload.
             with open(props_path, "w", encoding="utf-8") as f:
@@ -2027,6 +2558,28 @@ class VideoCompose(BaseTool):
             ]
             if public_dir is not None:
                 cmd.append(f"--public-dir={public_dir}")
+            binaries_directory = inputs.get("binaries_directory")
+            if binaries_directory:
+                cmd.append(f"--binaries-directory={binaries_directory}")
+
+            # Transparent overlay track (webm+vp8/png or prores 4444).
+            image_format = inputs.get("image_format")
+            if image_format:
+                cmd.append(f"--image-format={image_format}")
+            codec = inputs.get("codec")
+            if codec:
+                cmd.append(f"--codec={codec}")
+            pixel_format = inputs.get("pixel_format")
+            if pixel_format:
+                cmd.append(f"--pixel-format={pixel_format}")
+            if overlay_only:
+                # Defaults for alpha if caller didn't set them.
+                if not image_format:
+                    cmd.append("--image-format=png")
+                if not codec:
+                    cmd.append("--codec=vp8")
+                if not pixel_format:
+                    cmd.append("--pixel-format=yuva420p")
 
             # Apply media profile dimensions
             if profile_name:
@@ -2036,6 +2589,8 @@ class VideoCompose(BaseTool):
                     cmd.extend(["--width", str(p.width), "--height", str(p.height)])
                 except (ImportError, ValueError):
                     pass
+            elif inputs.get("width") and inputs.get("height"):
+                cmd.extend(["--width", str(int(inputs["width"])), "--height", str(int(inputs["height"]))])
 
             # Optional creator-facing render timeout. Remotion's `--timeout` (ms)
             # governs headless-browser setup and delayRender(); on slow machines or

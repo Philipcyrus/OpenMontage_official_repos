@@ -304,7 +304,7 @@ after the last content gate — a post-cut overlay, never in generation. `skip` 
 | `music` | mood string, or `false` | background music via ElevenLabs (`"upbeat, light"`), or `false` to skip |
 | `render_runtime` | `"auto"` \| `"ffmpeg"` \| `"remotion"` \| `"hyperframes"` | which render engine composes the video. Default `"auto"` |
 | `motion_sample` | `false` (default) \| `true` | insert the `approve_motion_sample` gate (video only; default off) |
-| `audio_lipsync` | `true` (default) \| `false` | video only — Seedance `audio_references` so on-screen customer/panda mouths follow ElevenLabs VO (`generate_audio:false`; compose still lays the same VO). Pass `false` for HOLD + duration-only |
+| `audio_lipsync` | `true` (default) \| `false` | video only — Seedance native speech for on-screen **customer** lines (re-voiced to ElevenLabs; compose lays that VO). **Panda never has a mouth** — panda lines are sign/walk/action fills with panda VO overlaid. Pass `false` for HOLD + duration-only |
 | `hero_still` | `true` (default) \| `false` | insert `approve_hero_still` look-lock (video + carousel; default on). Never for panda-image |
 | `max_higgsfield_credits` | integer, or unset | **hard credit ceiling** for the run |
 | `aspect_ratio` | string | Master canvas for stills / i2v / compose. **Pass-through** — never rewrite a caller-set value. Defaults: **panda-video** `"9:16"`, **panda-carousel** `"4:5"`, **panda-image** `"1:1"`. Also `16:9`, `1:1`, `4:5`, `3:4`, `4:3`, or `WIDTHxHEIGHT`. |

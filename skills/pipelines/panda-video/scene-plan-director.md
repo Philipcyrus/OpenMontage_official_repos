@@ -45,17 +45,24 @@ Record the job's canvas on `scene_plan.metadata.aspect_ratio` from `options.aspe
 window. Keep one visual scene; list a separate narration `required_assets` entry per speaking
 beat (see §7). Map `character_actions.dialogue` to the matching brand speaker
 (`customer` / `panda`; off-screen lines → `narrator`). Lines in one scene play one after another,
-never on top of each other: the assets stage splits the scene into one speaking subshot per
-on-screen line (with closed-mouth fills for narrator lines), so section timestamps set the
-order of lines and the scene's pacing weight, not exact clock positions.
+never on top of each other: the assets stage splits the scene into one **customer** speaking
+subshot per on-screen customer line (panda and narrator lines are fills — panda VO still plays),
+so section timestamps set the order of lines and the scene's pacing weight, not exact clock
+positions.
 
-**Dialogue shots stay still.** A scene with an on-screen `customer`/`panda` line gets a static
-`movement`: the speaker faces camera and stays in place while talking, and the listener listens
-with a closed mouth. Do not put a line on a walking, exiting, turning or big-gesture shot, and
-do not direct an open-mouth grin or laugh in a dialogue scene (describe delight with eyes and
-brows). Give that action its own non-speaking scene, or put the line over a narrator/fill beat.
-Seedance turns the motion into a speaker who turns away mid-line and a listener who looks like
-it is talking.
+**PANDA NO MOUTH — panda dialogue is a sign, a walk, or an action.** The panda never has a
+mouth (smooth unmarked muzzle, eyes only). When `speaker: panda`, plan the picture as one of:
+a handheld sign showing the line, a walk, or a body action (wave, point, carry a prop). Never
+a face-camera talking shot, never "closed mouth" / "lips closed" / lip-sync language for the
+panda. The panda voice still plays from ElevenLabs; only the picture changes.
+
+**Customer dialogue shots stay still.** A scene with an on-screen `customer` line gets a static
+`movement`: the customer faces camera and stays in place while talking. If the panda is the
+listener, apply PANDA NO MOUTH (no "lips closed" for the panda). Do not put a customer line on
+a walking, exiting, turning or big-gesture shot, and do not direct an open-mouth grin or laugh
+on the customer in a dialogue scene (describe delight with eyes and brows). Panda action /
+sign / walk beats belong on panda lines or non-speaking fills. Seedance turns pasted customer
+motion into a speaker who turns away mid-line.
 
 ### 3. The 5-aspect scene spec (MANDATORY — every scene, all five)
 Silent omission is the top failure mode — it produces brittle prompts and reviewer churn. For

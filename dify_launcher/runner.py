@@ -543,6 +543,20 @@ def _voice_line(options: dict[str, Any]) -> str:
             "not in this map is a defect; do not ship it." + fallback)
 
 
+def _brand_element_ids() -> tuple[str, str]:
+    """(customer, panda) Higgsfield reference Element ids from config/panda-elements.json.
+
+    The config is the single source of truth for CHARACTER LOCK; a missing or malformed id raises
+    rather than letting a leg run without its locked characters."""
+    with open(_ENGINE_ROOT / "config" / "panda-elements.json", encoding="utf-8") as fh:
+        hf = (json.load(fh) or {}).get("higgsfield") or {}
+    ids = (hf.get("customer_reference_element_id"), hf.get("panda_reference_element_id"))
+    if not all(isinstance(i, str) and i.strip() for i in ids):
+        raise RuntimeError("config/panda-elements.json is missing higgsfield "
+                           "customer_reference_element_id / panda_reference_element_id")
+    return ids[0].strip(), ids[1].strip()
+
+
 def _pair_scale_lock_line() -> str:
     """Literal panda/customer scale contract carried into every cold media leg."""
     ratio, tolerance = 0.58, 0.05
@@ -613,35 +627,44 @@ def _audio_lipsync_line(options: Optional[dict[str, Any]]) -> str:
     return (
         "AUDIO LIPSYNC — ON (default; pass options.audio_lipsync:false to opt out). "
         "Seedance lip-syncs only to speech it generates itself; audio_references does NOT drive "
-        "the mouth, so never attach a VO file. Narrator TTS first; then split each scene with "
+        "the mouth, so never attach a VO file. LIPSYNC_SPEAKERS = customer only. "
+        "PANDA NO MOUTH (binding): the panda has no mouth — smooth unmarked muzzle, eyes only, "
+        "no lips/teeth/tongue; never prompt 'closed mouth' or 'lips closed' for the panda. "
+        "Narrator TTS first; then split each scene with "
         "lib/i2v_duration.build_scene_subshots (pass each section's script `text`): every "
-        "on-screen customer/panda line is its own SPEAKING SUBSHOT, laid end to end after the "
-        "previous line's measured end (script timestamps give order, not clocks). Generate the "
-        "speaking subshots FIRST: Higgsfield model seedance_2_0, medias start_image=approved "
-        "still only, generate_audio:true, duration = the subshot's i2v_duration (native-speech "
-        "estimate). Prompt: 2D + Element LOCK, static camera; the speaker faces camera, stays in "
-        f"place and speaks right away in {language} (always name it — Seedance otherwise may "
-        "translate the line) at a brisk, natural conversational "
-        f"pace; then `<Speaker> says, in {language}: \"<line>\"` with ONLY that ONE line, followed by "
+        "on-screen CUSTOMER line is its own SPEAKING SUBSHOT; panda lines are FILLS (handheld "
+        "sign / walk / body action) with panda ElevenLabs VO still laid on the timeline. Lines "
+        "are laid end to end after the previous line's measured end (script timestamps give "
+        "order, not clocks). Generate CUSTOMER speaking subshots FIRST: Higgsfield model "
+        "seedance_2_0, medias start_image=approved still only, generate_audio:true, duration = "
+        "the subshot's i2v_duration (native-speech estimate). Prompt: 2D + Element LOCK, static "
+        "camera; the customer faces camera, stays in place and speaks right away in "
+        f"{language} (always name it — Seedance otherwise may translate the line) at a brisk, "
+        "natural conversational "
+        f"pace; then `The customer says, in {language}: \"<line>\"` with ONLY that ONE line, "
+        "followed by "
         "'says only this one sentence, word for word, then stops talking; silence after the "
         "line' (otherwise it ad-libs extra words), quoted as "
         "tools.audio.elevenlabs_voice_changer.spoken_form(text, script.pronunciation_guides) "
         "returns it (brand words respelled — Seedance spells out 'eSIM' unless it is written "
-        "'e-sim'; add a missing guide and log it); the mouth closes when the line ends; the "
-        "listener's lips stay closed; no other voices, music or sound effects. The speaking "
-        "prompt OVERRIDES the scene plan's movement and mood (no walking, turning away, nodding, "
-        "laughing or big gestures). Do NOT mouth-freeze the speaker. Right after ingest, re-voice "
-        "each clip with elevenlabs_voice_changer (voice_id = VOICE CAST id for that speaker, "
-        "expected_text = the script line, pronunciation_guides, output under "
-        "assets/audio/native/); transcript_match.ok false = fail_generation. Then rebuild each "
-        "scene's subshots with generated_i2v_duration, measured_seconds = speech_end_s and path "
-        "= the re-voiced file, run allocate_scene_durations, and only then generate fill/HOLD "
-        "clips. Narrator lines, leading silence and scene tails are closed-mouth FILLS (approved "
-        "still, or a HOLD LOCK reaction/neutral-motion clip); no clip ever speaks a narrator "
-        "line. Narrator-only / text_card / no-face scenes stay HOLD or static. If a speaking "
-        "generation fails: fall back to HOLD + that line's TTS file for that subshot, log in "
-        "decision_log, continue. Compose mutes every clip's native AAC and lays each re-voiced "
-        "line / narrator file at its own subshot; voices never overlap.\n"
+        "'e-sim'; add a missing guide and log it); the customer's mouth closes when the line "
+        "ends; if the panda is in frame, bake PANDA NO MOUTH (never 'listener lips closed' for "
+        "the panda); no other voices, music or sound effects. Never generate_audio:true or "
+        "'the panda says' / mouth-forms-words for a panda line. The speaking prompt OVERRIDES "
+        "the scene plan's movement and mood for the customer (no walking, turning away, "
+        "nodding, laughing or big gestures). Do NOT mouth-freeze the customer. Right after "
+        "ingest, re-voice each customer clip with elevenlabs_voice_changer (voice_id = "
+        "customer VOICE CAST id, expected_text = the script line, pronunciation_guides, output "
+        "under assets/audio/native/); transcript_match.ok false = fail_generation. Then rebuild "
+        "each scene's subshots with generated_i2v_duration, measured_seconds = speech_end_s and "
+        "path = the re-voiced file, run allocate_scene_durations, and only then generate "
+        "fill/HOLD clips. Panda lines, narrator lines, leading silence and scene tails are "
+        "FILLS (approved still, or a HOLD LOCK no-mouth panda action / closed-mouth customer "
+        "reaction); no clip ever speaks a narrator or panda line. Narrator-only / text_card / "
+        "no-face scenes stay HOLD or static. If a speaking generation fails: fall back to HOLD "
+        "+ that line's TTS file for that subshot, log in decision_log, continue. Compose mutes "
+        "every clip's native AAC and lays each re-voiced customer line / panda / narrator file "
+        "at its own subshot; voices never overlap.\n"
     )
 
 
@@ -2387,8 +2410,8 @@ class ClaudeCodeRunner(Runner):
             "allocate_scene_durations timeline allocation before queueing remaining image_to_video. "
             f"{_pacing_dialogue_priority_line()} Persist metadata.timeline_contract with unequal "
             "audio-driven scene lengths. Follow the AUDIO LIPSYNC line below for "
-            "customer/panda lines (one seedance_2_0 native-speech subshot per line speaking only that "
-            "line, re-voiced with elevenlabs_voice_changer, when on). Poll every queued "
+            "CUSTOMER lines (one seedance_2_0 native-speech subshot per line, re-voiced with "
+            "elevenlabs_voice_changer, when on) and PANDA NO MOUTH fills for panda lines. Poll every queued "
             "Higgsfield job until complete, download clips into assets/video/, finish any remaining "
             f"music, record everything in asset_manifest. {_pair_scale_lock_line()} Then rewrite the assets checkpoint "
             "status='awaiting_human' WITHOUT partial_progress.phase='stills' (and without "
@@ -2774,6 +2797,7 @@ class ClaudeCodeRunner(Runner):
         if pipeline == "panda-image":
             return self._image_start_prompt(job_id, brief, options,
                                             language_coerced=language_coerced)
+        customer_el, panda_el = _brand_element_ids()
         lang = str(options.get("language", "en")).lower()
         narrator = str(options.get("narrator", "panda")).lower()
         music = options.get("music", True)            # BGM: mood string, True (default bed), or False
@@ -2839,8 +2863,8 @@ class ClaudeCodeRunner(Runner):
             "rewrite the ratio.\n"
             "BRAND — MANDATORY, do NOT improvise: read config/panda-elements.json and USE its "
             "Higgsfield reference Element IDs — customer "
-            "`089ddcec-c375-4299-8a65-6d8b757dd81a`, panda "
-            "`4c01c8f9-6cfb-4d8c-9eb9-74cb61462103`. Any human/traveller/customer/person OR "
+            f"`{customer_el}`, panda "
+            f"`{panda_el}`. Any human/traveller/customer/person OR "
             "panda/mascot mention maps to those IDs (see phrase_aliases). ATTACH Elements as "
             "MCP media / image_references — never put UUIDs in the prompt sentence, never invent "
             "a new character. Look: styles/panda.yaml — default medium is 2D flat illustration "
@@ -2865,6 +2889,7 @@ class ClaudeCodeRunner(Runner):
 
     def _carousel_start_prompt(self, job_id: str, brief: str, options: dict[str, Any],
                                *, language_coerced: bool = False) -> str:
+        customer_el, panda_el = _brand_element_ids()
         lang = str(options.get("language", "en")).lower()
         ratio = _carousel_aspect(options)
         cap = _budget_cap({"options": options})
@@ -2930,8 +2955,8 @@ class ClaudeCodeRunner(Runner):
             f"project_id: {job_id}\nBrief: {brief}\n"
             f"language: {lang}    aspect_ratio: {ratio}\n\n"
             "BRAND — MANDATORY: read config/panda-elements.json and USE its Higgsfield reference "
-            "Element IDs — customer `089ddcec-c375-4299-8a65-6d8b757dd81a`, panda "
-            "`4c01c8f9-6cfb-4d8c-9eb9-74cb61462103`. Any human/traveller/customer OR panda/mascot "
+            f"Element IDs — customer `{customer_el}`, panda "
+            f"`{panda_el}`. Any human/traveller/customer OR panda/mascot "
             "mention maps to those IDs (phrase_aliases). ATTACH as MCP media — never UUID in "
             "prompt, never invent a new character. Look: styles/panda.yaml — default 2D flat. "
             "Max 2 paid generate_image per slide; take 2 = i2i of take 1; then STOP. See "
@@ -2952,6 +2977,7 @@ class ClaudeCodeRunner(Runner):
 
     def _image_start_prompt(self, job_id: str, brief: str, options: dict[str, Any],
                             *, language_coerced: bool = False) -> str:
+        customer_el, panda_el = _brand_element_ids()
         lang = str(options.get("language", "en")).lower()
         ratio = _stills_aspect(options, pipeline="panda-image")
         cap = _budget_cap({"options": options})
@@ -2972,8 +2998,8 @@ class ClaudeCodeRunner(Runner):
             f"project_id: {job_id}\nBrief: {brief}\n"
             f"language: {lang}    aspect_ratio: {ratio}\n\n"
             "BRAND — MANDATORY: read config/panda-elements.json and USE its Higgsfield reference "
-            "Element IDs — customer `089ddcec-c375-4299-8a65-6d8b757dd81a`, panda "
-            "`4c01c8f9-6cfb-4d8c-9eb9-74cb61462103`. Any human/traveller/customer OR panda/mascot "
+            f"Element IDs — customer `{customer_el}`, panda "
+            f"`{panda_el}`. Any human/traveller/customer OR panda/mascot "
             "mention maps to those IDs (phrase_aliases). ATTACH as MCP media — never UUID in "
             "prompt, never invent a new character. Look: styles/panda.yaml — default 2D flat. "
             "Max 2 paid generate_image; take 2 = i2i of take 1; then STOP. See "
@@ -3048,15 +3074,20 @@ class ClaudeCodeRunner(Runner):
                 "yet. Full schema-valid asset_manifest is required at PHASE 3 / approve_assets.\n")
         if audio_lipsync:
             motion_how = (
-                "Each on-screen customer/panda line is its own speaking subshot: seedance_2_0 "
+                "Each on-screen CUSTOMER line is its own speaking subshot: seedance_2_0 "
                 "with start_image only + generate_audio:true speaking that one quoted line (native "
-                "lip-sync, no mouth HOLD), re-voiced into the cast voice with "
-                "elevenlabs_voice_changer. Narrator lines are closed-mouth fills; "
+                "lip-sync, no mouth HOLD), re-voiced into the customer cast voice with "
+                "elevenlabs_voice_changer. PANDA lines are NEVER lip-synced (LIPSYNC_SPEAKERS="
+                "customer only): panda ElevenLabs VO still plays, but the picture is a fill "
+                "(handheld sign with the line, a walk, or a body action) with PANDA NO MOUTH "
+                "(smooth unmarked muzzle, eyes only — never lips/teeth/tongue, never 'closed "
+                "mouth'/'lips closed' for the panda). Narrator lines are fills; "
                 "narrator-only/text_card: HOLD or static. Fallback HOLD on failure."
             )
-            hold_note = "AUDIO LIPSYNC path (see AUDIO LIPSYNC line)"
+            hold_note = "AUDIO LIPSYNC path (see AUDIO LIPSYNC line); panda = no-mouth fill"
             qa_how = (
-                "Then run mandatory lipsync_qa per speaking subshot with that speaker's own VO, "
+                "Then run mandatory lipsync_qa per CUSTOMER speaking subshot with that line's VO "
+                "(skip panda fills — no mouth QA), "
                 "allow only one local timing correction or one paid failed-subshot regeneration, "
                 "retain both takes, and persist "
                 "unresolved warnings; never attempt a third take. "
@@ -3308,9 +3339,10 @@ class ClaudeCodeRunner(Runner):
             f"For project_id: {job_id}, the STILLS phase of the `assets` stage is APPROVED. Do NOT "
             "mark the assets stage completed yet. TTS-FIRST for every speaking script section "
             "(ElevenLabs + VOICE CAST), probe ALL durations (audio_probe), split every scene with "
-            "an on-screen customer/panda line into sequential speaking/fill subshots "
-            "(lib/i2v_duration.build_scene_subshots). When AUDIO LIPSYNC is on, generate and "
-            "re-voice the speaking subshots first and rebuild those scenes from the measured "
+            "an on-screen customer or panda line into sequential speaking/fill subshots "
+            "(lib/i2v_duration.build_scene_subshots; panda = fill, customer = speaking when "
+            "lipsync on). When AUDIO LIPSYNC is on, generate and "
+            "re-voice CUSTOMER speaking subshots first and rebuild those scenes from the measured "
             "speech (see the AUDIO LIPSYNC line below). Then call "
             "lib/i2v_duration.allocate_scene_durations once for the full timeline "
             f"({_pacing_dialogue_priority_line()} tolerance_fraction=0.05, scene-plan weights, "

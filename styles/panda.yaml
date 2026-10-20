@@ -22,8 +22,11 @@ taste_profile:
     - "photoreal panda (this is a cartoon mascot)"
     - "3D / CGI / Pixar human or hall with a flat 2D panda sticker (mixed media)"
     - "photoreal human, photoreal environment, or inventing a new traveller face"
+    - "panda with a mouth, lips, teeth, tongue, or any lip-sync / talking face"
+    - "prompting the panda as 'closed mouth' or 'lips closed' (those phrases still draw a mouth)"
   quality_gates:
     - "Panda mascot is on-model and consistent across every still."
+    - "The panda has no mouth: smooth unmarked muzzle, eyes only — never lips, teeth, or tongue."
     - "Customer (when present) matches the locked customer Element — never a hallucinated face."
     - "Human, mascot, props, and set share one 2D flat illustration medium."
     - "Signature yellow used for emphasis, not everywhere."
@@ -39,14 +42,19 @@ visual_language:
   texture: flat 2D illustration, clean even keyline, matte fills, no CGI gloss
 
 typography:
-  # NOTE: on-screen captions are rendered by montage-svc (CJK-safe). This block only guides
-  # any text baked into GENERATED imagery — keep it minimal.
+  # NOTE: on-screen captions are rendered by montage-svc (CJK-safe) or Remotion promo
+  # overlays. This block only guides text baked into GENERATED imagery — keep it minimal.
   headings:
     font: "TODO — confirm brand font (see memory panda-mobile-brand-assets)"
     weight: 800
   body:
     font: "TODO"
     weight: 400
+  # Kinetic promo captions (Remotion remotion_overlays) — brand grammar:
+  # flat #fdc50d ExtraBlack punch (promo_hero, Montserrat Black), black/white circle badges
+  # (promo_badge), tilted price stickers (promo_price), quiet bottom-center lines
+  # (promo_caption), map_pin as black label + yellow type. No Space Grotesk cyan chrome,
+  # no blue pills, no uniform green checklist bubbles.
 
 motion:
   transitions: [cut, fade]
@@ -63,16 +71,18 @@ audio:
   music_volume: 0.08
 
 asset_generation:
-  image_prompt_prefix: "2D flat illustration matching the Panda Mobile customer and panda turnaround sheets, clean even keyline, matte fills, bright friendly brand frame, signature yellow accent, generous negative space, same medium for people mascot and set, "
-  image_negative_prompt: "3D render, CGI, Pixar, photoreal human, photoreal environment, photoreal panda, mixed media, glossy plush panda, off-model, cluttered, muddy gradient, neon overload, low contrast"
+  image_prompt_prefix: "2D flat illustration matching the Panda Mobile customer and panda turnaround sheets, clean even keyline, matte fills, bright friendly brand frame, signature yellow accent, generous negative space, same medium for people mascot and set, the panda has no mouth: smooth unmarked muzzle, eyes only, no lips, no teeth, no tongue, "
+  image_negative_prompt: "3D render, CGI, Pixar, photoreal human, photoreal environment, photoreal panda, mixed media, glossy plush panda, off-model, cluttered, muddy gradient, neon overload, low contrast, panda mouth, panda lips, panda teeth, panda tongue, talking panda face, lip sync, closed mouth on panda, lips closed on panda"
   consistency_anchors:
     - "Panda mascot on-model per config/panda-elements.json master ref"
+    - "The panda has no mouth: smooth unmarked muzzle, eyes only, no lips, no teeth, no tongue"
     - "Customer on-model per config/panda-elements.json customer Element when present"
     - "Black + signature yellow (#fdc50d) brand palette"
     - "Clean bright 2D background, one clear focal subject"
 
 quality_rules:
   - "Panda mascot must match the master character reference in every scene"
+  - "The panda never has a mouth — smooth unmarked muzzle only; never prompt 'closed mouth' or 'lips closed' for the panda"
   - "Customer must match the locked customer Element — never invent a new person"
   - "Both characters and the set share one 2D flat medium"
   - "Signature yellow is an accent, not a fill"
